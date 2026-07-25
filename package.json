@@ -1,6 +1,6 @@
 {
   "name": "frakio-work",
-  "version": "0.1.7-beta",
+  "version": "0.1.8",
   "private": true,
   "license": "MIT",
   "description": "Frakio Work — an open-source multi-agent workspace for Hermes Agent.",
@@ -31,6 +31,7 @@
     "test:smoke": "node scripts/smoke-api.mjs",
     "test:e2e:release": "node scripts/e2e-release.mjs",
     "test:e2e:launch": "node scripts/e2e-launch.mjs",
+    "test:e2e:mode-control": "node scripts/e2e-mode-control.mjs",
     "assets:build": "node scripts/build-icon.mjs",
     "notices:generate": "node scripts/generate-third-party-notices.mjs",
     "prepare-runtime": "node scripts/prepare-runtime.mjs",
@@ -40,6 +41,7 @@
     "desktop:pack": "npm run assets:build && npm run prepare-runtime && npm run build && electron-builder --dir --publish never",
     "desktop:dist:mac": "npm run assets:build && npm run prepare-runtime && npm run build && electron-builder --mac dmg zip --publish never",
     "desktop:dist:win": "npm run assets:build && npm run prepare-runtime && npm run build && electron-builder --win nsis --x64 --publish never",
+    "desktop:dist:win:arm64": "npm run assets:build && npm run prepare-runtime && npm run build && electron-builder --win nsis --arm64 --publish never",
     "clean": "node scripts/clean-generated.mjs",
     "desktop:clean": "node scripts/clean-generated.mjs"
   },
@@ -57,6 +59,11 @@
     "electron-builder": "^26.0.12",
     "playwright": "^1.61.1",
     "typescript": "^5.9.2"
+  },
+  "overrides": {
+    "brace-expansion": "5.0.8",
+    "postcss": "8.5.23",
+    "tar": "7.5.22"
   },
   "build": {
     "appId": "com.frakio.work",
@@ -103,9 +110,10 @@
       ]
     },
     "nsis": {
-      "oneClick": true,
+      "oneClick": false,
       "perMachine": false,
-      "allowElevation": false,
+      "allowElevation": true,
+      "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": "always",
       "createStartMenuShortcut": true
     }

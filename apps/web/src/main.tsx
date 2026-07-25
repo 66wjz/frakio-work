@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { AppUpdateStatus, Attachment } from '@frakio/contracts';
+import type { AppUpdateStatus, Attachment, RunActivityGroup, RunActivityItem, RunTranscript } from '@frakio/contracts';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { QRCodeSVG } from 'qrcode.react';
@@ -45,15 +45,20 @@ import {
   Image,
   Library,
   LoaderCircle,
+  Maximize2,
   MessageSquare,
   MoreHorizontal,
+  Minus,
   Network,
   PanelLeftClose,
   PanelLeftOpen,
   PanelRight,
   PanelRightOpen,
   Pencil,
+  Pin,
+  Pause,
   PauseCircle,
+  Play,
   Plus,
   RefreshCw,
   Search,
@@ -89,6 +94,7 @@ installLocalApiFetchGuard();
 declare global {
   interface Window {
     frakioDesktop?: {
+      platform?: string;
       restartService?: () => Promise<unknown>;
       openLogs?: () => Promise<unknown>;
       getLoginStartup?: () => Promise<unknown>;
@@ -182,7 +188,14 @@ type WorkspaceFileEntry = { name: string; relativePath: string; kind: 'file' | '
 type WorkspaceFileContent = { name: string; relativePath: string; mimeKind: 'markdown' | 'text' | 'json' | 'code' | 'pdf' | 'image' | 'binary'; content?: string; size: number; updatedAt?: string; truncated: boolean };
 type WorkflowStep = { title: string; status: 'pending' | 'running' | 'completed' | 'failed'; source?: 'run' | 'tool' | 'approval' | 'clarify' | 'simulation'; agentName?: string; detail?: string; updatedAt?: string; callId?: string };
 type FollowMode = 'default' | 'conversation';
-type ThreadCollaboration = { kind: string; activeAgentId?: string | null; lastMentionedAgentId?: string | null; lastMentionedAgentName?: string; maxMentionDepth?: number | 'unlimited'; lastRoutedAt?: string | null; lastRouteReason?: string };
+type CollaborationPlanTask = { key: string; taskId?: string; title: string; description?: string; assigneeAgentId: string; expectedResult?: string; dependsOnKeys: string[]; cancelled?: boolean };
+type CollaborationPlan = { revision: number; goal?: string; summary?: string; tasks: CollaborationPlanTask[]; publishedAt?: string };
+type CollaborationWorkflowControl = { operationId: string; idempotencyKey: string; action: 'pause' | 'resume' | 'cancel' | ''; state: 'idle' | 'pausing' | 'paused' | 'resuming' | 'cancelling' | 'cancelled' | 'pause_failed'; affectedTaskIds: string[]; stoppedRuns: number; blockedTasks: number; preservedWaitingTasks: number; failedTaskIds: string[]; heldInterventionCount: number; startedAt: string | null; completedAt: string | null; error: string };
+type CollaborationWorkflow = { id: string; name: string; boardSlug: string; status: 'active' | 'paused' | 'completed' | 'cancelled' | 'archived'; coordinatorAgentId: string; fallbackDecisionAgentId: string; rootTaskIds: string[]; currentRootTaskId?: string; planRevision?: number; plan?: CollaborationPlan | null; interventionQueue?: Array<{ id: string; status: string }>; control?: CollaborationWorkflowControl; capability?: { status: string; protocolVersion?: number; error?: string }; createdAt: string; updatedAt: string; completedAt?: string | null; pausedAt?: string | null; cancelledAt?: string | null; archivedAt?: string | null };
+type CollaborationEvent = { id: string; cursor: number; type: string; workflowId: string; taskId?: string; actorAgentId?: string; title: string; detail?: string; payload?: Record<string, any>; createdAt: string };
+type CollaborationWorkflowSnapshot = CollaborationWorkflow & { tasks: KanbanTask[]; error?: string };
+type CollaborationSnapshot = { threadId: string; mode?: 'chat' | 'work'; workerOutputMode?: 'summary' | 'all'; activeWorkflowId: string; cursor: number; workflows: CollaborationWorkflowSnapshot[]; events: CollaborationEvent[]; fallbackDecisionAgentId: string };
+type ThreadCollaboration = { kind: string; activeAgentId?: string | null; lastMentionedAgentId?: string | null; lastMentionedAgentName?: string; maxMentionDepth?: number | 'unlimited'; lastRoutedAt?: string | null; lastRouteReason?: string; workflows?: CollaborationWorkflow[]; activeWorkflowId?: string; eventCursor?: number; events?: CollaborationEvent[] };
 type ContextPacket = {
   title: string;
   conversation: { userIntent: string; activeAgents: string[]; currentConclusion: string };
@@ -200,6 +213,8 @@ type Thread = {
   spaceId?: string | null;
   workspaceId: string | null;
   mode: ThreadMode;
+  executionMode?: 'chat' | 'work';
+  workerOutputMode?: 'summary' | 'all';
   primaryAgentId: string | null;
   defaultAgentId?: string | null;
   activeAgentId?: string | null;
@@ -213,6 +228,7 @@ type Thread = {
   updatedAt: string;
   workflow: string[];
   workflowState?: WorkflowStep[];
+  runTranscripts?: RunTranscript[];
   proposals: Proposal[];
   artifacts?: WorkArtifact[];
   contextPacket: ContextPacket | null;
@@ -224,12 +240,82 @@ type Thread = {
   archivedAt?: string | null;
   pinnedAt?: string | null;
 };
-type ThreadSummary = { id: string; spaceId?: string | null; workspaceId: string | null; workspaceRootPath?: string; title: string; mode: ThreadMode; primaryAgentId: string | null; primaryAgentName?: string; defaultAgentId?: string | null; activeAgentId?: string | null; participantAgentIds: string[]; followMode?: FollowMode; permissionMode?: PermissionMode; agentModelOverrides?: AgentModelOverrides; agentRunOverrides?: AgentRunOverrides; vaultId: string | null; vaultName: string; updatedAt: string; preview: string; engine?: 'simulate' | 'hermes-studio' | 'model-provider' | 'workspace-group' | 'hermes-agent'; artifactCount?: number; lastArtifactName?: string; runStatus?: 'idle' | 'running' | 'failed'; archivedAt?: string | null; pinnedAt?: string | null };
+type ThreadSummary = { id: string; spaceId?: string | null; workspaceId: string | null; workspaceRootPath?: string; title: string; mode: ThreadMode; executionMode?: 'chat' | 'work'; workerOutputMode?: 'summary' | 'all'; primaryAgentId: string | null; primaryAgentName?: string; defaultAgentId?: string | null; activeAgentId?: string | null; participantAgentIds: string[]; followMode?: FollowMode; permissionMode?: PermissionMode; agentModelOverrides?: AgentModelOverrides; agentRunOverrides?: AgentRunOverrides; vaultId: string | null; vaultName: string; updatedAt: string; preview: string; engine?: 'simulate' | 'hermes-studio' | 'model-provider' | 'workspace-group' | 'hermes-agent'; artifactCount?: number; lastArtifactName?: string; runStatus?: 'idle' | 'running' | 'failed'; archivedAt?: string | null; pinnedAt?: string | null };
 type CompletedRunSummary = { threadId: string; beforeMessageId: string | null; elapsedSeconds: number };
 type ActiveHermesRun = { runId: string; sessionId: string; threadId: string };
-type HermesRunTool = { id: string; tool: string; label: string; status: 'running' | 'completed' | 'failed'; duration?: number; toolName?: string; skillName?: string; title?: string; detail?: string; paths?: string[]; fileCount?: number; argsPreview?: string; resultPreview?: string; updatedAt?: string };
 type HermesRunApproval = { id?: string; title: string; command: string; cwd?: string; tool?: string };
 type HermesRunClarification = { id: string; question: string; choices: string[]; timeoutMs?: number };
+type RunUiState = {
+  isRunning: boolean;
+  startedAt: number | null;
+  target: ChatRunTarget | null;
+  activeRun: ActiveHermesRun | null;
+  draft: string;
+  activityGroups: RunActivityGroup[];
+  approval: HermesRunApproval | null;
+  approvalSubmitting: boolean;
+  approvalError: string;
+  clarification: HermesRunClarification | null;
+  clarificationSubmitting: boolean;
+  clarificationError: string;
+  error: string;
+  stopping: boolean;
+  completedSummary: CompletedRunSummary | null;
+};
+
+function createRunUiState(overrides: Partial<RunUiState> = {}): RunUiState {
+  return {
+    isRunning: false,
+    startedAt: null,
+    target: null,
+    activeRun: null,
+    draft: '',
+    activityGroups: [],
+    approval: null,
+    approvalSubmitting: false,
+    approvalError: '',
+    clarification: null,
+    clarificationSubmitting: false,
+    clarificationError: '',
+    error: '',
+    stopping: false,
+    completedSummary: null,
+    ...overrides,
+  };
+}
+
+function mergeRunActivityEvent(groups: RunActivityGroup[], data: any): RunActivityGroup[] {
+  const activity = data.activity as RunActivityItem | undefined;
+  if (!activity?.id) return groups;
+  const groupId = String(data.groupId || `activity:${data.contentOffset || 0}`);
+  const existingGroupIndex = groups.findIndex((group) => group.id === groupId || group.items.some((item) => item.id === activity.id));
+  if (existingGroupIndex < 0) {
+    return [...groups, {
+      id: groupId,
+      contentOffset: Math.max(0, Number(data.contentOffset || 0)),
+      status: data.groupStatus || activity.status,
+      summary: String(data.groupSummary || activity.activeLabel || '正在执行操作'),
+      items: [activity],
+      createdAt: activity.createdAt,
+      updatedAt: activity.updatedAt,
+    }];
+  }
+  return groups.map((group, groupIndex) => {
+    if (groupIndex !== existingGroupIndex) return group;
+    const itemIndex = group.items.findIndex((item) => item.id === activity.id);
+    const items = itemIndex < 0
+      ? [...group.items, activity]
+      : group.items.map((item, index) => index === itemIndex ? { ...item, ...activity } : item);
+    return {
+      ...group,
+      contentOffset: Number.isFinite(Number(data.contentOffset)) ? Number(data.contentOffset) : group.contentOffset,
+      status: data.groupStatus || (items.some((item) => item.status === 'failed') ? 'failed' : items.some((item) => item.status === 'running') ? 'running' : 'completed'),
+      summary: String(data.groupSummary || group.summary),
+      items,
+      updatedAt: activity.updatedAt,
+    };
+  });
+}
 type SpaceGradientColor = { id: string; color: string; x: number; y: number; isPrimary?: boolean };
 type ThemeHarmony = 'floating' | 'singleAnalogous' | 'complementary' | 'splitComplementary' | 'analogous' | 'triadic';
 type ThemePreset = { id: string; page: number; colors: string[]; point: { x: number; y: number }; harmony: ThemeHarmony; type?: 'color' | 'grayscale' };
@@ -241,6 +327,7 @@ type Space = { id: string; name: string; iconKind: SpaceIconKind; iconValue: str
 type Workspace = { id: string; spaceId?: string | null; name: string; rootPath: string; vaultId: string | null; environment: 'local'; activeThreadId: string | null; createdAt: string; updatedAt: string; archivedAt?: string | null; pinnedAt?: string | null; activeThread?: ThreadSummary | null; threads?: ThreadSummary[] };
 type PinnedNav = Record<string, boolean>;
 type RailConfirm = { kind: 'thread' | 'workspace'; action: 'delete'; id: string; title: string; x: number; y: number } | null;
+type RenameDialogTarget = { kind: 'thread' | 'workspace'; id: string; title: string } | null;
 type RailContextMenuSource = { kind: 'thread'; thread: ThreadSummary } | { kind: 'workspace'; workspace: Workspace } | { kind: 'space'; space: Space };
 type RailContextMenuRect = { left: number; top: number; right: number; bottom: number; width: number; height: number };
 type RailContextMenuTarget = RailContextMenuSource & { x: number; y: number; anchorRect?: RailContextMenuRect; sidebarRect?: RailContextMenuRect };
@@ -253,6 +340,7 @@ type WorkbenchUiSettings = {
   defaultProfile?: string;
   defaultModel?: string;
   defaultAgentId?: string;
+  fallbackDecisionAgentId?: string;
   newChatPrompt?: string;
   sendKey?: 'enter' | 'mod-enter';
   density?: 'comfortable' | 'compact';
@@ -653,6 +741,8 @@ const spaceIconLabels: Record<string, string> = {
 
 function App() {
   const isDesktopShell = Boolean(window.frakioDesktop);
+  const desktopPlatform = window.frakioDesktop?.platform || '';
+  const isWindowsDesktop = desktopPlatform === 'win32';
   const canSelectFolder = Boolean(window.frakioDesktop?.selectFolder);
   const [activeNav, setActiveNav] = useState('council');
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -690,6 +780,7 @@ function App() {
   const [newChatRunOverride, setNewChatRunOverride] = useState<AgentRunOverride>({});
   const [newChatAgentPickerOpen, setNewChatAgentPickerOpen] = useState(false);
   const [newChatPermissionMode, setNewChatPermissionMode] = useState<PermissionMode>('manual');
+  const [newChatExecutionMode, setNewChatExecutionMode] = useState<'chat' | 'work'>('chat');
   const [selectedNewChatWorkspaceId, setSelectedNewChatWorkspaceId] = useState<string | null>(null);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
@@ -720,6 +811,7 @@ function App() {
   const [projectParentPath, setProjectParentPath] = useState(defaultProjectParentPath);
   const [projectError, setProjectError] = useState('');
   const [railConfirm, setRailConfirm] = useState<RailConfirm>(null);
+  const [renameDialogTarget, setRenameDialogTarget] = useState<RenameDialogTarget>(null);
   const [railContextMenu, setRailContextMenu] = useState<RailContextMenuTarget | null>(null);
   const [archivedThreads, setArchivedThreads] = useState<ThreadSummary[]>([]);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
@@ -735,7 +827,7 @@ function App() {
   const [pinnedNav, setPinnedNav] = useState<PinnedNav>(() => Object.fromEntries(railNavItems.map((item) => [item.id, true])));
   const [userProfile, setUserProfile] = useState<UserProfile>({ avatarUrl: '', nickname: '', bio: '', age: '', hobbies: '', occupation: '', defaultAgentAddress: '', otherAgentAddress: '', completedAt: '', updatedAt: '' });
   const [userProfileLoaded, setUserProfileLoaded] = useState(false);
-  const [uiSettings, setUiSettings] = useState<WorkbenchUiSettings>({ sendKey: 'enter', density: 'comfortable', streamingResponses: true, showReasoning: true, defaultAgentId: '', defaultPermissionMode: 'manual', contextTriggerTokens: 500000, groupChatTriggerTokens: 100000, historyTailMessages: 10, agentMentionMaxDepth: 2 });
+  const [uiSettings, setUiSettings] = useState<WorkbenchUiSettings>({ sendKey: 'enter', density: 'comfortable', streamingResponses: true, showReasoning: true, defaultAgentId: '', fallbackDecisionAgentId: '', defaultPermissionMode: 'manual', contextTriggerTokens: 500000, groupChatTriggerTokens: 100000, historyTailMessages: 10, agentMentionMaxDepth: 2 });
   const [telemetryStatus, setTelemetryStatus] = useState<TelemetryStatus | null>(null);
   const [showTelemetryNotice, setShowTelemetryNotice] = useState(false);
   const [hermesStatus, setHermesStatus] = useState<HermesLocalStatus | null>(null);
@@ -753,22 +845,12 @@ function App() {
   const [vaultError, setVaultError] = useState('');
   const [vaultBusy, setVaultBusy] = useState<Record<string, 'index' | 'delete'>>({});
   const [modelError, setModelError] = useState('');
-  const [isRunning, setIsRunning] = useState(false);
-  const [runStartedAt, setRunStartedAt] = useState<number | null>(null);
-  const [runTarget, setRunTarget] = useState<ChatRunTarget | null>(null);
+  const [runUiByThreadId, setRunUiByThreadId] = useState<Record<string, RunUiState>>({});
+  const [newChatStarting, setNewChatStarting] = useState(false);
   const [runTick, setRunTick] = useState(0);
-  const [activeHermesRun, setActiveHermesRun] = useState<ActiveHermesRun | null>(null);
-  const [runDraft, setRunDraft] = useState('');
-  const [runTools, setRunTools] = useState<HermesRunTool[]>([]);
-  const [runApproval, setRunApproval] = useState<HermesRunApproval | null>(null);
-  const [approvalSubmitting, setApprovalSubmitting] = useState(false);
-  const [approvalError, setApprovalError] = useState('');
-  const [runClarification, setRunClarification] = useState<HermesRunClarification | null>(null);
-  const [clarificationSubmitting, setClarificationSubmitting] = useState(false);
-  const [clarificationError, setClarificationError] = useState('');
-  const [runError, setRunError] = useState('');
-  const [runStopping, setRunStopping] = useState(false);
-  const [completedRunSummary, setCompletedRunSummary] = useState<CompletedRunSummary | null>(null);
+  const [workflowControlInProgress, setWorkflowControlInProgress] = useState(false);
+  const [modeSwitching, setModeSwitching] = useState(false);
+  const [collaborationModeError, setCollaborationModeError] = useState<{ message: string; code?: string; details?: Record<string, any> } | null>(null);
   const [animatedMessageContent, setAnimatedMessageContent] = useState<Record<string, string>>({});
   const [streamingMessageIds, setStreamingMessageIds] = useState<Record<string, boolean>>({});
   const [newAgentOpen, setNewAgentOpen] = useState(false);
@@ -784,6 +866,56 @@ function App() {
   const launchStartedAtRef = useRef(Date.now());
   const launchTimersRef = useRef<number[]>([]);
   const firstUseGuideAutoStartedRef = useRef(false);
+  const activeRunUi = activeThread?.id ? runUiByThreadId[activeThread.id] : null;
+  const isRunning = Boolean(activeRunUi?.isRunning);
+  const runStartedAt = activeRunUi?.startedAt || null;
+  const runTarget = activeRunUi?.target || null;
+  const activeHermesRun = activeRunUi?.activeRun || null;
+  const runDraft = activeRunUi?.draft || '';
+  const runActivityGroups = activeRunUi?.activityGroups || [];
+  const runApproval = activeRunUi?.approval || null;
+  const approvalSubmitting = Boolean(activeRunUi?.approvalSubmitting);
+  const approvalError = activeRunUi?.approvalError || '';
+  const runClarification = activeRunUi?.clarification || null;
+  const clarificationSubmitting = Boolean(activeRunUi?.clarificationSubmitting);
+  const clarificationError = activeRunUi?.clarificationError || '';
+  const runError = activeRunUi?.error || '';
+  const runStopping = Boolean(activeRunUi?.stopping);
+
+  function updateRunUi(threadId: string, update: Partial<RunUiState> | ((current: RunUiState) => RunUiState)) {
+    if (!threadId) return;
+    setRunUiByThreadId((current) => {
+      const previous = current[threadId] || createRunUiState();
+      const next = typeof update === 'function' ? update(previous) : { ...previous, ...update };
+      return { ...current, [threadId]: next };
+    });
+  }
+
+  function resetRunUi(threadId: string, overrides: Partial<RunUiState> = {}) {
+    updateRunUi(threadId, createRunUiState(overrides));
+  }
+
+  useEffect(() => {
+    const threadId = activeThread?.id;
+    if (!threadId) return undefined;
+    const refresh = (event: Event) => {
+      const requestedThreadId = (event as CustomEvent<{ threadId?: string }>).detail?.threadId;
+      if (requestedThreadId && requestedThreadId !== threadId) return;
+      void requestJson<{ thread: Thread }>(`/api/threads/${threadId}`).then((data) => setActiveThread(data.thread)).catch(() => {});
+    };
+    window.addEventListener('frakio:thread-refresh-request', refresh);
+    return () => window.removeEventListener('frakio:thread-refresh-request', refresh);
+  }, [activeThread?.id]);
+
+  useEffect(() => {
+    const update = (event: Event) => {
+      const detail = (event as CustomEvent<{ threadId?: string; busy?: boolean }>).detail;
+      if (detail?.threadId && detail.threadId !== activeThread?.id) return;
+      setWorkflowControlInProgress(Boolean(detail?.busy));
+    };
+    window.addEventListener('frakio:workflow-control-busy', update);
+    return () => window.removeEventListener('frakio:workflow-control-busy', update);
+  }, [activeThread?.id]);
 
   function isThreadNearLatest(root = threadScrollRef.current) {
     if (!root) return true;
@@ -884,10 +1016,10 @@ function App() {
     isRunning,
     runDraft,
     runError,
-    runTools,
+    runActivityGroups,
     animatedMessageContent,
     streamingMessageIds,
-    completedRunSummary,
+    activeRunUi?.completedSummary,
   ]);
 
   useEffect(() => {
@@ -1058,7 +1190,7 @@ function App() {
   const activeWorkspace = activeThread?.workspaceId ? workspaces.find((workspace) => workspace.id === activeThread.workspaceId) || null : null;
   const visibleMessages = (activeThread?.messages || []).filter(isVisibleChatMessage);
   const overviewRounds = buildThreadOverviewRounds(visibleMessages);
-  const activeCompletedRunSummary = completedRunSummary?.threadId === activeThread?.id ? completedRunSummary : null;
+  const activeCompletedRunSummary = activeRunUi?.completedSummary?.threadId === activeThread?.id ? activeRunUi?.completedSummary || null : null;
   const profileInspectorDirty = Boolean(profileInspector.target && profileInspector.draft !== profileInspector.original);
   const resourceRailAvailable = !spaceCreateOpen && activeView !== 'new-chat' && !isManagementSection && Boolean(activeThread);
   const rightRailKind: 'resources' | null = resourceRailAvailable ? 'resources' : null;
@@ -1187,6 +1319,7 @@ function App() {
       defaultProfile: stateData?.ui?.defaultProfile || stateData?.integrations?.hermesStudio?.selectedProfile || 'default',
       defaultModel: stateData?.ui?.defaultModel || '',
       defaultAgentId: stateData?.ui?.defaultAgentId || '',
+      fallbackDecisionAgentId: stateData?.ui?.fallbackDecisionAgentId || stateData?.ui?.defaultAgentId || '',
       newChatPrompt: stateData?.ui?.newChatPrompt || '我们接下来做点什么？',
       defaultPermissionMode: stateData?.ui?.defaultPermissionMode || 'manual',
       contextTriggerTokens: Number(stateData?.ui?.contextTriggerTokens || 500000),
@@ -2239,7 +2372,7 @@ function App() {
     }
   }
 
-  async function patchThread(threadId: string, payload: Record<string, unknown>) {
+  async function patchThread(threadId: string, payload: Record<string, unknown>, showError = true) {
     const res = await fetch(`/api/threads/${threadId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -2247,7 +2380,7 @@ function App() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      window.alert(data.error || '对话操作失败。');
+      if (showError) window.alert(data.error || '对话操作失败。');
       return null;
     }
     await refreshLeftRail();
@@ -2277,12 +2410,11 @@ function App() {
   }
 
   async function renameThread(thread: ThreadSummary) {
-    const title = window.prompt('重命名对话', thread.title)?.trim();
-    if (!title || title === thread.title) return;
-    await patchThread(thread.id, { title });
+    setRailConfirm(null);
+    setRenameDialogTarget({ kind: 'thread', id: thread.id, title: thread.title });
   }
 
-  async function patchWorkspace(workspaceId: string, payload: Record<string, unknown>) {
+  async function patchWorkspace(workspaceId: string, payload: Record<string, unknown>, showError = true) {
     const res = await fetch(`/api/workspaces/${workspaceId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -2290,7 +2422,7 @@ function App() {
     });
     const data = await res.json().catch(() => ({}));
     if (!res.ok) {
-      window.alert(data.error || '项目操作失败。');
+      if (showError) window.alert(data.error || '项目操作失败。');
       return null;
     }
     await refreshLeftRail();
@@ -2306,9 +2438,22 @@ function App() {
   }
 
   async function renameWorkspace(workspace: Workspace) {
-    const name = window.prompt('重命名项目', workspace.name)?.trim();
-    if (!name || name === workspace.name) return;
-    await patchWorkspace(workspace.id, { name });
+    setRailConfirm(null);
+    setRenameDialogTarget({ kind: 'workspace', id: workspace.id, title: workspace.name });
+  }
+
+  async function submitRenameDialog(value: string) {
+    const target = renameDialogTarget;
+    const title = value.trim();
+    if (!target || !title || title === target.title) {
+      setRenameDialogTarget(null);
+      return;
+    }
+    const renamed = target.kind === 'thread'
+      ? await patchThread(target.id, { title }, false)
+      : await patchWorkspace(target.id, { name: title }, false);
+    if (!renamed) throw new Error(`${target.kind === 'thread' ? '对话' : '项目'}重命名失败，请重试。`);
+    setRenameDialogTarget(null);
   }
 
   async function copyText(value: string) {
@@ -2436,22 +2581,8 @@ function App() {
     await submitConvertToProject(payload);
   }
 
-  function resetRunUi() {
-    setRunDraft('');
-    setRunTools([]);
-    setRunApproval(null);
-    setApprovalSubmitting(false);
-    setApprovalError('');
-    setRunClarification(null);
-    setClarificationSubmitting(false);
-    setClarificationError('');
-    setRunError('');
-    setRunStopping(false);
-    setActiveHermesRun(null);
-  }
-
   async function runHermesAgentThread(threadId: string, text: string, selectedAgentsForRun: string[], startedAt: number, target: ChatRunTarget | null, runAttachments: Attachment[] = [], onAccepted?: () => void, relay?: { sourceAgentId: string; sourceAgentName: string; mentionDepth: number; parentMessageId: string; turnId: string }): Promise<Thread | null> {
-    resetRunUi();
+    resetRunUi(threadId, { isRunning: true, startedAt, target, completedSummary: null });
     const userDraftMessage: ChatEvent = { id: `local-user-${startedAt}`, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments };
     let completedThread: Thread | null = null;
     const appendMissingRunMessages = (thread: Thread, runId: string, assistantDraft = '') => {
@@ -2496,8 +2627,14 @@ function App() {
       throw new Error(formatHermesRuntimeError(created.error || 'Hermes Bridge run 创建失败。', target?.agent ? resolveHermesProfileNameForAgent(target.agent, localProfilesForComposer) : activeComposerProfileName, created.details));
     }
     onAccepted?.();
+    if (created.kind === 'steer') {
+      completedThread = created.thread as Thread;
+      if (completedThread) setActiveThread(completedThread);
+      updateRunUi(threadId, { draft: '', isRunning: false, activeRun: null });
+      return completedThread;
+    }
     const run = { runId: created.runId, sessionId: created.sessionId, threadId };
-    setActiveHermesRun(run);
+    updateRunUi(threadId, { activeRun: run });
     await new Promise<void>((resolve, reject) => {
       const params = new URLSearchParams({ sessionId: run.sessionId });
       const events = new EventSource(`/api/threads/${threadId}/runs/${run.runId}/events?${params.toString()}`);
@@ -2507,13 +2644,15 @@ function App() {
         if (settled) return;
         settled = true;
         events.close();
-        setRunApproval(null);
-        setApprovalSubmitting(false);
-        setApprovalError('');
-        setRunClarification(null);
-        setClarificationSubmitting(false);
-        setClarificationError('');
-        setRunStopping(false);
+        updateRunUi(threadId, {
+          approval: null,
+          approvalSubmitting: false,
+          approvalError: '',
+          clarification: null,
+          clarificationSubmitting: false,
+          clarificationError: '',
+          stopping: false,
+        });
         if (error) reject(error);
         else resolve();
       };
@@ -2526,93 +2665,58 @@ function App() {
         if (data.event === 'message.delta') {
           const delta = String(data.delta || '');
           streamedDraft += delta;
-          setRunDraft((current) => current + delta);
+          updateRunUi(threadId, (current) => ({ ...current, draft: current.draft + delta }));
           return;
         }
         if (data.event === 'tool.running') {
-          const idValue = data.callId || `${data.toolName || data.tool || 'tool'}:${data.title || data.label || data.argsPreview || ''}`;
-          setRunTools((current) => [
-            ...current.filter((item) => item.id !== idValue),
-            {
-              id: idValue,
-              tool: data.tool || data.toolName || 'tool',
-              label: data.title || data.label || data.toolName || data.tool || '正在调用工具',
-              status: 'running',
-              toolName: data.toolName || data.tool || '',
-              skillName: data.skillName || '',
-              title: data.title || data.label || '',
-              detail: data.detail || '',
-              paths: Array.isArray(data.paths) ? data.paths : [],
-              fileCount: data.fileCount,
-              argsPreview: data.argsPreview || '',
-              resultPreview: data.resultPreview || '',
-              updatedAt: data.updatedAt || new Date().toISOString(),
-            },
-          ]);
+          updateRunUi(threadId, (current) => ({ ...current, activityGroups: mergeRunActivityEvent(current.activityGroups, data) }));
           return;
         }
         if (data.event === 'tool.completed') {
-          setRunTools((current) => {
-            const idValue = data.callId || `${data.toolName || data.tool || 'tool'}:${data.title || data.label || data.argsPreview || ''}`;
-            const next = {
-              id: idValue,
-              tool: data.tool || data.toolName || 'tool',
-              label: data.title || data.label || data.toolName || data.tool || '工具调用完成',
-              status: data.error ? 'failed' as const : 'completed' as const,
-              duration: data.duration,
-              toolName: data.toolName || data.tool || '',
-              skillName: data.skillName || '',
-              title: data.title || data.label || '',
-              detail: data.detail || '',
-              paths: Array.isArray(data.paths) ? data.paths : [],
-              fileCount: data.fileCount,
-              argsPreview: data.argsPreview || '',
-              resultPreview: data.resultPreview || '',
-              updatedAt: data.updatedAt || new Date().toISOString(),
-            };
-            const index = current.findIndex((item) => item.id === idValue || (item.tool === next.tool && item.status === 'running'));
-            if (index < 0) return [...current, next];
-            return current.map((item, itemIndex) => itemIndex === index ? { ...item, ...next } : item);
-          });
+          updateRunUi(threadId, (current) => ({ ...current, activityGroups: mergeRunActivityEvent(current.activityGroups, data) }));
           return;
         }
         if (data.event === 'approval.request') {
-          setRunClarification(null);
-          setClarificationError('');
-          setClarificationSubmitting(false);
-          setRunApproval({ id: data.approvalId || data.approval_id || '', title: data.title || '需要确认', command: data.command || '', cwd: data.cwd || '', tool: data.tool || '' });
-          setApprovalError('');
-          setApprovalSubmitting(false);
+          updateRunUi(threadId, {
+            clarification: null,
+            clarificationError: '',
+            clarificationSubmitting: false,
+            approval: { id: data.approvalId || data.approval_id || '', title: data.title || '需要确认', command: data.command || '', cwd: data.cwd || '', tool: data.tool || '' },
+            approvalError: '',
+            approvalSubmitting: false,
+          });
           return;
         }
         if (data.event === 'clarify.request') {
-          setRunApproval(null);
-          setApprovalError('');
-          setApprovalSubmitting(false);
-          setRunClarification({
+          updateRunUi(threadId, {
+            approval: null,
+            approvalError: '',
+            approvalSubmitting: false,
+            clarification: {
             id: data.clarifyId || data.clarify_id || '',
             question: data.question || '需要你补充一个选择',
             choices: Array.isArray(data.choices) ? data.choices.map((choice: unknown) => String(choice)).filter(Boolean) : [],
             timeoutMs: Number(data.timeoutMs || data.timeout_ms || 0) || undefined,
+            },
+            clarificationError: '',
+            clarificationSubmitting: false,
           });
-          setClarificationError('');
-          setClarificationSubmitting(false);
           return;
         }
         if (data.event === 'clarify.responded') {
-          setRunClarification(null);
-          setClarificationError('');
-          setClarificationSubmitting(false);
+          updateRunUi(threadId, { clarification: null, clarificationError: '', clarificationSubmitting: false });
           return;
         }
         if (data.event === 'approval.responded') {
-          setRunApproval(null);
-          setApprovalError('');
-          setApprovalSubmitting(false);
+          updateRunUi(threadId, { approval: null, approvalError: '', approvalSubmitting: false });
           return;
         }
         if (data.event === 'run.completed') {
-          setRunTools((current) => current.map((item) => item.status === 'running' ? { ...item, status: 'completed' } : item));
+          updateRunUi(threadId, (current) => ({ ...current, activityGroups: current.activityGroups.map((group) => ({
+            ...group,
+            status: group.status === 'running' ? 'completed' : group.status,
+            items: group.items.map((item) => item.status === 'running' ? { ...item, status: 'completed' } : item),
+          })) }));
           if (data.thread) {
             const threadFromServer = data.thread as Thread;
             const hasAssistantResult = threadFromServer.messages.some((message) => (
@@ -2623,25 +2727,31 @@ function App() {
             ));
             const nextThread = appendMissingRunMessages(threadFromServer, run.runId, hasAssistantResult ? '' : streamedDraft);
             completedThread = nextThread;
-            setActiveThread(nextThread);
+            setActiveThread((current) => current?.id === nextThread.id ? nextThread : current);
             const lastMessage = nextThread.messages.filter(isVisibleChatMessage).at(-1);
-            setCompletedRunSummary({
+            updateRunUi(threadId, {
+              completedSummary: {
               threadId: nextThread.id,
               beforeMessageId: lastMessage?.agentId === 'user' ? null : lastMessage?.id || null,
               elapsedSeconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
+              },
+              ...(hasAssistantResult || streamedDraft.trim() ? { draft: '' } : {}),
             });
-            if (hasAssistantResult || streamedDraft.trim()) setRunDraft('');
           }
           finish();
           return;
         }
         if (data.event === 'run.failed' || data.event === 'run.cancelled') {
           const formatted = formatHermesRuntimeError(data.error || (data.event === 'run.cancelled' ? '已停止。' : '运行失败。'), activeComposerProfileName, data.details);
-          setRunTools((current) => current.map((item) => item.status === 'running' ? { ...item, status: data.event === 'run.failed' ? 'failed' : 'completed' } : item));
-          setRunError(data.event === 'run.failed' ? formatted : '');
+          updateRunUi(threadId, (current) => ({ ...current, activityGroups: current.activityGroups.map((group) => ({
+            ...group,
+            status: group.status === 'running' ? (data.event === 'run.failed' ? 'failed' : 'cancelled') : group.status,
+            items: group.items.map((item) => item.status === 'running' ? { ...item, status: data.event === 'run.failed' ? 'failed' : 'cancelled' } : item),
+          })), error: data.event === 'run.failed' ? formatted : '' }));
           if (data.thread) {
-            setActiveThread(appendMissingRunMessages(data.thread as Thread, run.runId, streamedDraft));
-            if (streamedDraft.trim()) setRunDraft('');
+            const nextThread = appendMissingRunMessages(data.thread as Thread, run.runId, streamedDraft);
+            setActiveThread((current) => current?.id === nextThread.id ? nextThread : current);
+            if (streamedDraft.trim()) updateRunUi(threadId, { draft: '' });
           }
           finish(data.event === 'run.failed' ? new Error(formatted || 'Hermes Agent run failed') : undefined);
         }
@@ -2653,11 +2763,10 @@ function App() {
   async function approveActiveRun(choice: 'once' | 'session' | 'always' | 'deny') {
     if (!activeHermesRun) return;
     if (!runApproval?.id) {
-      setApprovalError('这次审批缺少 approval_id，请重新发起任务。');
+      updateRunUi(activeHermesRun.threadId, { approvalError: '这次审批缺少 approval_id，请重新发起任务。' });
       return;
     }
-    setApprovalSubmitting(true);
-    setApprovalError('');
+    updateRunUi(activeHermesRun.threadId, { approvalSubmitting: true, approvalError: '' });
     try {
       const res = await fetch(`/api/threads/${activeHermesRun.threadId}/runs/${activeHermesRun.runId}/approval`, {
         method: 'POST',
@@ -2666,31 +2775,30 @@ function App() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        setApprovalError(data.error || '审批响应失败。');
+        updateRunUi(activeHermesRun.threadId, { approvalError: data.error || '审批响应失败。' });
         return;
       }
       if (data.resolved === false) {
-        setApprovalError('这次审批已失效，请重新发起任务。');
+        updateRunUi(activeHermesRun.threadId, { approvalError: '这次审批已失效，请重新发起任务。' });
         return;
       }
-      setRunApproval(null);
+      updateRunUi(activeHermesRun.threadId, { approval: null });
     } finally {
-      setApprovalSubmitting(false);
+      updateRunUi(activeHermesRun.threadId, { approvalSubmitting: false });
     }
   }
 
   async function respondToActiveClarification(action: 'answer' | 'skip', response = '') {
     if (!activeHermesRun || !runClarification) return;
     if (!runClarification.id) {
-      setClarificationError('这次提问缺少 clarify_id，请重新发起任务。');
+      updateRunUi(activeHermesRun.threadId, { clarificationError: '这次提问缺少 clarify_id，请重新发起任务。' });
       return;
     }
     if (action === 'answer' && !response.trim()) {
-      setClarificationError('请输入回答。');
+      updateRunUi(activeHermesRun.threadId, { clarificationError: '请输入回答。' });
       return;
     }
-    setClarificationSubmitting(true);
-    setClarificationError('');
+    updateRunUi(activeHermesRun.threadId, { clarificationSubmitting: true, clarificationError: '' });
     try {
       const res = await fetch(`/api/threads/${activeHermesRun.threadId}/runs/${activeHermesRun.runId}/clarify`, {
         method: 'POST',
@@ -2699,19 +2807,18 @@ function App() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.resolved === false) {
-        setClarificationError(data.error || '这次提问已失效，请重新发起任务。');
+        updateRunUi(activeHermesRun.threadId, { clarificationError: data.error || '这次提问已失效，请重新发起任务。' });
         return;
       }
-      setRunClarification(null);
+      updateRunUi(activeHermesRun.threadId, { clarification: null });
     } finally {
-      setClarificationSubmitting(false);
+      updateRunUi(activeHermesRun.threadId, { clarificationSubmitting: false });
     }
   }
 
   async function stopActiveRun() {
     if (!activeHermesRun || runStopping) return;
-    setRunStopping(true);
-    setRunError('');
+    updateRunUi(activeHermesRun.threadId, { stopping: true, error: '' });
     try {
       const res = await fetch(`/api/threads/${activeHermesRun.threadId}/runs/${activeHermesRun.runId}/stop`, {
         method: 'POST',
@@ -2723,25 +2830,22 @@ function App() {
         throw new Error(data.error || '这次运行已经结束或无法停止');
       }
     } catch (error) {
-      setRunStopping(false);
-      setRunError(error instanceof Error ? error.message : '停止运行失败，请重试。');
+      updateRunUi(activeHermesRun.threadId, { stopping: false, error: error instanceof Error ? error.message : '停止运行失败，请重试。' });
     }
   }
 
   async function startNewChat() {
     const text = newChatInput.trim();
     const runAttachments = attachments.flatMap((item) => item.status === 'ready' && item.attachment ? [item.attachment] : []);
-    if (!newChatAgent || !newChatProfileModelValue || isRunning || attachments.some((item) => item.status !== 'ready') || (!text && !runAttachments.length)) return;
+    if (!newChatAgent || !newChatProfileModelValue || newChatStarting || attachments.some((item) => item.status !== 'ready') || (!text && !runAttachments.length)) return;
     const startedAt = Date.now();
     newChatInputRef.current = '';
     setNewChatInput('');
     setThreadFollowState(true);
-    setIsRunning(true);
-    setRunStartedAt(startedAt);
+    setNewChatStarting(true);
     const target = resolveRunTarget(text, agents, newChatAgent);
-    setRunTarget(target);
-    setCompletedRunSummary(null);
     let movedToThread = false;
+    let createdThreadId = '';
     try {
       const draftModelOverrides = newChatModelOverride && newChatAgent
         ? { [newChatAgent.id]: newChatModelOverride }
@@ -2750,18 +2854,29 @@ function App() {
         ? { [newChatAgent.id]: newChatRunOverride }
         : {};
       const titleSeed = text || runAttachments[0]?.name || '新的对话';
-      const created = selectedNewChatWorkspaceId
+      const requestId = typeof crypto.randomUUID === 'function' ? crypto.randomUUID() : `new-work-${Date.now()}`;
+      const createResponse = selectedNewChatWorkspaceId
         ? await fetch(`/api/workspaces/${selectedNewChatWorkspaceId}/threads`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: titleSeed.slice(0, 40), agentModelOverrides: draftModelOverrides, agentRunOverrides: draftRunOverrides }),
-        }).then((res) => res.json())
+          body: JSON.stringify({ title: titleSeed.slice(0, 40), agentModelOverrides: draftModelOverrides, agentRunOverrides: draftRunOverrides, executionMode: newChatExecutionMode, coordinatorAgentId: newChatAgent.id, requestId }),
+        })
         : await fetch('/api/conversations', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ primaryAgentId: newChatAgent.id, title: titleSeed.slice(0, 40), agentModelOverrides: draftModelOverrides, agentRunOverrides: draftRunOverrides, spaceId: activeSpaceId }),
-        }).then((res) => res.json());
+          body: JSON.stringify({ primaryAgentId: newChatAgent.id, title: titleSeed.slice(0, 40), agentModelOverrides: draftModelOverrides, agentRunOverrides: draftRunOverrides, spaceId: activeSpaceId, executionMode: newChatExecutionMode, coordinatorAgentId: newChatAgent.id, requestId }),
+        });
+      const created = await createResponse.json().catch(() => ({}));
+      if (!createResponse.ok) {
+        const failure = new Error(created.error || '新对话创建失败。') as Error & { code?: string; details?: Record<string, any> };
+        failure.code = created.code;
+        failure.details = created.details;
+        throw failure;
+      }
       const thread = created.thread as Thread;
+      createdThreadId = thread.id;
+      setCollaborationModeError(null);
+      if (created.snapshot) window.dispatchEvent(new CustomEvent('frakio:collaboration-snapshot', { detail: created.snapshot }));
       await patchThreadPermission(thread.id, newChatPermissionMode, newChatProfileName);
       const localUserMessage: ChatEvent = { id: `local-${Date.now()}`, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments };
       const optimisticThread = { ...thread, messages: [...thread.messages, localUserMessage] };
@@ -2772,7 +2887,9 @@ function App() {
       setNewChatRunOverride({});
       setActiveView('thread');
       setActiveThread(optimisticThread);
+      resetRunUi(thread.id, { isRunning: true, startedAt, target, completedSummary: null });
       movedToThread = true;
+      setNewChatStarting(false);
       const runAgents = thread.selectedAgents?.length ? thread.selectedAgents : [newChatAgent.id];
       let runAccepted = false;
       try {
@@ -2782,7 +2899,7 @@ function App() {
         });
       } catch (error) {
         if (!runAccepted) setInput((current) => current || text);
-        setRunError(error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。');
+        updateRunUi(thread.id, { error: error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。' });
         await refreshHermesRuntime();
       }
       await refreshLeftRail();
@@ -2795,14 +2912,16 @@ function App() {
           return restored;
         });
       }
-      setRunError(error instanceof Error ? error.message : '新对话创建失败。');
+      if (newChatExecutionMode === 'work') {
+        const failure = error as Error & { code?: string; details?: Record<string, any> };
+        setCollaborationModeError({ message: failure?.message || '协作运行时未准备好。', code: failure?.code, details: failure?.details });
+      } else {
+        window.alert(error instanceof Error ? error.message : '新对话创建失败。');
+      }
       await refreshHermesRuntime();
     } finally {
-      setIsRunning(false);
-      setRunStartedAt(null);
-      setRunTarget(null);
-      setRunStopping(false);
-      setActiveHermesRun(null);
+      setNewChatStarting(false);
+      if (movedToThread && createdThreadId) updateRunUi(createdThreadId, { isRunning: false, startedAt: null, target: null, stopping: false, activeRun: null });
     }
   }
 
@@ -2819,6 +2938,8 @@ function App() {
     setSelectedNewChatWorkspaceId(null);
     setProjectPickerOpen(false);
     setNewChatPermissionMode(uiSettings.defaultPermissionMode || 'manual');
+    setNewChatExecutionMode('chat');
+    setCollaborationModeError(null);
     void discardAttachmentDrafts();
   }
 
@@ -2890,6 +3011,34 @@ function App() {
       setActiveThread(previousThread);
       setHermesError(error instanceof Error ? error.message : '操作权限同步失败。');
       return;
+    }
+  }
+
+  async function updateThreadExecutionMode(mode: 'chat' | 'work') {
+    if (!activeThread || modeSwitching || (activeThread.executionMode || 'chat') === mode) return;
+    setModeSwitching(true);
+    setCollaborationModeError(null);
+    try {
+      const res = await fetch(`/api/threads/${activeThread.id}/mode`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ mode, agentId: activeComposerAgent?.id || activeThread.activeAgentId || activeThread.defaultAgentId }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) {
+        const failure = new Error(data.error || '模式切换失败。') as Error & { code?: string; details?: Record<string, any> };
+        failure.code = data.code;
+        failure.details = data.details;
+        throw failure;
+      }
+      setActiveThread(data.thread as Thread);
+      if (data.snapshot) window.dispatchEvent(new CustomEvent('frakio:collaboration-snapshot', { detail: data.snapshot }));
+      await refreshLeftRail();
+    } catch (error) {
+      const failure = error as Error & { code?: string; details?: Record<string, any> };
+      setCollaborationModeError({ message: failure?.message || '协作运行时未准备好。', code: failure?.code, details: failure?.details });
+    } finally {
+      setModeSwitching(false);
     }
   }
 
@@ -3059,13 +3208,11 @@ function App() {
     const runAttachments = attachments.flatMap((item) => item.status === 'ready' && item.attachment ? [item.attachment] : []);
     if (isRunning || !activeThread || attachments.some((item) => item.status !== 'ready') || (!text && !runAttachments.length)) return;
     const startedAt = Date.now();
+    const threadId = activeThread.id;
     setInput('');
     setThreadFollowState(true);
-    setIsRunning(true);
-    setRunStartedAt(startedAt);
     const target = resolveRunTarget(text, agents, activeComposerAgent);
-    setRunTarget(target);
-    setCompletedRunSummary(null);
+    resetRunUi(threadId, { isRunning: true, startedAt, target, completedSummary: null });
     const turnMentionMaxDepth = uiSettings.agentMentionMaxDepth === 'unlimited' ? 'unlimited' : Math.max(0, Math.floor(Number(uiSettings.agentMentionMaxDepth ?? 2)));
     const optimisticThread = {
       ...activeThread,
@@ -3077,10 +3224,13 @@ function App() {
       try {
         const turnId = `turn-${startedAt}`;
         let routedAgentIds = [...selectedAgentIds];
-        let routedThread = await runHermesAgentThread(activeThread.id, text, routedAgentIds, startedAt, target, runAttachments, () => {
+        let routedThread = await runHermesAgentThread(threadId, text, routedAgentIds, startedAt, target, runAttachments, () => {
           runAccepted = true;
           clearAttachmentDrafts();
         });
+        if ((activeThread.executionMode || 'chat') === 'work') {
+          if (routedThread) setActiveThread(routedThread);
+        } else {
         const initialMentionedAgents = resolveMentionedRunAgents(text, agents, routedAgentIds);
         let currentWave = routedThread ? [routedThread.messages.filter((message) => message.agentId !== 'user' && message.agentId !== 'system').at(-1)].filter(Boolean) as ChatEvent[] : [];
         let totalRoutedRuns = currentWave.length;
@@ -3089,8 +3239,8 @@ function App() {
         for (const mentionedAgent of initialMentionedAgents) {
           if (mentionedAgent.id === rootAgentId || totalRoutedRuns >= 64) continue;
           routedAgentIds = Array.from(new Set([...routedAgentIds, mentionedAgent.id]));
-          setRunTarget({ kind: 'agent', agent: mentionedAgent });
-          const nextThread = await runHermesAgentThread(activeThread.id, text, routedAgentIds, startedAt, { kind: 'agent', agent: mentionedAgent }, [], undefined, {
+          updateRunUi(threadId, { target: { kind: 'agent', agent: mentionedAgent } });
+          const nextThread = await runHermesAgentThread(threadId, text, routedAgentIds, startedAt, { kind: 'agent', agent: mentionedAgent }, [], undefined, {
             sourceAgentId: 'user', sourceAgentName: '你', mentionDepth: 0, parentMessageId: optimisticThread.messages.at(-1)?.id || '', turnId,
           });
           const reply = nextThread?.messages.filter((message) => message.agentId === mentionedAgent.id).at(-1);
@@ -3117,10 +3267,10 @@ function App() {
           for (const { agent: mentionedAgent, source } of nextTargets.values()) {
             if (totalRoutedRuns >= 64) break;
             routedAgentIds = Array.from(new Set([...routedAgentIds, mentionedAgent.id]));
-            setRunTarget({ kind: 'agent', agent: mentionedAgent });
+            updateRunUi(threadId, { target: { kind: 'agent', agent: mentionedAgent } });
             const routedText = stripAgentMentionTokens(source.content, mentionedAgent) || source.content;
             const relayText = `群聊系统：${source.agentName} 在对话中提及了你（${mentionedAgent.name}），请基于当前上下文直接回复。\n\n原始消息：${routedText}`;
-            const nextThread = await runHermesAgentThread(activeThread.id, relayText, routedAgentIds, startedAt, { kind: 'agent', agent: mentionedAgent }, [], undefined, {
+            const nextThread = await runHermesAgentThread(threadId, relayText, routedAgentIds, startedAt, { kind: 'agent', agent: mentionedAgent }, [], undefined, {
               sourceAgentId: source.agentId, sourceAgentName: source.agentName, mentionDepth, parentMessageId: source.id, turnId,
             });
             const reply = nextThread?.messages.filter((message) => message.agentId === mentionedAgent.id).at(-1);
@@ -3131,19 +3281,16 @@ function App() {
           currentWave = nextWave;
           mentionDepth += 1;
         }
+        }
       } catch (error) {
         if (!runAccepted) setInput((current) => current || text);
-        setRunError(error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。');
+        updateRunUi(threadId, { error: error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。' });
         await refreshHermesRuntime();
       }
       await refreshLeftRail();
       if (activeThread.mode === 'workspace' && activeThread.workspaceId) await loadThreads(activeThread.workspaceId, activeThread.id);
     } finally {
-      setIsRunning(false);
-      setRunStartedAt(null);
-      setRunTarget(null);
-      setRunStopping(false);
-      setActiveHermesRun(null);
+      updateRunUi(threadId, { isRunning: false, startedAt: null, target: null, stopping: false, activeRun: null });
     }
   }
 
@@ -3386,12 +3533,16 @@ function App() {
     messageRefs.current[targetRound.startMessageId]?.scrollIntoView({ behavior: 'smooth', block: 'center' });
   }
 
+  function requestWindowControl(action: 'close' | 'minimize' | 'zoom') {
+    void window.frakioDesktop?.windowControl?.(action);
+  }
+
   const cleanShell = launchPhase !== 'done' || showFirstUseGuide;
 
   return (
     <>
     {!cleanShell && (
-    <div className={`app ${isDesktopShell ? 'desktop-shell' : ''} ${['org', 'settings', 'models', 'channels', 'plugins', 'kanban', 'jobs', 'monitoring'].includes(activeNav) || activeView === 'new-chat' || spaceCreateOpen ? 'management-mode' : ''} ${isSettingsNav ? 'settings-mode' : ''} ${spaceCreateOpen ? 'workspace-create-mode' : ''} ${rightRailKind ? 'has-right-rail' : ''} ${rightRailOpen ? 'right-rail-open' : ''} ${activeView === 'new-chat' && !spaceCreateOpen ? 'new-chat-mode' : ''} ${libraryCollapsed ? 'library-collapsed' : ''} ${autoSidebarCollapsed && !spaceCreateOpen ? 'sidebar-auto-collapsed' : ''} ${(isDesktopShell || isSettingsNav) && effectiveSidebarCollapsed && !spaceCreateOpen ? 'sidebar-collapsed' : ''} ${uiSettings.density === 'compact' ? 'compact-density' : ''}`} style={appStyle}>
+    <div className={`app ${isDesktopShell ? 'desktop-shell' : ''} ${isWindowsDesktop ? 'windows-shell' : ''} ${['org', 'settings', 'models', 'channels', 'plugins', 'kanban', 'jobs', 'monitoring'].includes(activeNav) || activeView === 'new-chat' || spaceCreateOpen ? 'management-mode' : ''} ${isSettingsNav ? 'settings-mode' : ''} ${spaceCreateOpen ? 'workspace-create-mode' : ''} ${rightRailKind ? 'has-right-rail' : ''} ${rightRailOpen ? 'right-rail-open' : ''} ${activeView === 'new-chat' && !spaceCreateOpen ? 'new-chat-mode' : ''} ${libraryCollapsed ? 'library-collapsed' : ''} ${autoSidebarCollapsed && !spaceCreateOpen ? 'sidebar-auto-collapsed' : ''} ${(isDesktopShell || isSettingsNav) && effectiveSidebarCollapsed && !spaceCreateOpen ? 'sidebar-collapsed' : ''} ${uiSettings.density === 'compact' ? 'compact-density' : ''}`} style={appStyle}>
       {isDesktopShell && !isSettingsNav && (
         <>
           <div className="desktop-window-controls">
@@ -3408,14 +3559,27 @@ function App() {
             </button>
           </div>
           {rightRailKind && (
-            <button
+            <IconTooltipButton
               className={rightRailOpen ? 'desktop-window-control desktop-right-rail-toggle active' : 'desktop-window-control desktop-right-rail-toggle'}
               onClick={() => void persistUi({ libraryCollapsed: rightRailOpen })}
-              aria-label={rightRailOpen ? '收起资源' : '展开资源'}
-              title={rightRailOpen ? '收起资源' : '展开资源'}
+              ariaLabel={rightRailOpen ? '收起资源' : '展开资源'}
+              tooltip={rightRailOpen ? '收起资源' : '展开资源'}
             >
               {rightRailOpen ? <PanelRightOpen size={15} /> : <PanelRight size={15} />}
-            </button>
+            </IconTooltipButton>
+          )}
+          {isWindowsDesktop && (
+            <div className="desktop-caption-controls" aria-label="窗口控制">
+              <button className="desktop-caption-button" type="button" onClick={() => requestWindowControl('minimize')} aria-label="最小化窗口" title="最小化">
+                <Minus size={15} />
+              </button>
+              <button className="desktop-caption-button" type="button" onClick={() => requestWindowControl('zoom')} aria-label="最大化窗口" title="最大化">
+                <Maximize2 size={13} />
+              </button>
+              <button className="desktop-caption-button close" type="button" onClick={() => requestWindowControl('close')} aria-label="关闭窗口" title="关闭">
+                <X size={15} />
+              </button>
+            </div>
           )}
         </>
       )}
@@ -3654,6 +3818,13 @@ function App() {
         />
       )}
       {railConfirm && <RailConfirmPopover target={railConfirm} onCancel={() => setRailConfirm(null)} onConfirm={() => confirmRailAction(railConfirm)} />}
+      {renameDialogTarget && (
+        <RenameDialog
+          target={renameDialogTarget}
+          onClose={() => setRenameDialogTarget(null)}
+          onSave={submitRenameDialog}
+        />
+      )}
       <ResizeHandle
         side="left"
         disabled={isDesktopShell && effectiveSidebarCollapsed}
@@ -3853,6 +4024,7 @@ function App() {
                     <button className="icon-btn composer-tool upload" onClick={() => fileInputRef.current?.click()} aria-label="上传附件" title="上传附件"><Plus size={19} /></button>
                     <input ref={fileInputRef} className="file-input" type="file" multiple accept={attachmentAcceptValue} onChange={(event) => handleAttachmentChange(event.target.files)} />
                     <PermissionModeControl value={newChatPermissionMode} onChange={setNewChatPermissionMode} />
+                    <ExecutionModeControl value={newChatExecutionMode} disabled={newChatStarting} onChange={(mode) => { setNewChatExecutionMode(mode); setCollaborationModeError(null); }} />
                   </div>
                   <div className="composer-right-tools">
                     <ProviderModelPicker
@@ -3871,16 +4043,19 @@ function App() {
                       onChange={updateNewChatModelOverride}
                     />
                     <ComposerRunButton
-                      isRunning={isRunning}
-                      hasActiveRun={Boolean(activeHermesRun)}
-                      isStopping={runStopping}
+                      isRunning={newChatStarting}
+                      hasActiveRun={false}
+                      isStopping={false}
                       canSend={Boolean(newChatAgent && newChatProfileModelValue) && attachments.every((item) => item.status === 'ready') && Boolean(newChatInput.trim() || attachments.length)}
                       onSend={() => void startNewChat()}
-                      onStop={() => void stopActiveRun()}
+                      onStop={() => undefined}
                     />
                   </div>
                 </div>
               </div>
+              {collaborationModeError && newChatExecutionMode === 'work' && (
+                <CollaborationRuntimeErrorCard error={collaborationModeError} loading={newChatStarting} onRetry={() => void startNewChat()} />
+              )}
               <div className="new-chat-project">
                 <button className="new-chat-project-row" onClick={() => setProjectPickerOpen((open) => !open)} aria-expanded={projectPickerOpen}>
                   <FolderOpen size={16} />
@@ -4017,8 +4192,9 @@ function App() {
             <section className="council">
               <div className="thread" ref={threadScrollRef}>
                 <div className="thread-content" ref={threadContentRef}>
-                {visibleMessages.map((message) => (
-                  <div
+                {visibleMessages.map((message) => {
+                  const transcript = activeThread?.runTranscripts?.find((item) => item.messageId === message.id || (message.externalRunId && item.runId === message.externalRunId));
+                  return <div
                     className="message-anchor"
                     data-message-id={message.id}
                     key={message.id}
@@ -4033,13 +4209,17 @@ function App() {
                         {message.agentId === 'user' ? (
                           message.content ? <p className="message-text">{message.content}</p> : null
                         ) : (
-                          <MarkdownMessage content={animatedMessageContent[message.id] ?? message.content} streaming={Boolean(streamingMessageIds[message.id])} />
+                          transcript?.groups.length
+                            ? <RunTranscriptContent content={animatedMessageContent[message.id] ?? message.content} groups={transcript.groups} streaming={Boolean(streamingMessageIds[message.id])} runFinished={transcript.status !== 'running'} />
+                            : <MarkdownMessage content={animatedMessageContent[message.id] ?? message.content} streaming={Boolean(streamingMessageIds[message.id])} />
                         )}
                       </div>
                       {message.agentId === 'user' && <MessageAvatar message={message} agents={agents} userProfile={userProfile} />}
                     </article>
-                  </div>
-                ))}
+                  </div>;
+                })}
+                <ChatCollaborationEvents thread={activeThread} />
+                {!isRunning && <PersistedInterruptedRuns thread={activeThread} agents={agents} />}
                 {activeCompletedRunSummary && !activeCompletedRunSummary.beforeMessageId && !isRunning && <CompletedRunStatus summary={activeCompletedRunSummary} />}
                 {isRunning && (
                   <ChatRunStatus
@@ -4047,6 +4227,7 @@ function App() {
                     startedAt={runStartedAt}
                     tick={runTick}
                     draft={runDraft}
+                    activityGroups={runActivityGroups}
                     error={runError}
                   />
                 )}
@@ -4087,6 +4268,7 @@ function App() {
                   >
                   <AttachmentTray attachments={attachments} notice={attachmentNotice} onRemove={removeAttachment} onRetry={retryAttachment} />
                   {attachmentDragActive && <div className="attachment-drop-overlay"><ArrowDownToLine size={22} /><strong>松开即可添加附件</strong></div>}
+                  {(activeThread?.executionMode || 'chat') === 'work' && <div className="work-mode-hint"><Briefcase size={14} /><span>{activeThread?.collaboration?.workflows?.some((workflow) => workflow.currentRootTaskId && workflow.status !== 'completed') ? '补充内容会交给协调 Agent 调整当前方案' : '发送任务后，协调 Agent 会拆解并发布执行方案'}</span></div>}
                   <MentionTextarea
                     value={input}
                     onChange={setInput}
@@ -4094,13 +4276,14 @@ function App() {
                     sendKey={uiSettings.sendKey || 'enter'}
                     agents={agents}
                     selectedAgentIds={selectedAgentIds}
-                    placeholder="随意输入，随意@"
+                    placeholder={(activeThread?.executionMode || 'chat') === 'work' ? '描述要完成的任务，首条消息可 @ 指定协调 Agent' : '随意输入，随意@'}
                   />
 	                  <div className="composer-toolbar">
 	                    <div className="composer-left-tools">
 	                      <button className="icon-btn composer-tool upload" onClick={() => fileInputRef.current?.click()} aria-label="上传附件" title="上传附件"><Plus size={19} /></button>
 	                      <input ref={fileInputRef} className="file-input" type="file" multiple accept={attachmentAcceptValue} onChange={(event) => handleAttachmentChange(event.target.files)} />
 	                      <PermissionModeControl value={permissionMode} onChange={(mode) => void updateThreadPermissionMode(mode)} />
+	                      <ExecutionModeControl value={activeThread?.executionMode || 'chat'} disabled={isRunning} switching={modeSwitching} onChange={(mode) => void updateThreadExecutionMode(mode)} />
 	                    </div>
 	                    <div className="composer-right-tools">
 	                      <ProviderModelPicker
@@ -4122,7 +4305,8 @@ function App() {
 	                        isRunning={isRunning}
 	                        hasActiveRun={Boolean(activeHermesRun)}
 	                        isStopping={runStopping}
-	                        canSend={attachments.every((item) => item.status === 'ready') && Boolean(input.trim() || attachments.length)}
+	                        canSend={!workflowControlInProgress && attachments.every((item) => item.status === 'ready') && Boolean(input.trim() || attachments.length)}
+	                        runningLabel={(activeThread?.executionMode || 'chat') === 'work' ? '停止当前协调运行，不会暂停全部任务' : undefined}
 	                        onSend={() => void sendMessage()}
 	                        onStop={() => void stopActiveRun()}
 	                      />
@@ -4144,8 +4328,8 @@ function App() {
             onResize={setContextWidth}
             onCommit={(width) => void persistUi({ contextWidth: width })}
           />
-          <aside className="context">
-            <CodexResourcePanel
+          <aside className="context" aria-hidden={!rightRailOpen}>
+            <CollaborationContextPanel
             contextPacket={activeThread?.contextPacket || null}
             proposals={activeThread?.proposals || []}
             workspaceArtifacts={workspaceArtifacts}
@@ -4153,11 +4337,14 @@ function App() {
             agents={agents}
             workspace={activeWorkspace}
             isRunning={isRunning}
-            runTools={runTools}
             runApproval={runApproval}
             runClarification={runClarification}
             runError={runError}
             runDraft={runDraft}
+            fallbackDecisionAgentId={uiSettings.fallbackDecisionAgentId || globalDefaultAgentId}
+            collaborationModeError={collaborationModeError}
+            collaborationModeLoading={modeSwitching}
+            onRetryCollaboration={() => void updateThreadExecutionMode('work')}
             />
           </aside>
         </>
@@ -4354,7 +4541,12 @@ async function requestJson<T>(url: string, options: RequestInit = {}): Promise<T
     headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
   });
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(data.error || data?.error?.message || '请求失败');
+  if (!res.ok) {
+    const error = new Error(data.error || data?.error?.message || '请求失败') as Error & { code?: string; details?: Record<string, any> };
+    error.code = data.code;
+    error.details = data.details;
+    throw error;
+  }
   return data as T;
 }
 
@@ -5242,6 +5434,9 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
   const [error, setError] = useState('');
   const [boardMenuOpen, setBoardMenuOpen] = useState(false);
   const [boardComposerOpen, setBoardComposerOpen] = useState(false);
+  const [selectedTask, setSelectedTask] = useState<KanbanTask | null>(null);
+  const [taskDetail, setTaskDetail] = useState<any>(null);
+  const [taskComment, setTaskComment] = useState('');
   const boardMenuRef = useRef<HTMLDivElement | null>(null);
 
   async function loadBoards() {
@@ -5253,9 +5448,9 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
     }
   }
 
-  async function loadTasks(nextBoard = board) {
-    setLoading(true);
-    setError('');
+  async function loadTasks(nextBoard = board, silent = false) {
+    if (!silent) setLoading(true);
+    if (!silent) setError('');
     try {
       const [taskData, statsData] = await Promise.all([
         requestJson<{ tasks: KanbanTask[] }>(`/api/hermes/kanban/tasks?board=${encodeURIComponent(nextBoard)}&includeArchived=true`),
@@ -5265,9 +5460,9 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
       setTasks(data.tasks || []);
       setStats(statsData.stats || {});
     } catch (err: any) {
-      setError(err.message || '任务读取失败');
+      if (!silent) setError(err.message || '任务读取失败');
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
@@ -5277,7 +5472,19 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
 
   useEffect(() => {
     void loadTasks(board);
+    const timer = window.setInterval(() => void loadTasks(board, true), 2000);
+    return () => window.clearInterval(timer);
   }, [board]);
+
+  useEffect(() => {
+    if (!selectedTask) {
+      setTaskDetail(null);
+      return;
+    }
+    void requestJson<{ detail: any }>(`/api/hermes/kanban/tasks/${encodeURIComponent(selectedTask.id)}?board=${encodeURIComponent(board)}`)
+      .then((data) => setTaskDetail(data.detail))
+      .catch((err) => setError(err.message || '任务详情读取失败'));
+  }, [selectedTask?.id, board]);
 
   useEffect(() => {
     if (!boardMenuOpen) return undefined;
@@ -5301,6 +5508,21 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
   async function setTaskStatus(task: KanbanTask, status: KanbanTaskStatus) {
     await requestJson(`/api/hermes/kanban/tasks/${encodeURIComponent(task.id)}?board=${encodeURIComponent(board)}`, { method: 'PATCH', body: JSON.stringify({ board, status }) });
     await Promise.all([loadBoards(), loadTasks(board)]);
+  }
+
+  async function addTaskComment() {
+    if (!selectedTask || !taskComment.trim()) return;
+    await requestJson(`/api/hermes/kanban/tasks/${encodeURIComponent(selectedTask.id)}/comments`, { method: 'POST', body: JSON.stringify({ board, body: taskComment.trim(), author: 'user' }) });
+    setTaskComment('');
+    const data = await requestJson<{ detail: any }>(`/api/hermes/kanban/tasks/${encodeURIComponent(selectedTask.id)}?board=${encodeURIComponent(board)}`);
+    setTaskDetail(data.detail);
+  }
+
+  async function archiveCurrentBoard() {
+    if (board === 'default') return;
+    await requestJson(`/api/hermes/kanban/boards/${encodeURIComponent(board)}`, { method: 'DELETE' });
+    setBoard('default');
+    await loadBoards();
   }
 
   const grouped = Object.fromEntries(kanbanStatusOrder.map((status) => [status, tasks.filter((task) => task.status === status)])) as Record<KanbanTaskStatus, KanbanTask[]>;
@@ -5345,6 +5567,7 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
             )}
           </div>
           <button className="send-btn kanban-new-board" onClick={() => setBoardComposerOpen((open) => !open)} aria-label="新建看板" title="新建看板"><Plus size={15} /> 新建看板</button>
+          {board !== 'default' && <button className="secondary-btn" onClick={() => void archiveCurrentBoard()}><Archive size={14} />归档看板</button>}
         </div>
       </div>
       {error && <div className="form-error">{error}</div>}
@@ -5365,15 +5588,15 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
             <section className={`kanban-column status-${status}`} key={status}>
               <header><strong><i />{kanbanStatusLabels[status]}</strong><span>{grouped[status].length}</span></header>
               {grouped[status].length ? grouped[status].map((task) => (
-                <article className="kanban-card" key={task.id}>
+                <article className="kanban-card" key={task.id} onClick={() => setSelectedTask(task)} role="button" tabIndex={0}>
                   <strong>{task.title}</strong>
                   <p>{task.body || task.result || '无说明'}</p>
                   <div className="kanban-card-meta"><span>{task.assignee || '未分配'}</span><span>P{task.priority ?? 0}</span></div>
                   <div className="kanban-actions">
-                    {task.status !== 'done' && <button onClick={() => void setTaskStatus(task, 'done')}>完成</button>}
-                    {task.status !== 'blocked' && <button onClick={() => void setTaskStatus(task, 'blocked')}>阻塞</button>}
-                    {task.status === 'blocked' && <button onClick={() => void setTaskStatus(task, 'ready')}>恢复</button>}
-                    {task.status !== 'archived' && <button onClick={() => void setTaskStatus(task, 'archived')}>归档</button>}
+                    {task.status !== 'done' && <button onClick={(event) => { event.stopPropagation(); void setTaskStatus(task, 'done'); }}>完成</button>}
+                    {task.status !== 'blocked' && <button onClick={(event) => { event.stopPropagation(); void setTaskStatus(task, 'blocked'); }}>阻塞</button>}
+                    {task.status === 'blocked' && <button onClick={(event) => { event.stopPropagation(); void setTaskStatus(task, 'ready'); }}>恢复</button>}
+                    {task.status !== 'archived' && <button onClick={(event) => { event.stopPropagation(); void setTaskStatus(task, 'archived'); }}>归档</button>}
                   </div>
                 </article>
               )) : <div className="kanban-empty">暂无任务</div>}
@@ -5381,6 +5604,18 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
           ))}
         </div>
       )}
+      {selectedTask && createPortal(
+        <div className="modal-backdrop" onClick={() => setSelectedTask(null)}>
+          <div className="modal kanban-task-detail-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head"><div><h2>{selectedTask.title}</h2><p>{selectedTask.assignee || '未分配'} · {collaborationStatusLabel(selectedTask.status)}</p></div><button className="icon-btn" onClick={() => setSelectedTask(null)}><X size={18} /></button></div>
+            <div className="kanban-task-detail-body">
+              <section><h3>任务说明</h3><p>{selectedTask.body || taskDetail?.latest_summary || selectedTask.result || '暂无说明'}</p></section>
+              <section className="kanban-task-relations"><h3>任务关系</h3><span>父任务：{taskDetail?.parents?.join('、') || '无'}</span><span>子任务：{taskDetail?.children?.join('、') || '无'}</span></section>
+              <section><h3>运行历史</h3>{taskDetail?.runs?.length ? taskDetail.runs.slice(-8).reverse().map((run: any) => <div className="kanban-detail-row" key={run.id}><strong>{run.profile || 'worker'}</strong><span>{run.status} · {formatTime(run.started_at ? new Date(run.started_at * 1000).toISOString() : '')}</span><small>{run.summary || run.error || ''}</small></div>) : <div className="resource-empty">暂无运行记录</div>}</section>
+              <section><h3>评论与交付</h3>{taskDetail?.comments?.map((comment: any) => <div className="kanban-detail-row" key={comment.id || `${comment.author}:${comment.created_at}`}><strong>{comment.author}</strong><span>{formatTime(comment.created_at ? new Date(comment.created_at * 1000).toISOString() : '')}</span><small>{comment.body}</small></div>)}<div className="kanban-comment-composer"><input value={taskComment} onChange={(event) => setTaskComment(event.target.value)} placeholder="添加评论…" /><button className="send-btn" onClick={() => void addTaskComment()} disabled={!taskComment.trim()}>发送</button></div></section>
+            </div>
+          </div>
+        </div>, document.body)}
     </section>
   );
 }
@@ -5510,7 +5745,7 @@ function ThreadActionsMenu({ thread, workspace, vaults, activeVault, activeAgent
   );
 }
 
-function CodexResourcePanel({ contextPacket, proposals, workspaceArtifacts, thread, agents, workspace, isRunning, runTools, runApproval, runClarification, runError, runDraft }: {
+type ContextPanelProps = {
   contextPacket: ContextPacket | null;
   proposals: Proposal[];
   workspaceArtifacts: WorkArtifact[];
@@ -5518,19 +5753,512 @@ function CodexResourcePanel({ contextPacket, proposals, workspaceArtifacts, thre
   agents: Agent[];
   workspace: Workspace | null;
   isRunning: boolean;
-  runTools: HermesRunTool[];
   runApproval: HermesRunApproval | null;
   runClarification: HermesRunClarification | null;
   runError: string;
   runDraft: string;
+};
+
+function collaborationEventLabel(type: string) {
+  const labels: Record<string, string> = {
+    'workflow.created': '工作流已创建',
+    'workflow.completed': '工作流已完成',
+    'workflow.pause_started': '正在暂停全部任务',
+    'workflow.paused': '工作流已暂停',
+    'workflow.pause_failed': '暂停未完全生效',
+    'workflow.resume_started': '正在恢复全部任务',
+    'workflow.resumed': '工作流已恢复',
+    'workflow.cancelled': '协作已结束',
+    'workflow.archived': '工作流已归档',
+    'task.created': '任务已创建',
+    'task.started': '任务开始执行',
+    'task.waiting': '任务进入等待',
+    'task.resumed': '任务自动恢复',
+    'task.completed': '任务已完成',
+    'task.failed': '任务执行异常',
+    'dependency.created': '新增任务依赖',
+    'dependency.satisfied': '依赖已经满足',
+    'artifact.published': '交付物已发布',
+    'escalation.started': '阻塞已经升级',
+    'escalation.resolved': '阻塞已经解决',
+    'human.required': '需要人工介入',
+    'intervention.sent': '用户已经介入',
+    'mode.changed': '对话模式已切换',
+    'plan.published': '执行方案已发布',
+    'plan.revised': '执行方案已修订',
+    'capability.blocked': '协作工具未加载',
+  };
+  return labels[type] || type;
+}
+
+function collaborationStatusLabel(status: KanbanTaskStatus) {
+  return kanbanStatusLabels[status] || status;
+}
+
+function ChatCollaborationEvents({ thread }: { thread: Thread | null }) {
+  const [events, setEvents] = useState<CollaborationEvent[]>(thread?.collaboration?.events || []);
+  useEffect(() => {
+    setEvents(thread?.collaboration?.events || []);
+    if (!thread?.id) return undefined;
+    void requestJson<{ snapshot: CollaborationSnapshot }>(`/api/threads/${thread.id}/collaboration`)
+      .then((data) => setEvents(data.snapshot.events || []))
+      .catch(() => {});
+    const onSnapshot = (event: Event) => {
+      const snapshot = (event as CustomEvent<CollaborationSnapshot>).detail;
+      if (snapshot?.threadId === thread.id) setEvents(snapshot.events || []);
+    };
+    window.addEventListener('frakio:collaboration-snapshot', onSnapshot);
+    return () => window.removeEventListener('frakio:collaboration-snapshot', onSnapshot);
+  }, [thread?.id]);
+  if ((thread?.executionMode || 'chat') !== 'work') return null;
+  const highSignal = events.filter((event) => ['plan.published', 'plan.revised', 'workflow.paused', 'workflow.pause_failed', 'workflow.resumed', 'workflow.cancelled', 'task.waiting', 'task.resumed', 'task.completed', 'escalation.started', 'human.required', 'intervention.sent'].includes(event.type)).slice(-3);
+  if (!highSignal.length) return null;
+  return <div className="chat-collaboration-events">
+    {highSignal.map((event) => <div className={event.type === 'human.required' || event.type === 'task.waiting' || event.type === 'workflow.pause_failed' ? 'waiting' : event.type === 'workflow.paused' ? 'paused' : event.type === 'workflow.cancelled' ? 'cancelled' : ''} key={event.id}>
+      <span><Activity size={14} /></span>
+      <span><strong>{event.title || collaborationEventLabel(event.type)}</strong><small>{event.type.startsWith('plan.') ? `${event.payload?.taskCount || 0} 项任务 · ${(event.payload?.agentIds || []).length} 位 Agent${event.detail ? ` · ${event.detail}` : ''}` : event.detail || collaborationEventLabel(event.type)}</small></span>
+    </div>)}
+  </div>;
+}
+
+function IconTooltipButton({
+  active,
+  ariaLabel,
+  badge,
+  children,
+  className = '',
+  onClick,
+  tooltip,
+}: {
+  active?: boolean;
+  ariaLabel: string;
+  badge?: number;
+  children: React.ReactNode;
+  className?: string;
+  onClick: () => void;
+  tooltip: string;
 }) {
+  const buttonRef = useRef<HTMLButtonElement | null>(null);
+  const [tooltipPosition, setTooltipPosition] = useState<{ left: number; top: number } | null>(null);
+  const shown = Boolean(tooltipPosition);
+
+  const updateTooltipPosition = useCallback(() => {
+    const rect = buttonRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    setTooltipPosition({ left: rect.left + rect.width / 2, top: rect.bottom + 8 });
+  }, []);
+
+  useEffect(() => {
+    if (!shown) return undefined;
+    window.addEventListener('resize', updateTooltipPosition);
+    window.addEventListener('scroll', updateTooltipPosition, true);
+    return () => {
+      window.removeEventListener('resize', updateTooltipPosition);
+      window.removeEventListener('scroll', updateTooltipPosition, true);
+    };
+  }, [shown, updateTooltipPosition]);
+
+  return (
+    <>
+      <button
+        ref={buttonRef}
+        className={`${className}${active ? ' active' : ''}`}
+        onBlur={() => setTooltipPosition(null)}
+        onClick={onClick}
+        onFocus={updateTooltipPosition}
+        onMouseEnter={updateTooltipPosition}
+        onMouseLeave={() => setTooltipPosition(null)}
+        aria-label={ariaLabel}
+        type="button"
+      >
+        {children}
+        {badge ? <em>{badge}</em> : null}
+      </button>
+      {tooltipPosition && createPortal(
+        <div
+          className="icon-tooltip"
+          role="tooltip"
+          style={{ left: tooltipPosition.left, top: tooltipPosition.top }}
+        >
+          {tooltip}
+        </div>,
+        document.body,
+      )}
+    </>
+  );
+}
+
+function CollaborationRuntimeErrorCard({ error, loading, onRetry }: {
+  error: { message: string; code?: string; details?: Record<string, any> };
+  loading?: boolean;
+  onRetry: () => void;
+}) {
+  const details = error.details || {};
+  const detailLines = [
+    details.profileName ? `Profile：${details.profileName}` : '',
+    details.missingPythonPackages?.length ? `缺少运行库：${details.missingPythonPackages.join('、')}` : '',
+    details.missingTools?.length ? `缺少工具：${details.missingTools.join('、')}` : '',
+    ...Object.entries(details.connectionErrors || {}).map(([name, message]) => `${name}：${String(message)}`),
+  ].filter(Boolean);
+  return <div className="collaboration-runtime-error" role="alert">
+    <div><ShieldAlert size={18} /><span><strong>协作运行时未准备好</strong><small>{error.message}</small></span></div>
+    <button type="button" disabled={loading} onClick={onRetry}>{loading ? '正在加载' : '重新加载'}</button>
+    {(error.code || detailLines.length > 0) && <details><summary>技术详情</summary><pre>{[error.code || '', ...detailLines].filter(Boolean).join('\n')}</pre></details>}
+  </div>;
+}
+
+function CollaborationContextPanel(props: ContextPanelProps & {
+  fallbackDecisionAgentId: string;
+  collaborationModeError: { message: string; code?: string; details?: Record<string, any> } | null;
+  collaborationModeLoading: boolean;
+  onRetryCollaboration: () => void;
+}) {
+  const { thread, agents } = props;
+  const [panelTab, setPanelTab] = useState<'collaboration' | 'resources'>('collaboration');
+  const [view, setView] = useState<'relations' | 'activity'>('relations');
+  const [snapshot, setSnapshot] = useState<CollaborationSnapshot | null>(null);
+  const [selectedTaskId, setSelectedTaskId] = useState('');
+  const [taskDetail, setTaskDetail] = useState<any>(null);
+  const [error, setError] = useState('');
+  const [busy, setBusy] = useState('');
+  const [intervention, setIntervention] = useState('');
+  const [reassignAgentId, setReassignAgentId] = useState('');
+  const [overviewOpen, setOverviewOpen] = useState(false);
+  const [overview, setOverview] = useState<Array<CollaborationWorkflowSnapshot & { threadId: string; threadTitle: string }>>([]);
+  const [controlMenuOpen, setControlMenuOpen] = useState(false);
+  const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
+  const [workflowControlBusy, setWorkflowControlBusy] = useState<'pause' | 'resume' | 'cancel' | ''>('');
+  const [workflowControlError, setWorkflowControlError] = useState('');
+  const [workerOutputMode, setWorkerOutputMode] = useState<'summary' | 'all'>(thread?.workerOutputMode === 'all' ? 'all' : 'summary');
+  const cursorRef = useRef(0);
+  const activeWorkflow = snapshot?.workflows.find((item) => item.id === snapshot.activeWorkflowId) || snapshot?.workflows[0] || null;
+  const selectedTask = activeWorkflow?.tasks.find((task) => task.id === selectedTaskId) || null;
+
+  async function loadSnapshot() {
+    if (!thread?.id) return;
+    try {
+      const data = await requestJson<{ snapshot: CollaborationSnapshot }>(`/api/threads/${thread.id}/collaboration`);
+      setSnapshot(data.snapshot);
+      window.dispatchEvent(new CustomEvent('frakio:collaboration-snapshot', { detail: data.snapshot }));
+      cursorRef.current = Math.max(cursorRef.current, Number(data.snapshot.cursor || 0));
+      setError('');
+    } catch (err: any) {
+      setError(err.message || '协作状态读取失败');
+    }
+  }
+
+  useEffect(() => {
+    setSnapshot(null);
+    setSelectedTaskId('');
+    setTaskDetail(null);
+    setControlMenuOpen(false);
+    setCancelConfirmOpen(false);
+    setWorkflowControlBusy('');
+    setWorkflowControlError('');
+    setWorkerOutputMode(thread?.workerOutputMode === 'all' ? 'all' : 'summary');
+    setPanelTab((thread?.executionMode || 'chat') === 'work' ? 'collaboration' : 'resources');
+    cursorRef.current = 0;
+    void loadSnapshot();
+  }, [thread?.id, thread?.executionMode]);
+
+  useEffect(() => {
+    if (props.collaborationModeLoading || props.collaborationModeError) setPanelTab('collaboration');
+  }, [props.collaborationModeLoading, props.collaborationModeError]);
+
+  useEffect(() => {
+    if (!controlMenuOpen && !cancelConfirmOpen) return undefined;
+    const closeControls = (event: KeyboardEvent | PointerEvent) => {
+      if (event instanceof KeyboardEvent) {
+        if (event.key !== 'Escape' || workflowControlBusy) return;
+      } else if ((event.target as HTMLElement | null)?.closest('.collaboration-workflow-more, .collaboration-cancel-modal')) {
+        return;
+      }
+      setControlMenuOpen(false);
+      if (!workflowControlBusy) setCancelConfirmOpen(false);
+    };
+    document.addEventListener('keydown', closeControls);
+    document.addEventListener('pointerdown', closeControls);
+    return () => {
+      document.removeEventListener('keydown', closeControls);
+      document.removeEventListener('pointerdown', closeControls);
+    };
+  }, [controlMenuOpen, cancelConfirmOpen, workflowControlBusy]);
+
+  useEffect(() => {
+    if (!thread?.id) return undefined;
+    const query = new URLSearchParams({ afterCursor: String(cursorRef.current) });
+    const stream = new EventSource(`/api/threads/${thread.id}/collaboration/events?${query.toString()}`);
+    const onSnapshot = (event: MessageEvent) => {
+      try {
+        const next = JSON.parse(event.data) as CollaborationSnapshot;
+        const previousCursor = cursorRef.current;
+        setSnapshot(next);
+        window.dispatchEvent(new CustomEvent('frakio:collaboration-snapshot', { detail: next }));
+        cursorRef.current = Math.max(cursorRef.current, Number(next.cursor || 0));
+        if (next.cursor > previousCursor && next.events.some((item) => item.cursor > previousCursor && ['task.completed', 'workflow.completed', 'workflow.paused', 'workflow.resumed', 'workflow.cancelled'].includes(item.type))) {
+          window.dispatchEvent(new CustomEvent('frakio:thread-refresh-request', { detail: { threadId: next.threadId } }));
+        }
+        setError('');
+      } catch {
+        setError('协作实时数据无法解析');
+      }
+    };
+    stream.addEventListener('collaboration.snapshot', onSnapshot as EventListener);
+    for (const type of ['workflow.created', 'workflow.completed', 'workflow.pause_started', 'workflow.paused', 'workflow.pause_failed', 'workflow.resume_started', 'workflow.resumed', 'workflow.cancelled', 'workflow.archived', 'mode.changed', 'plan.published', 'plan.revised', 'capability.blocked', 'task.created', 'task.started', 'task.waiting', 'task.resumed', 'task.completed', 'task.failed', 'dependency.created', 'dependency.satisfied', 'artifact.published', 'escalation.started', 'escalation.resolved', 'human.required', 'intervention.sent']) {
+      stream.addEventListener(type, (event: MessageEvent) => {
+        try {
+          const next = JSON.parse(event.data) as CollaborationEvent;
+          cursorRef.current = Math.max(cursorRef.current, Number(next.cursor || 0));
+          setSnapshot((current) => current ? { ...current, cursor: Math.max(current.cursor, next.cursor), events: [...current.events.filter((item) => item.id !== next.id), next].slice(-200) } : current);
+        } catch { /* the next snapshot repairs malformed event payloads */ }
+      });
+    }
+    stream.onerror = () => setError('实时连接正在重连…');
+    return () => stream.close();
+  }, [thread?.id]);
+
+  useEffect(() => {
+    if (!selectedTaskId || !activeWorkflow) {
+      setTaskDetail(null);
+      return;
+    }
+    void requestJson<{ detail: any }>(`/api/hermes/kanban/tasks/${encodeURIComponent(selectedTaskId)}?board=${encodeURIComponent(activeWorkflow.boardSlug)}`)
+      .then((data) => setTaskDetail(data.detail))
+      .catch(() => setTaskDetail(null));
+  }, [selectedTaskId, activeWorkflow?.boardSlug, activeWorkflow?.tasks.length]);
+
+  useEffect(() => {
+    if (!selectedTask) {
+      setReassignAgentId('');
+      return;
+    }
+    const assignedAgent = agents.find((agent) => [agent.id, agent.name, agent.profileName].some((value) => Boolean(value && value === selectedTask.assignee)));
+    setReassignAgentId(assignedAgent?.id || activeWorkflow?.coordinatorAgentId || agents[0]?.id || '');
+  }, [selectedTask?.id, selectedTask?.assignee, activeWorkflow?.coordinatorAgentId, agents]);
+
+  async function selectWorkflow(workflowId: string) {
+    if (!thread) return;
+    await requestJson(`/api/threads/${thread.id}/collaboration/workflows/${workflowId}`, { method: 'PATCH', body: JSON.stringify({ active: true }) });
+    setSnapshot((current) => current ? { ...current, activeWorkflowId: workflowId } : current);
+    setSelectedTaskId('');
+  }
+
+  async function controlWorkflow(action: 'pause' | 'resume' | 'cancel') {
+    if (!thread || !activeWorkflow || workflowControlBusy) return;
+    setWorkflowControlBusy(action);
+    setWorkflowControlError('');
+    setControlMenuOpen(false);
+    window.dispatchEvent(new CustomEvent('frakio:workflow-control-busy', { detail: { threadId: thread.id, busy: true } }));
+    try {
+      const data = await requestJson<{ snapshot: CollaborationSnapshot }>(`/api/threads/${thread.id}/collaboration/workflows/${activeWorkflow.id}/${action}`, {
+        method: 'POST',
+        body: JSON.stringify({ idempotencyKey: `${action}:${globalThis.crypto.randomUUID()}` }),
+      });
+      setSnapshot(data.snapshot);
+      window.dispatchEvent(new CustomEvent('frakio:collaboration-snapshot', { detail: data.snapshot }));
+      setCancelConfirmOpen(false);
+    } catch (err: any) {
+      setWorkflowControlError(err.message || '工作流控制失败');
+      await loadSnapshot();
+    } finally {
+      setWorkflowControlBusy('');
+      window.dispatchEvent(new CustomEvent('frakio:workflow-control-busy', { detail: { threadId: thread.id, busy: false } }));
+    }
+  }
+
+  async function sendIntervention(action: 'message' | 'pause' | 'resume' | 'reassign' | 'human_required' = 'message', targetAgentId = '') {
+    if (!thread || !activeWorkflow || !selectedTaskId) return;
+    setBusy(action);
+    try {
+      await requestJson(`/api/threads/${thread.id}/collaboration/interventions`, {
+        method: 'POST',
+        body: JSON.stringify({ workflowId: activeWorkflow.id, taskId: selectedTaskId, action, message: intervention.trim(), reason: intervention.trim(), targetAgentId }),
+      });
+      setIntervention('');
+      await loadSnapshot();
+    } catch (err: any) {
+      setError(err.message || '介入失败');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function openOverview() {
+    setOverviewOpen(true);
+    try {
+      const data = await requestJson<{ workflows: Array<CollaborationWorkflowSnapshot & { threadId: string; threadTitle: string }> }>('/api/collaboration/overview');
+      setOverview(data.workflows || []);
+    } catch (err: any) {
+      setError(err.message || '全局总览读取失败');
+    }
+  }
+
+  async function toggleWorkerOutputMode() {
+    if (!thread) return;
+    const next = workerOutputMode === 'summary' ? 'all' : 'summary';
+    try {
+      await requestJson(`/api/threads/${thread.id}`, { method: 'PATCH', body: JSON.stringify({ workerOutputMode: next }) });
+      setWorkerOutputMode(next);
+    } catch (err: any) {
+      setError(err.message || '成员输出设置失败');
+    }
+  }
+
+  const activeTasks = activeWorkflow?.tasks.filter((task) => task.status !== 'archived') || [];
+  const activeTaskCount = activeTasks.filter((task) => !['done', 'archived'].includes(task.status)).length;
+  const doneCount = activeTasks.filter((task) => task.status === 'done').length;
+  const dependencyByTask = new Map((snapshot?.events || []).filter((event) => event.type === 'dependency.created').map((event) => [event.taskId, event.payload?.parentTaskId]));
+  const waitingCount = activeTasks.filter((task) => task.status === 'blocked' || task.status === 'todo' || (dependencyByTask.has(task.id) && task.status !== 'done')).length;
+  const workflowControlState = activeWorkflow?.control?.state || 'idle';
+  const workflowPaused = activeWorkflow?.status === 'paused';
+  const workflowCancelled = activeWorkflow?.status === 'cancelled';
+  const workflowCompleted = activeWorkflow?.status === 'completed';
+  const workflowPauseFailed = workflowControlState === 'pause_failed';
+  const workflowControlPending = Boolean(workflowControlBusy) || ['pausing', 'resuming', 'cancelling'].includes(workflowControlState);
+  const taskControlsDisabled = workflowPaused || workflowCancelled || workflowControlPending || workflowPauseFailed;
+
+  return (
+    <div className="context-inner collaboration-context-panel">
+      <div className="context-panel-tabs">
+        <IconTooltipButton
+          active={panelTab === 'collaboration'}
+          ariaLabel="协作"
+          badge={activeTaskCount}
+          className="context-panel-tab"
+          onClick={() => setPanelTab('collaboration')}
+          tooltip="协作"
+        >
+          <Network size={15} />
+        </IconTooltipButton>
+        <IconTooltipButton
+          active={panelTab === 'resources'}
+          ariaLabel="资源"
+          className="context-panel-tab"
+          onClick={() => setPanelTab('resources')}
+          tooltip="资源"
+        >
+          <FolderOpen size={15} />
+        </IconTooltipButton>
+      </div>
+      {panelTab === 'resources' ? <CodexResourcePanel {...props} /> : (
+        <div className="collaboration-panel-body">
+          <div className="collaboration-panel-head">
+            <div><small>{(thread?.executionMode || 'chat') === 'work' ? '协作执行' : activeWorkflow ? '后台 Work' : 'Chat 模式'}</small><strong>{activeWorkflow?.name || ((thread?.executionMode || 'chat') === 'work' ? '正在准备工作流' : '当前不接入任务看板')}</strong></div>
+            <span className="collaboration-head-actions">{(thread?.executionMode || 'chat') === 'work' && <button className="worker-output-toggle" onClick={() => void toggleWorkerOutputMode()} title="切换成员输出展示">{workerOutputMode === 'summary' ? '摘要' : '全部'}</button>}<button className="top-icon-btn" onClick={() => void openOverview()} title="全局总览"><Boxes size={16} /></button></span>
+          </div>
+          {props.collaborationModeLoading && <div className="collaboration-runtime-loading"><LoaderCircle size={18} className="spin" /><span>正在准备协作运行时…</span></div>}
+          {props.collaborationModeError && <CollaborationRuntimeErrorCard error={props.collaborationModeError} loading={props.collaborationModeLoading} onRetry={props.onRetryCollaboration} />}
+          {snapshot?.workflows.length ? (
+            <div className="collaboration-workflow-toolbar">
+              <select className="collaboration-workflow-select" value={activeWorkflow?.id || ''} onChange={(event) => void selectWorkflow(event.target.value)} disabled={workflowControlPending}>
+                {snapshot.workflows.filter((workflow) => workflow.status !== 'archived').map((workflow) => <option value={workflow.id} key={workflow.id}>{workflow.name} · {workflow.status}</option>)}
+              </select>
+              {activeWorkflow && !workflowCancelled && !workflowCompleted && <button className={`collaboration-workflow-control ${workflowPaused ? 'resume' : ''}`} disabled={workflowControlPending} onClick={() => void controlWorkflow(workflowPaused ? 'resume' : 'pause')} aria-label={workflowPaused ? '恢复当前工作流的全部任务' : '暂停当前工作流的全部任务'} title={workflowPaused ? '恢复当前工作流的全部任务' : '暂停当前工作流的全部任务'}>
+                {workflowControlPending && workflowControlBusy !== 'cancel' ? <LoaderCircle className="spin" size={15} /> : workflowPaused ? <Play size={15} fill="currentColor" /> : <Pause size={15} fill="currentColor" />}
+              </button>}
+              {activeWorkflow && !workflowCancelled && <div className="collaboration-workflow-more">
+                <button className="collaboration-workflow-control" disabled={workflowControlPending} onClick={() => setControlMenuOpen((open) => !open)} aria-label="更多工作流操作" title="更多工作流操作"><MoreHorizontal size={16} /></button>
+                {controlMenuOpen && <div className="collaboration-workflow-menu"><button onClick={() => { setControlMenuOpen(false); setCancelConfirmOpen(true); }}>结束协作</button></div>}
+              </div>}
+            </div>
+          ) : (
+            <div className="collaboration-empty-start">
+              {(thread?.executionMode || 'chat') === 'work' ? <Briefcase size={24} /> : <MessageSquare size={24} />}
+              <strong>{(thread?.executionMode || 'chat') === 'work' ? '工作流正在准备' : '当前是 Chat 模式'}</strong>
+              <p>{(thread?.executionMode || 'chat') === 'work' ? '创建完成后，发送第一条任务即可开始规划。' : '普通聊天和 @Agent 不会创建看板任务。需要协作执行时，在输入框下方切换到 Work。'}</p>
+            </div>
+          )}
+          {activeWorkflow && <>
+            {(workflowControlPending || workflowPaused || workflowPauseFailed || workflowCancelled) && <div className={`collaboration-workflow-state ${workflowPauseFailed ? 'failed' : workflowCancelled ? 'cancelled' : workflowPaused ? 'paused' : 'pending'}`}>
+              {workflowControlPending && <LoaderCircle className="spin" size={15} />}
+              <span><strong>{workflowControlBusy === 'pause' || workflowControlState === 'pausing' ? `正在停止 ${activeTasks.filter((task) => task.status === 'running').length} 个 Agent…` : workflowControlBusy === 'resume' || workflowControlState === 'resuming' ? '协调 Agent 正在应用你的补充' : workflowControlBusy === 'cancel' || workflowControlState === 'cancelling' ? '正在结束协作…' : workflowPauseFailed ? '暂停未完全生效' : workflowCancelled ? '协作已结束' : '全部任务已暂停'}</strong><small>{workflowPauseFailed ? `${activeWorkflow.control?.failedTaskIds.length || 0} 个任务仍未停止` : workflowPaused ? `${activeWorkflow.control?.heldInterventionCount || 0} 条补充指令已暂存` : workflowCancelled ? '已完成结果和运行记录仍可查看' : '正在保留任务现场'}</small></span>
+              {workflowPauseFailed && <button disabled={Boolean(workflowControlBusy)} onClick={() => void controlWorkflow('pause')}>重试</button>}
+            </div>}
+            {workflowControlError && <div className="collaboration-workflow-control-error">{workflowControlError}</div>}
+            <div className="collaboration-progress-copy"><strong>{doneCount} / {activeTasks.length} 已完成</strong><span>{waitingCount} 等待</span></div>
+            <div className="collaboration-progress"><span style={{ width: `${activeTasks.length ? Math.round(doneCount / activeTasks.length * 100) : 0}%` }} /></div>
+            <div className="collaboration-view-switch">
+              <button className={view === 'relations' ? 'active' : ''} onClick={() => setView('relations')}>任务关系</button>
+              <button className={view === 'activity' ? 'active' : ''} onClick={() => setView('activity')}>实时动态</button>
+            </div>
+            {view === 'relations' ? <>
+              <div className="collaboration-task-list">
+                {activeTasks.map((task) => {
+                  const dependency = dependencyByTask.get(task.id);
+                  const selected = task.id === selectedTaskId;
+                  return <button className={`${selected ? 'selected ' : ''}${task.status === 'blocked' || dependency ? 'waiting ' : ''}${task.status === 'done' ? 'done' : ''}`} key={task.id} onClick={() => setSelectedTaskId(task.id)}>
+                    <span className={`collaboration-task-dot status-${task.status}`} />
+                    <span><strong>{task.title}</strong><small>{dependency ? `等待 ${dependency}` : `${task.assignee || '未分配'} · ${collaborationStatusLabel(task.status)}`}</small></span>
+                    <ChevronRight size={14} />
+                  </button>;
+                })}
+                {!activeTasks.length && <div className="resource-empty">发送任务后，协调 Agent 会在这里发布任务图。</div>}
+              </div>
+            </> : (
+              <div className="collaboration-activity-list">
+                {[...(snapshot?.events || [])].filter((event) => event.workflowId === activeWorkflow.id).reverse().map((event) => <button key={event.id} onClick={() => event.taskId && setSelectedTaskId(event.taskId)}>
+                  <span className={`collaboration-event-dot ${event.type.includes('waiting') || event.type.includes('human') ? 'waiting' : event.type.includes('completed') || event.type.includes('resolved') ? 'done' : ''}`} />
+                  <span><strong>{event.title || collaborationEventLabel(event.type)}</strong><small>{collaborationEventLabel(event.type)} · {formatTime(event.createdAt)}</small></span>
+                </button>)}
+                {!snapshot?.events.length && <div className="resource-empty">动态会在 Agent 开始协作后出现。</div>}
+              </div>
+            )}
+            {selectedTask && <div className="collaboration-task-detail">
+              <div className="collaboration-detail-title"><span><strong>{selectedTask.title}</strong><small>{collaborationStatusLabel(selectedTask.status)} · {selectedTask.assignee || '未分配'}</small></span><button className="top-icon-btn" onClick={() => setSelectedTaskId('')}><X size={14} /></button></div>
+              {(taskDetail?.parents?.length || taskDetail?.children?.length) && <div className="collaboration-links"><span>依赖：{taskDetail.parents?.join('、') || '无'}</span><span>下游：{taskDetail.children?.join('、') || '无'}</span></div>}
+              <p>{selectedTask.body || selectedTask.result || taskDetail?.latest_summary || '暂无任务说明'}</p>
+              <textarea value={intervention} onChange={(event) => setIntervention(event.target.value)} placeholder="向当前任务发送指令…" rows={2} />
+              <div className="collaboration-reassign">
+                <select value={reassignAgentId} onChange={(event) => setReassignAgentId(event.target.value)} aria-label="转交给 Agent">
+                  {agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}
+                </select>
+                <button disabled={!reassignAgentId || Boolean(busy) || taskControlsDisabled} onClick={() => void sendIntervention('reassign', reassignAgentId)}>转交</button>
+              </div>
+              <div className="collaboration-intervention-actions">
+                {selectedTask.status === 'blocked' ? <button disabled={taskControlsDisabled} onClick={() => void sendIntervention('resume')}>恢复</button> : <button disabled={taskControlsDisabled} onClick={() => void sendIntervention('pause')}>暂停</button>}
+                <button disabled={taskControlsDisabled} onClick={() => void sendIntervention('human_required')}>人工介入</button>
+                <button className="send-btn" disabled={!intervention.trim() || Boolean(busy) || workflowCancelled} onClick={() => void sendIntervention('message')}><Send size={13} />发送</button>
+              </div>
+            </div>}
+          </>}
+          {error && <div className="resource-error">{error}</div>}
+        </div>
+      )}
+      {overviewOpen && createPortal(
+        <div className="modal-backdrop collaboration-overview-backdrop" onClick={() => setOverviewOpen(false)}>
+          <div className="modal collaboration-overview-modal" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head"><div><h2>协作全局总览</h2><p>所有对话中的活动工作流和阻塞状态。</p></div><button className="icon-btn" onClick={() => setOverviewOpen(false)}><X size={18} /></button></div>
+            <div className="collaboration-overview-grid">
+              {overview.filter((workflow) => workflow.status !== 'archived').map((workflow) => {
+                const tasks = workflow.tasks.filter((task) => task.status !== 'archived');
+                const done = tasks.filter((task) => task.status === 'done').length;
+                const blocked = tasks.filter((task) => task.status === 'blocked').length;
+                const coordinator = agents.find((agent) => agent.id === workflow.coordinatorAgentId);
+                return <article key={`${workflow.threadId}:${workflow.id}`}><header><span><small>{workflow.threadTitle}</small><strong>{workflow.name}</strong></span><em>{workflow.status}</em></header><div className="collaboration-overview-stats"><span>{done}/{tasks.length} 完成</span><span>{blocked} 阻塞</span><span>{coordinator?.name || '未指定协调人'}</span></div><div className="collaboration-progress"><span style={{ width: `${tasks.length ? done / tasks.length * 100 : 0}%` }} /></div></article>;
+              })}
+              {!overview.length && <div className="empty-state">暂无协作工作流。</div>}
+            </div>
+          </div>
+        </div>, document.body)}
+      {cancelConfirmOpen && activeWorkflow && createPortal(
+        <div className="modal-backdrop nested" onClick={() => !workflowControlBusy && setCancelConfirmOpen(false)}>
+          <div className="modal collaboration-cancel-modal" role="alertdialog" aria-modal="true" aria-labelledby="collaboration-cancel-title" onClick={(event) => event.stopPropagation()}>
+            <div className="collaboration-cancel-body"><span className="collaboration-cancel-icon"><Square size={16} fill="currentColor" /></span><div><h2 id="collaboration-cancel-title">结束这次协作？</h2><p>所有未完成任务会被取消，工作流不能再次恢复。已完成结果、交付物和运行记录会保留。</p></div></div>
+            <div className="collaboration-cancel-actions"><button disabled={Boolean(workflowControlBusy)} onClick={() => setCancelConfirmOpen(false)}>返回</button><button className="danger" disabled={Boolean(workflowControlBusy)} onClick={() => void controlWorkflow('cancel')}>{workflowControlBusy === 'cancel' && <LoaderCircle className="spin" size={14} />}结束协作</button></div>
+          </div>
+        </div>, document.body)}
+    </div>
+  );
+}
+
+function CodexResourcePanel({ contextPacket, proposals, workspaceArtifacts, thread, agents, workspace, isRunning, runApproval, runClarification, runError, runDraft }: ContextPanelProps) {
   const [fileEntriesByDir, setFileEntriesByDir] = useState<Record<string, WorkspaceFileEntry[]>>({});
   const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({ '': true });
   const [fileSearch, setFileSearch] = useState('');
   const [preview, setPreview] = useState<WorkspaceFileContent | null>(null);
   const [previewLoading, setPreviewLoading] = useState(false);
   const [fileError, setFileError] = useState('');
-  const workflowState = visibleWorkflowSteps(thread, { isRunning, runTools, runApproval, runClarification, runError, runDraft });
+  const workflowState = visibleWorkflowSteps(thread, { isRunning, runApproval, runClarification, runError, runDraft });
   const shouldShowTasks = workflowState.length > 0;
   const threadArtifacts: WorkArtifact[] = [
     ...(thread?.artifacts || []),
@@ -5873,54 +6601,61 @@ function isLegacyDefaultWorkflow(steps: WorkflowStep[]) {
   return steps.every((step, index) => step.title === defaultCouncilWorkflowTitles[index] && !step.source && !step.detail && !step.agentName);
 }
 
-function visibleWorkflowSteps(thread: Thread | null, live: { isRunning: boolean; runTools: HermesRunTool[]; runApproval: HermesRunApproval | null; runClarification: HermesRunClarification | null; runError: string; runDraft: string }): WorkflowStep[] {
+function visibleWorkflowSteps(thread: Thread | null, live: { isRunning: boolean; runApproval: HermesRunApproval | null; runClarification: HermesRunClarification | null; runError: string; runDraft: string }): WorkflowStep[] {
   const liveSteps: WorkflowStep[] = [];
   if (live.isRunning) liveSteps.push({ title: 'Agent 正在执行', status: 'running', source: 'run', detail: live.runDraft ? '正在思考' : '' });
-  for (const tool of live.runTools) {
-    liveSteps.push({
-      title: tool.title || tool.label || tool.toolName || tool.tool || '工具调用',
-      status: tool.status === 'failed' ? 'failed' : tool.status === 'completed' ? 'completed' : 'running',
-      source: 'tool',
-      detail: formatToolDetail(tool),
-      updatedAt: tool.updatedAt,
-      callId: tool.id,
-    });
-  }
   if (live.runApproval) liveSteps.push({ title: live.runApproval.title || '等待确认', status: 'running', source: 'approval', detail: live.runApproval.command || live.runApproval.tool || '' });
   if (live.runClarification) liveSteps.push({ title: '等待你的选择', status: 'running', source: 'clarify', detail: live.runClarification.question, callId: live.runClarification.id });
   if (live.runError) liveSteps.push({ title: live.runError, status: 'failed', source: 'run' });
   if (liveSteps.length) return liveSteps;
 
-  const steps = Array.isArray(thread?.workflowState) ? thread.workflowState : [];
+  const steps = (Array.isArray(thread?.workflowState) ? thread.workflowState : []).filter((step) => step.source !== 'tool');
   if (!steps.length || isLegacyDefaultWorkflow(steps)) return [];
   const hasRealSignal = steps.some((step) => step.source || step.detail || step.agentName);
   if (!hasRealSignal && thread?.runStatus !== 'running') return [];
   return steps.map((step) => thread?.runStatus !== 'running' && step.status === 'running' ? { ...step, status: 'completed' } : step);
 }
 
-function formatToolDetail(tool: HermesRunTool) {
-  const parts = [
-    tool.paths?.length ? tool.paths.slice(0, 3).join(' · ') : '',
-    tool.fileCount ? `${tool.fileCount} 个文件` : '',
-    tool.skillName || '',
-    tool.duration ? `${Math.round(tool.duration * 10) / 10}s` : '',
-    !tool.paths?.length && !tool.fileCount ? tool.detail || tool.resultPreview || tool.argsPreview || '' : '',
-  ].filter(Boolean);
-  return parts.join(' · ');
-}
-
 function PermissionModeControl({ value, onChange }: { value: PermissionMode; onChange: (mode: PermissionMode) => void }) {
   const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const menuId = useId();
   const CurrentIcon = permissionIcon(value);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [open]);
+
   return (
-    <div className="permission-menu-wrap">
-      <button className={`permission-select ${permissionTone(value)}`} type="button" title={permissionDescription(value)} aria-label="操作权限" onClick={() => setOpen((current) => !current)}>
+    <div className="permission-menu-wrap" ref={rootRef}>
+      <button
+        className={`permission-select ${permissionTone(value)}`}
+        type="button"
+        title={permissionDescription(value)}
+        aria-label="操作权限"
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        onClick={() => setOpen((current) => !current)}
+      >
         <CurrentIcon size={15} />
         <span>{permissionLabel(value)}</span>
         <ChevronDown size={13} />
       </button>
       {open && (
-        <div className="permission-menu" role="menu">
+        <div id={menuId} className="permission-menu" role="menu" aria-label="操作权限选项">
           <div className="permission-menu-head">
             <strong>应如何批准 Hermes 操作？</strong>
             <a href="#settings" onClick={(event) => event.preventDefault()}>了解更多</a>
@@ -5943,6 +6678,136 @@ function PermissionModeControl({ value, onChange }: { value: PermissionMode; onC
                 <Icon size={20} />
                 <span><strong>{permissionLabel(mode)}</strong><small>{permissionDescription(mode)}</small></span>
                 {selected && <CheckCircle2 size={18} />}
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExecutionModeControl({ value, disabled, switching = false, onChange }: { value: 'chat' | 'work'; disabled?: boolean; switching?: boolean; onChange: (mode: 'chat' | 'work') => void }) {
+  const [visualMode, setVisualMode] = useState<'chat' | 'work'>(value);
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement | null>(null);
+  const triggerRef = useRef<HTMLButtonElement | null>(null);
+  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
+  const pendingFocusIndexRef = useRef<number | null>(null);
+  const menuId = useId();
+  const CurrentIcon = visualMode === 'work' ? Briefcase : MessageSquare;
+
+  useEffect(() => {
+    if (switching || visualMode === value) return;
+    setVisualMode(value);
+  }, [switching, value, visualMode]);
+
+  useEffect(() => {
+    if (switching) setOpen(false);
+  }, [switching]);
+
+  useLayoutEffect(() => {
+    if (!open || pendingFocusIndexRef.current == null) return;
+    optionRefs.current[pendingFocusIndexRef.current]?.focus();
+    pendingFocusIndexRef.current = null;
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const closeOnOutsideClick = (event: MouseEvent) => {
+      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      setOpen(false);
+      triggerRef.current?.focus();
+    };
+    document.addEventListener('mousedown', closeOnOutsideClick);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('mousedown', closeOnOutsideClick);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [open]);
+
+  function selectMode(mode: 'chat' | 'work') {
+    if (disabled || switching) return;
+    if (visualMode !== mode) setVisualMode(mode);
+    if (value !== mode) onChange(mode);
+    setOpen(false);
+    triggerRef.current?.focus();
+  }
+
+  function openMenu(focusIndex = visualMode === 'work' ? 1 : 0) {
+    if (disabled || switching) return;
+    pendingFocusIndexRef.current = focusIndex;
+    setOpen(true);
+  }
+
+  function handleTriggerKeyDown(event: React.KeyboardEvent<HTMLButtonElement>) {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      openMenu(event.key === 'ArrowDown' ? 0 : 1);
+    }
+  }
+
+  function handleOptionKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, index: number) {
+    if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
+      event.preventDefault();
+      optionRefs.current[(index + 1) % 2]?.focus();
+    }
+    if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
+      event.preventDefault();
+      optionRefs.current[(index + 1) % 2]?.focus();
+    }
+    if (event.key === 'Home') {
+      event.preventDefault();
+      optionRefs.current[0]?.focus();
+    }
+    if (event.key === 'End') {
+      event.preventDefault();
+      optionRefs.current[1]?.focus();
+    }
+  }
+
+  return (
+    <div className={`execution-mode-control is-${visualMode}${disabled ? ' is-disabled' : ''}`} ref={rootRef} data-mode={visualMode}>
+      <button
+        ref={triggerRef}
+        type="button"
+        className="execution-mode-trigger"
+        aria-label={`运行模式：${visualMode === 'work' ? 'Work' : 'Chat'}`}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menuId : undefined}
+        aria-busy={switching || undefined}
+        disabled={disabled || switching}
+        onKeyDown={handleTriggerKeyDown}
+        onClick={() => setOpen((current) => !current)}
+        title={visualMode === 'work' ? 'Work：多 Agent 协作执行模式' : 'Chat：普通聊天模式'}
+      >
+        <CurrentIcon size={15} />
+        <span>{visualMode === 'work' ? 'Work' : 'Chat'}</span>
+        <ChevronDown size={13} />
+      </button>
+      {open && (
+        <div id={menuId} className="execution-mode-menu" role="menu" aria-label="选择对话运行模式">
+          {(['chat', 'work'] as const).map((mode, index) => {
+            const Icon = mode === 'work' ? Briefcase : MessageSquare;
+            const selected = visualMode === mode;
+            return (
+              <button
+                ref={(node) => { optionRefs.current[index] = node; }}
+                type="button"
+                role="menuitemradio"
+                aria-checked={selected}
+                key={mode}
+                onKeyDown={(event) => handleOptionKeyDown(event, index)}
+                onClick={() => selectMode(mode)}
+              >
+                <Icon size={17} />
+                <span><strong>{mode === 'work' ? 'Work' : 'Chat'}</strong><small>{mode === 'work' ? '多 Agent 协作执行' : '普通对话'}</small></span>
+                {selected && <Check size={15} />}
               </button>
             );
           })}
@@ -7552,6 +8417,7 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
               <label className="wide">新对话标语<input value={uiSettings.newChatPrompt || '我们接下来做点什么？'} onChange={(event) => onUpdateUi({ newChatPrompt: event.target.value })} /></label>
               <label>发送键<select value={uiSettings.sendKey || 'enter'} onChange={(event) => onUpdateUi({ sendKey: event.target.value as WorkbenchUiSettings['sendKey'] })}><option value="enter">Enter 发送</option><option value="mod-enter">Cmd/Ctrl + Enter 发送</option></select></label>
               <label>默认操作权限<select value={uiSettings.defaultPermissionMode || 'manual'} onChange={(event) => onUpdateUi({ defaultPermissionMode: event.target.value as PermissionMode })}>{(['manual', 'smart', 'off'] as const).map((mode) => <option key={mode} value={mode}>{permissionLabel(mode)}</option>)}</select></label>
+              <label>全局决策 Agent<select value={uiSettings.fallbackDecisionAgentId || uiSettings.defaultAgentId || ''} onChange={(event) => onUpdateUi({ fallbackDecisionAgentId: event.target.value })}>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
               <label>上下文压缩阈值<input type="number" value={uiSettings.contextTriggerTokens || 500000} onChange={(event) => onUpdateUi({ contextTriggerTokens: Number(event.target.value) })} /></label>
               <label>群聊触发 Token<input type="number" value={uiSettings.groupChatTriggerTokens || 100000} onChange={(event) => onUpdateUi({ groupChatTriggerTokens: Number(event.target.value) })} /></label>
               <label>历史尾部消息数<input type="number" value={uiSettings.historyTailMessages || 10} onChange={(event) => onUpdateUi({ historyTailMessages: Number(event.target.value) })} /></label>
@@ -9371,11 +10237,13 @@ function ThreadRailContent({ thread, agents, onOpen, onMore }: {
   const hiddenCount = Math.max(0, participants.length - visibleParticipants.length);
   const statusLabel = thread.runStatus === 'running' ? '运行中' : thread.runStatus === 'failed' ? '运行失败' : '就绪';
   const participantLabel = participants.length ? participants.map((agent) => agent.name).join('、') : (thread.primaryAgentName || 'Agent');
+  const pinnedLabel = thread.pinnedAt ? '，已置顶' : '';
 
   return (
     <>
-      <button className="rail-main rail-thread-main" onClick={onOpen} aria-label={`${thread.title}，参与 Agent：${participantLabel}，${statusLabel}`}>
+      <button className="rail-main rail-thread-main" onClick={onOpen} aria-label={`${thread.title}${pinnedLabel}，参与 Agent：${participantLabel}，${statusLabel}`}>
         <span className="rail-thread-line">
+          {thread.pinnedAt && <span className="rail-thread-pin" title="已置顶" aria-hidden="true"><Pin size={12} fill="currentColor" /></span>}
           <strong className="rail-thread-title">{thread.title}</strong>
           <span className={`rail-thread-participants ${thread.runStatus || 'idle'}`} title={participantLabel} aria-hidden="true">
             {visibleParticipants.map((agent) => {
@@ -9394,6 +10262,61 @@ function ThreadRailContent({ thread, agents, onOpen, onMore }: {
         <MoreHorizontal size={15} />
       </button>
     </>
+  );
+}
+
+function RenameDialog({ target, onClose, onSave }: {
+  target: Exclude<RenameDialogTarget, null>;
+  onClose: () => void;
+  onSave: (value: string) => Promise<void>;
+}) {
+  const [draft, setDraft] = useState(target.title);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const titleId = useId();
+  const noun = target.kind === 'workspace' ? '项目' : '对话';
+  useEffect(() => {
+    setDraft(target.title);
+    setError('');
+    setSaving(false);
+  }, [target.id, target.title]);
+
+  async function submit(event?: React.FormEvent) {
+    event?.preventDefault();
+    const value = draft.trim();
+    if (!value) {
+      setError(`${noun}名称不能为空。`);
+      return;
+    }
+    setSaving(true);
+    setError('');
+    try {
+      await onSave(value);
+    } catch (err) {
+      setSaving(false);
+      setError(err instanceof Error ? err.message : '保存失败。');
+    }
+  }
+
+  return createPortal(
+    <div className="modal-backdrop rename-dialog-backdrop" role="presentation" onMouseDown={onClose}>
+      <form className="modal rename-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} onSubmit={(event) => void submit(event)} onMouseDown={(event) => event.stopPropagation()}>
+        <div className="modal-head">
+          <div><h2 id={titleId}>重命名{noun}</h2><p>{target.title}</p></div>
+          <button type="button" className="icon-btn provider-modal-close" onClick={onClose} aria-label="关闭" disabled={saving}><X size={18} /></button>
+        </div>
+        <label className="form-row">
+          <span>{noun}名称</span>
+          <input value={draft} onChange={(event) => setDraft(event.target.value)} maxLength={target.kind === 'workspace' ? 60 : 60} autoFocus disabled={saving} />
+        </label>
+        {error && <div className="inline-error">{error}</div>}
+        <div className="modal-actions">
+          <button type="button" className="secondary-btn" onClick={onClose} disabled={saving}>取消</button>
+          <button type="submit" className="send-btn" disabled={saving || !draft.trim()}>{saving ? '保存中' : '保存'}</button>
+        </div>
+      </form>
+    </div>,
+    document.body,
   );
 }
 
@@ -10016,9 +10939,152 @@ function MarkdownMessage({ content, streaming }: { content: string; streaming?: 
   return (
     <div className={streaming ? 'message-text markdown-message streaming-text' : 'message-text markdown-message'}>
       <ReactMarkdown remarkPlugins={[remarkGfm]}>{trimMessageStart(content)}</ReactMarkdown>
-      {streaming && <span className="streaming-cursor" />}
     </div>
   );
+}
+
+const activityKindCopy: Record<RunActivityItem['kind'], { running: string; completed: string; unit: string }> = {
+  read: { running: '正在读取', completed: '读取了', unit: '个文件' },
+  search: { running: '正在搜索', completed: '搜索了', unit: '次' },
+  edit: { running: '正在编辑', completed: '编辑了', unit: '个文件' },
+  write: { running: '正在写入', completed: '写入了', unit: '个文件' },
+  command: { running: '正在运行', completed: '运行了', unit: '条命令' },
+  web: { running: '正在访问网络', completed: '访问了网络', unit: '次' },
+  skill: { running: '正在使用技能', completed: '使用了技能', unit: '次' },
+  collaboration: { running: '正在更新协作任务', completed: '更新了协作任务', unit: '次' },
+  other: { running: '正在执行操作', completed: '执行了操作', unit: '次' },
+};
+
+function activityGroupSummary(group: RunActivityGroup) {
+  const counts = new Map<RunActivityItem['kind'], number>();
+  group.items.forEach((item) => counts.set(item.kind, (counts.get(item.kind) || 0) + 1));
+  const running = group.status === 'running';
+  return [...counts.entries()].map(([kind, count]) => {
+    const copy = activityKindCopy[kind] || activityKindCopy.other;
+    return `${running ? copy.running : copy.completed} ${count} ${copy.unit}`;
+  }).join(' · ') || group.summary;
+}
+
+function compactActivityTarget(item: RunActivityItem) {
+  const source = String(item.target || '').replace(/\s+/g, ' ').trim();
+  if (!source) return '';
+  let target = source;
+  if (item.kind === 'web') {
+    try {
+      const url = new URL(source);
+      target = `${url.hostname}${url.pathname === '/' ? '' : url.pathname}`;
+    } catch {
+      target = source;
+    }
+  }
+  const limit = item.kind === 'command' ? 76 : 62;
+  return target.length > limit ? `${target.slice(0, limit).trimEnd()}…` : target;
+}
+
+function RunActivityIcon({ kind, size = 14 }: { kind: RunActivityItem['kind']; size?: number }) {
+  const Icon = kind === 'read' ? FileText
+    : kind === 'search' ? Search
+      : kind === 'edit' || kind === 'write' ? Pencil
+        : kind === 'command' ? Code2
+          : kind === 'web' ? ExternalLink
+            : kind === 'collaboration' ? Network
+              : kind === 'skill' ? Sparkles : Activity;
+  return <Icon size={size} aria-hidden="true" />;
+}
+
+function RunActivityItemRow({ item }: { item: RunActivityItem }) {
+  const [resultOpen, setResultOpen] = useState(false);
+  const label = item.status === 'running' ? item.activeLabel : item.completedLabel;
+  const duration = item.durationMs > 0 ? (item.durationMs < 1000 ? `${Math.round(item.durationMs)}ms` : `${(item.durationMs / 1000).toFixed(item.durationMs < 10000 ? 1 : 0)}s`) : '';
+  return (
+    <div className={`run-activity-item is-${item.status}`}>
+      <span className="run-activity-item-icon"><RunActivityIcon kind={item.kind} /></span>
+      <span className="run-activity-item-copy"><strong>{label}</strong>{item.target && <code title={item.target}>{compactActivityTarget(item)}</code>}</span>
+      {duration && <time>{duration}</time>}
+      <span className="run-activity-item-status" aria-label={item.status === 'failed' ? '失败' : item.status === 'cancelled' ? '已取消' : item.status === 'running' ? '进行中' : '完成'}>
+        {item.status === 'running' ? <LoaderCircle size={13} /> : item.status === 'failed' ? <X size={13} /> : item.status === 'cancelled' ? <PauseCircle size={13} /> : null}
+      </span>
+      {item.resultPreview && (
+        <div className="run-activity-result">
+          <button type="button" aria-expanded={resultOpen} onClick={() => setResultOpen((current) => !current)}><ChevronRight size={13} />结果摘要</button>
+          {resultOpen && <pre>{item.resultPreview}</pre>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function RunActivityLiveLine({ group }: { group: RunActivityGroup }) {
+  const current = group.items.at(-1);
+  if (!current) return null;
+  const target = compactActivityTarget(current);
+  const label = current.status === 'running' ? current.activeLabel : current.completedLabel;
+  return (
+    <div className={`run-activity-live is-${current.status}`} aria-live="polite" aria-atomic="true">
+      <div className="run-activity-live-current" key={`${current.id}:${current.status}`}>
+        <span className="run-activity-live-icon"><RunActivityIcon kind={current.kind} size={13} /></span>
+        <span className="run-activity-live-copy"><strong>{label}</strong>{target && <code title={current.target}>{target}</code>}</span>
+      </div>
+    </div>
+  );
+}
+
+function RunActivityGroupView({ group, hasFollowingText, runFinished, isCurrentGroup }: { group: RunActivityGroup; hasFollowingText: boolean; runFinished: boolean; isCurrentGroup: boolean }) {
+  const live = isCurrentGroup && !hasFollowingText && !runFinished;
+  const [expanded, setExpanded] = useState(false);
+  const userControlled = useRef(false);
+  useEffect(() => {
+    if (!userControlled.current && live) setExpanded(false);
+  }, [live]);
+  if (live) return <RunActivityLiveLine group={group} />;
+  return (
+    <section className={`run-activity-group is-${group.status}`}>
+      <button
+        className="run-activity-summary"
+        type="button"
+        aria-expanded={expanded}
+        onClick={() => { userControlled.current = true; setExpanded((current) => !current); }}
+      >
+        <ChevronRight size={15} />
+        <span>{activityGroupSummary(group)}</span>
+      </button>
+      {expanded && <div className="run-activity-items">{group.items.map((item) => <RunActivityItemRow item={item} key={item.id} />)}</div>}
+    </section>
+  );
+}
+
+function RunTranscriptContent({ content, groups, streaming = false, runFinished = true }: { content: string; groups: RunActivityGroup[]; streaming?: boolean; runFinished?: boolean }) {
+  const ordered = [...groups].sort((left, right) => left.contentOffset - right.contentOffset || left.createdAt.localeCompare(right.createdAt));
+  const nodes: React.ReactNode[] = [];
+  let cursor = 0;
+  ordered.forEach((group, index) => {
+    const offset = Math.max(cursor, Math.min(content.length, group.contentOffset));
+    const segment = content.slice(cursor, offset);
+    if (segment) nodes.push(<MarkdownMessage content={segment} key={`text-${group.id}`} />);
+    const hasFollowingText = content.length > offset;
+    nodes.push(<RunActivityGroupView group={group} hasFollowingText={hasFollowingText} runFinished={runFinished} isCurrentGroup={index === ordered.length - 1} key={group.id || `group-${index}`} />);
+    cursor = offset;
+  });
+  const tail = content.slice(cursor);
+  if (tail || streaming) nodes.push(<MarkdownMessage content={tail} streaming={streaming} key="text-tail" />);
+  return <>{nodes}</>;
+}
+
+function PersistedInterruptedRuns({ thread, agents }: { thread: Thread | null; agents: Agent[] }) {
+  const messageRunIds = new Set((thread?.messages || []).map((message) => message.externalRunId).filter(Boolean));
+  const transcripts = (thread?.runTranscripts || []).filter((item) => ['failed', 'cancelled'].includes(item.status) && !messageRunIds.has(item.runId) && item.groups.length);
+  return <>{transcripts.slice(-3).map((transcript) => {
+    const agent = agents.find((item) => item.id === transcript.agentId);
+    return (
+      <article className="message run-status-message interrupted-run-message" key={transcript.runId}>
+        {agent ? <AgentAvatar agent={agent} /> : <span className="agent-avatar" style={{ background: '#0f766e' }}>@</span>}
+        <div className="message-body run-status-body">
+          <div className="message-meta"><strong>{agent?.name || 'Agent'}</strong><span>{transcript.status === 'failed' ? '执行失败' : '已取消'}</span></div>
+          <RunTranscriptContent content={transcript.partialContent || ''} groups={transcript.groups} />
+        </div>
+      </article>
+    );
+  })}</>;
 }
 
 function ComposerRunButton({
@@ -10028,6 +11094,7 @@ function ComposerRunButton({
   canSend,
   onSend,
   onStop,
+  runningLabel,
 }: {
   isRunning: boolean;
   hasActiveRun: boolean;
@@ -10035,6 +11102,7 @@ function ComposerRunButton({
   canSend: boolean;
   onSend: () => void;
   onStop: () => void;
+  runningLabel?: string;
 }) {
   const phase = isRunning
     ? isStopping ? 'stopping' : hasActiveRun ? 'running' : 'starting'
@@ -10042,7 +11110,7 @@ function ComposerRunButton({
   const label = phase === 'starting'
     ? '正在启动'
     : phase === 'running'
-      ? '停止生成'
+      ? runningLabel || '停止生成'
       : phase === 'stopping'
         ? '正在停止'
         : '发送消息';
@@ -10069,12 +11137,14 @@ function ChatRunStatus({
   startedAt,
   tick,
   draft,
+  activityGroups,
   error,
 }: {
   target: ChatRunTarget | null;
   startedAt: number | null;
   tick: number;
   draft: string;
+  activityGroups: RunActivityGroup[];
   error: string;
 }) {
   const elapsed = startedAt ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0;
@@ -10091,10 +11161,12 @@ function ChatRunStatus({
           <strong>{title}</strong>
           <span>{elapsed}s</span>
         </div>
-        <div className="thinking-line" aria-live="polite">
+        {!draft && <div className="thinking-line" aria-live="polite">
           <span className="thinking-text">{thinkingText}</span>
-        </div>
-        {draft && <MarkdownMessage content={draft} streaming />}
+        </div>}
+        {draft
+          ? <RunTranscriptContent content={draft} groups={activityGroups} streaming runFinished={false} />
+          : activityGroups.length > 0 && <div className="run-activity-before-text"><RunTranscriptContent content="" groups={activityGroups} runFinished={false} /></div>}
         {error && <div className="inline-error run-error">{error}</div>}
       </div>
     </article>

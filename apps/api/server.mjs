@@ -29,6 +29,8 @@ import { CHAT_THINKING_FORMATS, candidateModelUrls, directHttpRequestOverrides }
 import { catalogStatus, flattenProviderCatalog, parseCatalogResponse, parseModelIds, readCatalogCache, recordActiveProbeCapability, recordCatalogError, updateProviderCatalog, verificationKey, writeCatalogCache } from './lib/model-catalog-store.mjs';
 import { extractChatGptAccountId, fetchCodexOAuthCatalog } from './lib/oauth-provider-catalog.mjs';
 import { runtimeStep, summarizeRuntimeAutoStart } from './lib/runtime-autostart.mjs';
+import { appendCollaborationEvent, boardLifecycle, collaborationEventsAfter, diffCollaborationPlans, normalizeThreadCollaboration, taskStatusEvent, validateCollaborationPlan } from './lib/collaboration.mjs';
+import { applyRunActivityToTranscript, normalizeRunActivityItem, normalizeRunTranscripts, summarizeActivityItems, upsertRunTranscript } from './lib/run-activity.mjs';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
@@ -60,7 +62,19 @@ const hermesAgentBackupRoot = path.join(frakioWorkHome, 'backups', 'hermes-agent
 const attachmentRoot = path.join(frakioWorkHome, 'attachments');
 const officialHermesAgentRepo = 'https://github.com/NousResearch/hermes-agent.git';
 const frakioBridgeProtocolVersion = 2;
+const workbenchCollaborationProtocolVersion = 2;
+const requiredWorkbenchCollaborationTools = [
+  'hermes_workbench_protocol_get',
+  'hermes_workbench_collaboration_plan_get',
+  'hermes_workbench_collaboration_plan_publish',
+  'hermes_workbench_collaboration_dependency_request',
+  'hermes_workbench_collaboration_blocker_report',
+  'hermes_workbench_collaboration_artifact_publish',
+  'hermes_workbench_collaboration_task_complete',
+];
 const requiredAiohttpVersion = '3.14.1';
+const requiredMcpVersion = '1.26.0';
+const requiredStarletteVersion = '1.0.1';
 const hermesDbPath = hermesWebUiHome ? path.join(hermesWebUiHome, 'hermes-web-ui.db') : '';
 const telemetry = createTelemetryClient({
   filePath: telemetryPath,
@@ -762,7 +776,7 @@ function runTelemetryProperties(thread) {
 function defaultState() {
   return {
     version: 2,
-    ui: { libraryCollapsed: false, pinnedNav: defaultPinnedNav, defaultAgentId: '', defaultModel: '', density: 'comfortable', streamingResponses: true, showReasoning: true, telemetryEnabled: false, telemetryNoticeSeenAt: '', agentMentionMaxDepth: 2 },
+    ui: { libraryCollapsed: false, pinnedNav: defaultPinnedNav, defaultAgentId: '', fallbackDecisionAgentId: '', defaultModel: '', density: 'comfortable', streamingResponses: true, showReasoning: true, telemetryEnabled: false, telemetryNoticeSeenAt: '', agentMentionMaxDepth: 2 },
     userProfile: { avatarUrl: '', nickname: '', bio: '', age: '', hobbies: '', occupation: '', defaultAgentAddress: '', otherAgentAddress: '', completedAt: '', updatedAt: '' },
     observability: { modelUsage: [], modelRuns: [], systemEvents: [] },
     integrations: {
@@ -999,6 +1013,7 @@ function normalizeState(state) {
       ...(state.ui || {}),
       activeSpaceId,
       defaultAgentId,
+      fallbackDecisionAgentId: agentIds.has(state.ui?.fallbackDecisionAgentId) ? state.ui.fallbackDecisionAgentId : (agentIds.has('iris') ? 'iris' : defaultAgentId),
       defaultModel,
       agentMentionMaxDepth: normalizeAgentMentionMaxDepth(state.ui?.agentMentionMaxDepth, 2),
       pinnedNav: { ...defaultPinnedNav, ...(state.ui?.pinnedNav || {}) },
@@ -1037,6 +1052,8 @@ function normalizeState(state) {
         ? thread.spaceId
         : (workspaceById.get(thread.workspaceId)?.spaceId || activeSpaceId || fallbackSpaceId),
       mode: thread.mode || 'workspace',
+      executionMode: thread.executionMode === 'work' ? 'work' : 'chat',
+      workerOutputMode: thread.workerOutputMode === 'all' ? 'all' : 'summary',
       workspaceId: thread.mode === 'direct' ? null : (workspaceById.has(thread.workspaceId) ? thread.workspaceId : normalizedWorkspaces[0]?.id || null),
       primaryAgentId: agentIds.has(thread.primaryAgentId) ? thread.primaryAgentId : defaultAgentId,
       defaultAgentId: agentIds.has(thread.defaultAgentId) ? thread.defaultAgentId : defaultAgentId,
@@ -1058,6 +1075,7 @@ function normalizeState(state) {
       externalSessionId: thread.externalSessionId || null,
       artifacts: Array.isArray(thread.artifacts) ? thread.artifacts : [],
       workflowState: Array.isArray(thread.workflowState) ? thread.workflowState : [],
+      runTranscripts: normalizeRunTranscripts(thread.runTranscripts),
       collaboration: normalizeCollaboration(thread.collaboration, { defaultAgentId, activeAgentId: thread.activeAgentId || thread.primaryAgentId }),
       runStatus: ['idle', 'running', 'failed'].includes(thread.runStatus) ? thread.runStatus : 'idle',
       archivedAt: thread.archivedAt || null,
@@ -1069,15 +1087,9 @@ function normalizeState(state) {
 }
 
 function normalizeCollaboration(collaboration = {}, fallback = {}) {
-  return {
-    kind: collaboration.kind || 'workspace-group-chat',
-    lastMentionedAgentId: collaboration.lastMentionedAgentId || null,
-    lastMentionedAgentName: collaboration.lastMentionedAgentName || '',
-    activeAgentId: collaboration.activeAgentId || fallback.activeAgentId || fallback.defaultAgentId || null,
-    maxMentionDepth: normalizeAgentMentionMaxDepth(collaboration.maxMentionDepth, 2),
-    lastRoutedAt: collaboration.lastRoutedAt || null,
-    lastRouteReason: collaboration.lastRouteReason || '',
-  };
+  const normalized = normalizeThreadCollaboration(collaboration, { ...fallback, kind: collaboration.kind || 'workspace-group-chat' });
+  normalized.maxMentionDepth = normalizeAgentMentionMaxDepth(normalized.maxMentionDepth, 2);
+  return normalized;
 }
 
 function normalizeAgentModelOverrides(overrides, agents = [], models = []) {
@@ -2311,6 +2323,7 @@ function knownManagedMcpTools(serverName, config = {}) {
   const workbenchToolset = String(config?.env?.HERMES_WORKBENCH_MCP_TOOLSET || '').trim();
   if (serverName === 'hermes-workbench-api' || workbenchToolset === 'api') return ['hermes_workbench_api_catalog_get', 'hermes_workbench_api_request'];
   if (serverName === 'hermes-workbench-use' || workbenchToolset === 'use') return [
+    'hermes_workbench_protocol_get',
     'hermes_workbench_use_threads_list',
     'hermes_workbench_use_thread_get',
     'hermes_workbench_use_projects_list',
@@ -2319,6 +2332,15 @@ function knownManagedMcpTools(serverName, config = {}) {
     'hermes_workbench_use_runtime_status',
     'hermes_workbench_use_mcp_servers_list',
     'hermes_workbench_use_user_profile_get',
+    'hermes_workbench_collaboration_workflow_create',
+    'hermes_workbench_collaboration_context_resolve',
+    'hermes_workbench_collaboration_root_create',
+    'hermes_workbench_collaboration_plan_get',
+    'hermes_workbench_collaboration_plan_publish',
+    'hermes_workbench_collaboration_dependency_request',
+    'hermes_workbench_collaboration_blocker_report',
+    'hermes_workbench_collaboration_artifact_publish',
+    'hermes_workbench_collaboration_task_complete',
   ];
   if (serverName === 'hermes-studio-api' || toolset === 'api') return ['hermes_studio_api_openapi_get', 'hermes_studio_api_request'];
   if (serverName === 'hermes-studio-devices' || toolset === 'devices') return [
@@ -2381,6 +2403,7 @@ function workbenchMcpServerConfig(toolset, profileName = 'default') {
       HERMES_WORKBENCH_PROFILE: profileName,
       HERMES_WORKBENCH_MCP_TOOLSET: cleanToolset,
       HERMES_WORKBENCH_MCP_SERVER_NAME: `hermes-workbench-${cleanToolset}`,
+      HERMES_WORKBENCH_PROTOCOL_VERSION: String(workbenchCollaborationProtocolVersion),
     },
     enabled: true,
   };
@@ -2711,7 +2734,12 @@ function normalizeJob(job) {
 
 function hermesCommandCandidates() {
   const candidates = [];
-  if (process.env.HERMES_BIN) candidates.push({ command: process.env.HERMES_BIN, args: [], cwd: projectRoot });
+  if (process.env.HERMES_BIN) {
+    const configuredHermesBin = process.env.HERMES_BIN;
+    candidates.push(/\.(?:cjs|mjs|js)$/i.test(configuredHermesBin)
+      ? { command: process.execPath, args: [configuredHermesBin], cwd: projectRoot }
+      : { command: configuredHermesBin, args: [], cwd: projectRoot });
+  }
   const frakioRuntime = findFrakioHermesRuntimeSync();
   if (frakioRuntime?.python) {
     candidates.push({ command: frakioRuntime.python, args: ['-m', 'hermes_cli.main'], cwd: hermesHome });
@@ -2771,6 +2799,561 @@ function kanbanBoard(value) {
     throw error;
   }
   return board;
+}
+
+function parseHermesJson(stdout, fallback = null) {
+  try {
+    return JSON.parse(String(stdout || '').trim() || JSON.stringify(fallback));
+  } catch {
+    return fallback;
+  }
+}
+
+function workflowById(thread, workflowId = '') {
+  const workflows = thread?.collaboration?.workflows || [];
+  const resolvedId = workflowId || thread?.collaboration?.activeWorkflowId || '';
+  return workflows.find((workflow) => workflow.id === resolvedId) || null;
+}
+
+function agentProfileForId(state, agentId) {
+  const agent = state.agents.find((item) => item.id === agentId);
+  return String(agent?.profileName || agent?.id || '').trim();
+}
+
+function rememberIdempotent(collaboration, key, result) {
+  const clean = String(key || '').trim().slice(0, 160);
+  if (!clean) return;
+  collaboration.idempotency = { ...(collaboration.idempotency || {}), [clean]: { result, createdAt: now() } };
+  const entries = Object.entries(collaboration.idempotency).slice(-200);
+  collaboration.idempotency = Object.fromEntries(entries);
+}
+
+function idempotentResult(collaboration, key) {
+  const clean = String(key || '').trim().slice(0, 160);
+  return clean ? collaboration?.idempotency?.[clean]?.result || null : null;
+}
+
+function appendThreadCollaborationEvent(thread, event) {
+  return appendCollaborationEvent(thread.collaboration, event, () => id('collab_event'));
+}
+
+async function createCollaborationWorkflow(state, thread, input = {}) {
+  const cached = idempotentResult(thread.collaboration, input.idempotencyKey);
+  if (cached) return { ...cached, idempotent: true };
+  const name = String(input.name || thread.title || '协作工作流').trim().slice(0, 120);
+  const generatedSlug = `${slug(name).slice(0, 46) || 'workflow'}-${Date.now().toString(36).slice(-6)}`;
+  const board = kanbanBoard(input.boardSlug || generatedSlug);
+  const boardsResult = await runHermesCommand(['kanban', 'boards', 'list', '--json']);
+  const boards = parseHermesJson(boardsResult.stdout, []);
+  if (!boards.some((item) => item.slug === board)) {
+    const args = ['kanban', 'boards', 'create', board, '--name', name];
+    if (input.description) args.push('--description', String(input.description));
+    await runHermesCommand(args);
+  }
+  const coordinatorAgentId = state.agents.some((agent) => agent.id === input.coordinatorAgentId)
+    ? input.coordinatorAgentId
+    : thread.activeAgentId || thread.defaultAgentId || resolveDefaultAgentId(state);
+  const workflow = {
+    id: id('workflow'),
+    name,
+    boardSlug: board,
+    status: 'active',
+    coordinatorAgentId,
+    fallbackDecisionAgentId: state.ui?.fallbackDecisionAgentId || resolveDefaultAgentId(state),
+    rootTaskIds: [],
+    currentRootTaskId: '',
+    planRevision: 0,
+    plan: null,
+    executionBindings: {},
+    interventionQueue: [],
+    control: { operationId: '', idempotencyKey: '', action: '', state: 'idle', affectedTaskIds: [], stoppedRuns: 0, blockedTasks: 0, preservedWaitingTasks: 0, failedTaskIds: [], heldInterventionCount: 0, startedAt: null, completedAt: null, error: '' },
+    capability: { status: 'unknown', protocolVersion: 0, error: '' },
+    createdAt: now(),
+    updatedAt: now(),
+    completedAt: null,
+    pausedAt: null,
+    cancelledAt: null,
+    archivedAt: null,
+  };
+  thread.collaboration.workflows = [...(thread.collaboration.workflows || []), workflow];
+  thread.collaboration.activeWorkflowId = workflow.id;
+  const event = appendThreadCollaborationEvent(thread, { type: 'workflow.created', workflowId: workflow.id, actorAgentId: coordinatorAgentId, title: name, detail: `已绑定看板 ${board}` });
+  const result = { workflow, event };
+  rememberIdempotent(thread.collaboration, input.idempotencyKey, result);
+  return result;
+}
+
+async function createCollaborationRoot(state, thread, workflow, input = {}) {
+  const cached = idempotentResult(thread.collaboration, input.idempotencyKey);
+  if (cached) return { ...cached, idempotent: true };
+  const title = String(input.title || '').trim();
+  if (!title) throw Object.assign(new Error('title is required.'), { status: 400 });
+  const assignee = agentProfileForId(state, input.assigneeAgentId || workflow.coordinatorAgentId);
+  const args = ['kanban', '--board', workflow.boardSlug, 'create', title, '--json', '--triage'];
+  const rootBody = [String(input.body || '').trim(), `Frakio 协作上下文：threadId=${thread.id} workflowId=${workflow.id} boardSlug=${workflow.boardSlug}`].filter(Boolean).join('\n\n');
+  if (rootBody) args.push('--body', rootBody);
+  if (assignee) args.push('--assignee', assignee);
+  if (input.idempotencyKey) args.push('--idempotency-key', String(input.idempotencyKey));
+  const { stdout } = await runHermesCommand(args);
+  const task = parseHermesJson(stdout, {});
+  workflow.rootTaskIds = [...new Set([...(workflow.rootTaskIds || []), task.id].filter(Boolean))];
+  workflow.currentRootTaskId = task.id || '';
+  workflow.updatedAt = now();
+  const event = appendThreadCollaborationEvent(thread, { type: 'task.created', workflowId: workflow.id, taskId: task.id, actorAgentId: input.actorAgentId || workflow.coordinatorAgentId, title: task.title || title, detail: '协调 Agent 正在规划', payload: { root: true, planning: true } });
+  const result = { task, event };
+  rememberIdempotent(thread.collaboration, input.idempotencyKey, result);
+  return result;
+}
+
+function workbenchToolNames(response = {}) {
+  return (response.results || []).flatMap((entry) => (entry.tools || []).map((tool) => String(tool.name || tool))).filter(Boolean);
+}
+
+async function ensureCollaborationRuntimeCapability(profileName = 'default') {
+  await ensureWorkbenchMcpServers(profileName);
+  if (process.env.FRAKIO_WORK_SKIP_MCP_RUNTIME_CHECK === '1') {
+    return { status: 'ready', protocolVersion: workbenchCollaborationProtocolVersion, tools: knownManagedMcpTools('hermes-workbench-use', workbenchMcpServerConfig('use', profileName)), reloaded: false };
+  }
+  let bridge = await probeHermesBridge({ timeoutMs: 1000 }).catch(() => null);
+  if (!bridge?.ready) {
+    const started = await startHermesBridge();
+    bridge = started.bridge;
+  }
+  const inspect = () => requestHermesBridge({ action: 'mcp_tools_list', profile: profileName, server: 'hermes-workbench-use', raw: true }, { timeoutMs: 10000, retryMs: 1000 });
+  let runtime = await inspect().catch(() => ({ results: [] }));
+  let tools = workbenchToolNames(runtime);
+  let missing = requiredWorkbenchCollaborationTools.filter((tool) => !tools.includes(tool));
+  let reloaded = false;
+  let reloadStatus = null;
+  if (missing.length) {
+    reloadStatus = await requestHermesBridge({ action: 'mcp_reload', profile: profileName, server: 'hermes-workbench-use' }, { timeoutMs: 130000, retryMs: 1000 }).catch((error) => ({ ok: false, connected: false, error: String(error?.message || error), connectionErrors: {} }));
+    reloaded = true;
+    if (reloadStatus?.mcpAvailable === false) {
+      const error = new Error('协作运行时缺少 MCP 支持。');
+      error.status = 503;
+      error.code = 'COLLABORATION_RUNTIME_DEPENDENCY_MISSING';
+      error.details = { profileName, missingPythonPackages: ['mcp'], missingTools: [], reloadStatus: 'failed', connectionErrors: reloadStatus.connectionErrors || {} };
+      throw error;
+    }
+    runtime = await inspect().catch(() => ({ results: [] }));
+    tools = workbenchToolNames(runtime);
+    missing = requiredWorkbenchCollaborationTools.filter((tool) => !tools.includes(tool));
+    if (missing.length && !reloadStatus?.connected) {
+      const sessions = await requestHermesBridge({ action: 'list' }, { timeoutMs: 5000, retryMs: 500 }).catch(() => ({ sessions: [] }));
+      const hasActiveProfileRun = (sessions.sessions || []).some((session) => session.profile === profileName && (session.running === true || session.status === 'running'));
+      if (!hasActiveProfileRun) {
+        await requestHermesBridge({ action: 'destroy_profile', profile: profileName }, { timeoutMs: 10000, retryMs: 500 }).catch(() => null);
+        reloadStatus = await requestHermesBridge({ action: 'mcp_reload', profile: profileName, server: 'hermes-workbench-use' }, { timeoutMs: 130000, retryMs: 1000 }).catch((error) => ({ ok: false, connected: false, error: String(error?.message || error), connectionErrors: {} }));
+        runtime = await inspect().catch(() => ({ results: [] }));
+        tools = workbenchToolNames(runtime);
+        missing = requiredWorkbenchCollaborationTools.filter((tool) => !tools.includes(tool));
+      }
+    }
+  }
+  if (missing.length) {
+    const error = new Error('协作运行时未准备好。');
+    error.status = 503;
+    error.code = 'COLLABORATION_CAPABILITY_MISSING';
+    error.details = { profileName, missingPythonPackages: [], missingTools: missing, actualTools: tools, reloadStatus: reloadStatus?.connected ? 'connected' : 'failed', connectionErrors: reloadStatus?.connectionErrors || {}, bridge };
+    throw error;
+  }
+  return { status: 'ready', protocolVersion: workbenchCollaborationProtocolVersion, tools, reloaded, reloadStatus, bridge };
+}
+
+async function initializeNewThreadWorkMode(state, thread, coordinatorAgentId, requestId = '') {
+  const coordinator = state.agents.find((agent) => agent.id === coordinatorAgentId)
+    || state.agents.find((agent) => agent.id === thread.defaultAgentId);
+  const resolvedCoordinatorId = coordinator?.id || thread.defaultAgentId || resolveDefaultAgentId(state);
+  const profileName = await resolveHermesProfileNameForAgent(coordinator || {});
+  const capability = await ensureCollaborationRuntimeCapability(profileName);
+  const created = await createCollaborationWorkflow(state, thread, {
+    name: thread.title || '协作工作流',
+    coordinatorAgentId: resolvedCoordinatorId,
+    idempotencyKey: requestId ? `new-work:${requestId}` : `new-work:${thread.id}`,
+  });
+  created.workflow.capability = { status: 'ready', protocolVersion: capability.protocolVersion, checkedAt: now(), reloaded: Boolean(capability.reloaded), error: '' };
+  thread.executionMode = 'work';
+  thread.updatedAt = now();
+  appendThreadCollaborationEvent(thread, { type: 'mode.changed', workflowId: created.workflow.id, actorAgentId: 'user', title: '已切换到 Work', detail: `协调 Agent：${coordinator?.name || resolvedCoordinatorId}`, payload: { mode: 'work', previousMode: 'chat', coordinatorAgentId: resolvedCoordinatorId } });
+  return { workflow: created.workflow, capability };
+}
+
+async function queueWorkSteer(state, thread, workflow, { message, idempotencyKey = '', actorAgentId = 'user' } = {}) {
+  const cleanMessage = String(message || '').trim();
+  if (!cleanMessage) throw Object.assign(new Error('steer message is required.'), { status: 400 });
+  const cached = idempotentResult(thread.collaboration, idempotencyKey);
+  if (cached) return { ...cached, idempotent: true };
+  const interventionId = id('intervention');
+  const queuedAt = now();
+  const coordinatorAgentId = workflow.coordinatorAgentId || thread.defaultAgentId || resolveDefaultAgentId(state);
+  const sessionId = thread.activeRunAgentId === coordinatorAgentId && thread.activeSessionId
+    ? thread.activeSessionId
+    : hermesAgentSessionId(thread, coordinatorAgentId);
+  let queueStatus = workflow.status === 'paused' || ['pausing', 'pause_failed'].includes(workflow.control?.state) ? 'held' : 'pending';
+  let bridgeResult = null;
+  if (queueStatus !== 'held') {
+    try {
+      bridgeResult = await requestHermesBridge({ action: 'steer', session_id: sessionId, text: cleanMessage }, { timeoutMs: 5000, retryMs: 500 });
+      queueStatus = bridgeResult.accepted ? 'delivered' : 'pending';
+    } catch {
+      queueStatus = 'pending';
+    }
+  }
+  const entry = { id: interventionId, message: cleanMessage, actorAgentId, coordinatorAgentId, sessionId, status: queueStatus, queuedAt, deliveredAt: queueStatus === 'delivered' ? now() : null, idempotencyKey };
+  workflow.interventionQueue = [...(workflow.interventionQueue || []), entry].slice(-200);
+  if (queueStatus === 'held') workflow.control = { ...(workflow.control || {}), heldInterventionCount: (workflow.interventionQueue || []).filter((item) => item.status === 'held').length };
+  const event = appendThreadCollaborationEvent(thread, { type: 'intervention.sent', workflowId: workflow.id, taskId: workflow.currentRootTaskId || '', actorAgentId, title: queueStatus === 'held' ? '补充指令已暂存' : `已交给 ${state.agents.find((agent) => agent.id === coordinatorAgentId)?.name || coordinatorAgentId} 协调`, detail: cleanMessage, payload: { action: 'steer', interventionId, queueStatus, coordinatorAgentId } });
+  const result = { interventionId, queueStatus, coordinatorAgentId, sessionId, event, bridgeResult };
+  rememberIdempotent(thread.collaboration, idempotencyKey, result);
+  workflow.updatedAt = now();
+  thread.updatedAt = now();
+  return result;
+}
+
+async function readKanbanTasks(board, options = {}) {
+  const args = ['kanban', '--board', kanbanBoard(board), 'list', '--json'];
+  if (options.includeArchived) args.push('--archived');
+  const { stdout } = await runHermesCommand(args);
+  return parseHermesJson(stdout, []);
+}
+
+async function readKanbanTaskDetail(board, taskId) {
+  const { stdout } = await runHermesCommand(['kanban', '--board', kanbanBoard(board), 'show', String(taskId), '--json']);
+  return parseHermesJson(stdout, {});
+}
+
+const workflowControlBusyStates = new Set(['pausing', 'resuming', 'cancelling']);
+const waitForWorkflowControl = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+function workflowControlError(message, status, code, details = {}) {
+  return Object.assign(new Error(message), { status, code, details });
+}
+
+function startWorkflowControl(workflow, action, idempotencyKey) {
+  const current = workflow.control || {};
+  if (workflowControlBusyStates.has(current.state) && current.idempotencyKey !== idempotencyKey) {
+    throw workflowControlError('当前工作流正在执行其他控制操作。', 409, 'WORKFLOW_CONTROL_IN_PROGRESS', { action: current.action, state: current.state, operationId: current.operationId });
+  }
+  const operationId = current.idempotencyKey === idempotencyKey && current.operationId ? current.operationId : id('workflow_control');
+  const continuingPause = action === 'pause' && current.action === 'pause' && ['pausing', 'paused', 'pause_failed'].includes(current.state);
+  workflow.control = {
+    operationId,
+    idempotencyKey,
+    action,
+    state: action === 'pause' ? 'pausing' : action === 'resume' ? 'resuming' : 'cancelling',
+    affectedTaskIds: action === 'pause' && !continuingPause ? [] : [...new Set(current.affectedTaskIds || [])],
+    stoppedRuns: 0,
+    blockedTasks: 0,
+    preservedWaitingTasks: 0,
+    failedTaskIds: [],
+    heldInterventionCount: (workflow.interventionQueue || []).filter((entry) => entry.status === 'held').length,
+    startedAt: now(),
+    completedAt: null,
+    error: '',
+  };
+  workflow.updatedAt = now();
+  return workflow.control;
+}
+
+async function interruptThreadRunGroup(thread) {
+  const runs = Object.values(thread.activeRunGroup?.activeRuns || {}).filter((run) => run?.runId || run?.sessionId);
+  if (!runs.length && (thread.activeRunId || thread.activeSessionId)) runs.push({ runId: thread.activeRunId, sessionId: thread.activeSessionId });
+  const uniqueRuns = [...new Map(runs.map((run) => [`${run.runId || ''}:${run.sessionId || ''}`, run])).values()];
+  const results = await Promise.allSettled(uniqueRuns.map((run) => requestHermesBridge({ action: 'interrupt', session_id: String(run.sessionId || ''), run_id: run.runId || undefined, message: '用户暂停工作流。' }, { timeoutMs: 10000, retryMs: 1000 })));
+  return results.filter((result) => result.status === 'fulfilled' && result.value?.resolved !== false).length;
+}
+
+async function blockWorkflowTask(boardSlug, task, operationId) {
+  if (task.status === 'running') {
+    await runHermesCommand(['kanban', '--board', boardSlug, 'reclaim', task.id, '--reason', `Frakio 工作流暂停 ${operationId}`]).catch(() => {});
+  }
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const detail = await readKanbanTaskDetail(boardSlug, task.id).catch(() => null);
+    const status = String(detail?.task?.status || detail?.status || task.status);
+    if (status === 'blocked') return true;
+    if (!['running', 'ready'].includes(status)) return false;
+    try {
+      await runHermesCommand(['kanban', '--board', boardSlug, 'block', task.id, `Frakio 工作流暂停 ${operationId}`, '--kind', 'needs_input']);
+      return true;
+    } catch {
+      if (attempt < 2) await waitForWorkflowControl(180);
+    }
+  }
+  return false;
+}
+
+async function pauseCollaborationWorkflow(state, thread, workflow, idempotencyKey) {
+  if (workflow.status === 'cancelled') throw workflowControlError('已结束的工作流不能暂停。', 409, 'WORKFLOW_CANCELLED');
+  if (workflow.status === 'completed') throw workflowControlError('已完成的工作流不需要暂停。', 409, 'WORKFLOW_COMPLETED');
+  const cached = idempotentResult(thread.collaboration, idempotencyKey);
+  if (cached) return { ...cached, idempotent: true };
+  const control = startWorkflowControl(workflow, 'pause', idempotencyKey);
+  appendThreadCollaborationEvent(thread, { type: 'workflow.pause_started', workflowId: workflow.id, actorAgentId: 'user', title: '正在暂停全部任务', payload: { operationId: control.operationId } });
+  await writeState(state);
+
+  const stoppedRuns = await interruptThreadRunGroup(thread).catch(() => 0);
+  const tasks = await readKanbanTasks(workflow.boardSlug, { includeArchived: true });
+  const executable = tasks.filter((task) => ['running', 'ready'].includes(String(task.status)));
+  const preservedWaitingTasks = tasks.filter((task) => !['running', 'ready', 'done', 'archived'].includes(String(task.status))).length;
+  const results = await Promise.all(executable.map(async (task) => ({ taskId: task.id, blocked: await blockWorkflowTask(workflow.boardSlug, task, control.operationId) })));
+  const affectedTaskIds = [...new Set([...(control.affectedTaskIds || []), ...results.filter((result) => result.blocked).map((result) => result.taskId)])];
+  const failedTaskIds = results.filter((result) => !result.blocked).map((result) => result.taskId);
+  const after = await readKanbanTasks(workflow.boardSlug, { includeArchived: true });
+  for (const task of after.filter((item) => ['running', 'ready'].includes(String(item.status)))) if (!failedTaskIds.includes(task.id)) failedTaskIds.push(task.id);
+
+  workflow.control = { ...control, state: failedTaskIds.length ? 'pause_failed' : 'paused', affectedTaskIds, stoppedRuns, blockedTasks: affectedTaskIds.length, preservedWaitingTasks, failedTaskIds, completedAt: now(), error: failedTaskIds.length ? `仍有 ${failedTaskIds.length} 个任务未能停止` : '' };
+  workflow.status = failedTaskIds.length ? 'active' : 'paused';
+  workflow.pausedAt = failedTaskIds.length ? null : now();
+  workflow.updatedAt = now();
+  thread.updatedAt = now();
+  const event = appendThreadCollaborationEvent(thread, {
+    type: failedTaskIds.length ? 'workflow.pause_failed' : 'workflow.paused',
+    workflowId: workflow.id,
+    actorAgentId: 'user',
+    title: failedTaskIds.length ? '暂停未完全生效' : '工作流已暂停',
+    detail: failedTaskIds.length ? `仍有 ${failedTaskIds.length} 个任务需要重试` : `${stoppedRuns} 个运行已停止，${affectedTaskIds.length} 个任务已保留现场`,
+    payload: { operationId: control.operationId, stoppedRuns, blockedTasks: affectedTaskIds.length, preservedWaitingTasks, failedTaskIds },
+  });
+  const result = { ok: !failedTaskIds.length, workflowId: workflow.id, operationId: control.operationId, stoppedRuns, blockedTasks: affectedTaskIds.length, preservedWaitingTasks, failedTaskIds, event };
+  if (!failedTaskIds.length) rememberIdempotent(thread.collaboration, idempotencyKey, result);
+  await writeState(state);
+  if (failedTaskIds.length) throw workflowControlError('工作流未能完全暂停，请重试。', 503, 'WORKFLOW_PAUSE_PARTIAL', result);
+  return result;
+}
+
+async function resumeCollaborationWorkflow(state, thread, workflow, idempotencyKey) {
+  if (workflow.status === 'cancelled') throw workflowControlError('已结束的工作流不能恢复。', 409, 'WORKFLOW_CANCELLED');
+  if (workflow.status !== 'paused' && workflow.control?.state !== 'pause_failed') throw workflowControlError('当前工作流没有暂停。', 409, 'WORKFLOW_NOT_PAUSED');
+  const cached = idempotentResult(thread.collaboration, idempotencyKey);
+  if (cached) return { ...cached, idempotent: true };
+  const previousControl = workflow.control || {};
+  const pauseTaskIds = [...new Set(previousControl.affectedTaskIds || [])];
+  const control = startWorkflowControl(workflow, 'resume', idempotencyKey);
+  control.affectedTaskIds = pauseTaskIds;
+  appendThreadCollaborationEvent(thread, { type: 'workflow.resume_started', workflowId: workflow.id, actorAgentId: 'user', title: '正在恢复全部任务', payload: { operationId: control.operationId } });
+  await writeState(state);
+
+  const held = (workflow.interventionQueue || []).filter((entry) => entry.status === 'held');
+  if (held.length && workflow.currentRootTaskId) {
+    const combined = held.map((entry) => entry.message).filter(Boolean).join('\n\n');
+    if (combined) await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'comment', workflow.currentRootTaskId, `暂停期间的用户补充：\n${combined}`, '--author', 'user']).catch(() => {});
+  }
+  const failedTaskIds = [];
+  let resumedTasks = 0;
+  for (const taskId of pauseTaskIds) {
+    const detail = await readKanbanTaskDetail(workflow.boardSlug, taskId).catch(() => null);
+    const status = String(detail?.task?.status || detail?.status || '');
+    if (status !== 'blocked') continue;
+    try {
+      await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'unblock', '--reason', '用户恢复工作流', taskId]);
+      resumedTasks += 1;
+    } catch {
+      failedTaskIds.push(taskId);
+    }
+  }
+  if (failedTaskIds.length) {
+    workflow.control = { ...control, state: 'pause_failed', failedTaskIds, completedAt: now(), error: `仍有 ${failedTaskIds.length} 个任务未恢复` };
+    workflow.status = 'paused';
+    workflow.updatedAt = now();
+    await writeState(state);
+    throw workflowControlError('工作流未能完全恢复。', 503, 'WORKFLOW_RESUME_PARTIAL', { failedTaskIds });
+  }
+  workflow.interventionQueue = (workflow.interventionQueue || []).map((entry) => entry.status === 'held' ? { ...entry, status: 'pending', releasedAt: now() } : entry);
+  workflow.status = 'active';
+  workflow.pausedAt = null;
+  workflow.control = { ...control, state: 'idle', affectedTaskIds: [], heldInterventionCount: 0, completedAt: now(), error: '' };
+  workflow.updatedAt = now();
+  thread.updatedAt = now();
+  const event = appendThreadCollaborationEvent(thread, { type: 'workflow.resumed', workflowId: workflow.id, actorAgentId: 'user', title: '工作流已恢复', detail: `${resumedTasks} 个任务已恢复调度`, payload: { operationId: control.operationId, resumedTasks, heldInterventions: held.length } });
+  const dispatch = await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'dispatch', '--max', '8', '--json']).then(({ stdout }) => parseHermesJson(stdout, {})).catch((error) => ({ deferredToGateway: true, error: String(error?.message || error) }));
+  const result = { ok: true, workflowId: workflow.id, operationId: control.operationId, resumedTasks, heldInterventions: held.length, event, dispatch };
+  rememberIdempotent(thread.collaboration, idempotencyKey, result);
+  await writeState(state);
+  return result;
+}
+
+async function cancelCollaborationWorkflow(state, thread, workflow, idempotencyKey) {
+  const cached = idempotentResult(thread.collaboration, idempotencyKey);
+  if (cached) return { ...cached, idempotent: true };
+  if (workflow.status === 'cancelled') return { ok: true, workflowId: workflow.id, cancelledTasks: 0, idempotent: true };
+  const control = startWorkflowControl(workflow, 'cancel', idempotencyKey);
+  await writeState(state);
+  const stoppedRuns = await interruptThreadRunGroup(thread).catch(() => 0);
+  const tasks = await readKanbanTasks(workflow.boardSlug, { includeArchived: true });
+  const unfinished = tasks.filter((task) => !['done', 'archived'].includes(String(task.status)));
+  const failedTaskIds = [];
+  for (const task of unfinished) {
+    try {
+      if (task.status === 'running') await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'reclaim', task.id, '--reason', '用户结束协作']).catch(() => {});
+      await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'archive', task.id]);
+    } catch {
+      failedTaskIds.push(task.id);
+    }
+  }
+  if (failedTaskIds.length) {
+    workflow.control = { ...control, state: 'pause_failed', failedTaskIds, completedAt: now(), error: `仍有 ${failedTaskIds.length} 个任务未结束` };
+    await writeState(state);
+    throw workflowControlError('工作流未能完全结束。', 503, 'WORKFLOW_CANCEL_PARTIAL', { failedTaskIds });
+  }
+  if (workflow.plan?.tasks) workflow.plan = { ...workflow.plan, tasks: workflow.plan.tasks.map((task) => ({ ...task, cancelled: task.cancelled || unfinished.some((item) => item.id === task.taskId) })) };
+  workflow.executionBindings = Object.fromEntries(Object.entries(workflow.executionBindings || {}).map(([key, binding]) => [key, { ...binding, status: binding.status === 'done' ? 'done' : 'cancelled' }]));
+  workflow.interventionQueue = (workflow.interventionQueue || []).map((entry) => ['held', 'pending'].includes(entry.status) ? { ...entry, status: 'cancelled', cancelledAt: now() } : entry);
+  workflow.status = 'cancelled';
+  workflow.cancelledAt = now();
+  workflow.pausedAt = null;
+  workflow.control = { ...control, state: 'cancelled', affectedTaskIds: unfinished.map((task) => task.id), stoppedRuns, completedAt: now(), error: '' };
+  workflow.updatedAt = now();
+  thread.updatedAt = now();
+  const event = appendThreadCollaborationEvent(thread, { type: 'workflow.cancelled', workflowId: workflow.id, actorAgentId: 'user', title: '协作已结束', detail: `${unfinished.length} 个未完成任务已取消`, payload: { operationId: control.operationId, stoppedRuns, cancelledTasks: unfinished.length } });
+  const result = { ok: true, workflowId: workflow.id, operationId: control.operationId, stoppedRuns, cancelledTasks: unfinished.length, event };
+  rememberIdempotent(thread.collaboration, idempotencyKey, result);
+  await writeState(state);
+  return result;
+}
+
+async function enforcePausedWorkflowBarrier(state, thread, workflow, tasks = null) {
+  if (workflow.status !== 'paused') return tasks || readKanbanTasks(workflow.boardSlug, { includeArchived: true });
+  const currentTasks = tasks || await readKanbanTasks(workflow.boardSlug, { includeArchived: true });
+  const executable = currentTasks.filter((task) => ['running', 'ready'].includes(String(task.status)));
+  if (!executable.length) return currentTasks;
+  const operationId = workflow.control?.operationId || id('workflow_pause_barrier');
+  const results = await Promise.all(executable.map(async (task) => ({ taskId: task.id, blocked: await blockWorkflowTask(workflow.boardSlug, task, operationId) })));
+  const blockedIds = results.filter((result) => result.blocked).map((result) => result.taskId);
+  const failedTaskIds = results.filter((result) => !result.blocked).map((result) => result.taskId);
+  workflow.control = {
+    ...(workflow.control || {}),
+    operationId,
+    state: failedTaskIds.length ? 'pause_failed' : 'paused',
+    affectedTaskIds: [...new Set([...(workflow.control?.affectedTaskIds || []), ...blockedIds])],
+    blockedTasks: Number(workflow.control?.blockedTasks || 0) + blockedIds.length,
+    failedTaskIds,
+    completedAt: now(),
+    error: failedTaskIds.length ? `暂停屏障未能停止 ${failedTaskIds.length} 个任务` : '',
+  };
+  if (failedTaskIds.length) {
+    workflow.status = 'active';
+    appendThreadCollaborationEvent(thread, { type: 'workflow.pause_failed', workflowId: workflow.id, actorAgentId: 'system', title: '暂停屏障未完全生效', detail: `仍有 ${failedTaskIds.length} 个任务需要重试`, payload: { operationId, failedTaskIds } });
+  }
+  workflow.updatedAt = now();
+  thread.updatedAt = now();
+  await writeState(state);
+  return readKanbanTasks(workflow.boardSlug, { includeArchived: true });
+}
+
+async function recoverWorkflowControls(state) {
+  let changed = false;
+  for (const thread of state.threads || []) {
+    for (const workflow of thread.collaboration?.workflows || []) {
+      if (workflow.status === 'paused') {
+        await enforcePausedWorkflowBarrier(state, thread, workflow).catch(() => {});
+      } else if (workflow.control?.state === 'pausing') {
+        const key = workflow.control.idempotencyKey || `pause-recovery:${workflow.control.operationId || workflow.id}`;
+        await pauseCollaborationWorkflow(state, thread, workflow, key).catch(() => {});
+        changed = true;
+      }
+    }
+  }
+  if (changed) await writeState(state);
+}
+
+async function collaborationSnapshot(state, thread, requestedWorkflowId = '') {
+  const workflows = thread.collaboration?.workflows || [];
+  const selected = requestedWorkflowId ? workflows.filter((workflow) => workflow.id === requestedWorkflowId) : workflows;
+  const hydrated = await Promise.all(selected.map(async (workflow) => {
+    try {
+      let tasks = await readKanbanTasks(workflow.boardSlug, { includeArchived: true });
+      if (workflow.status === 'paused') tasks = await enforcePausedWorkflowBarrier(state, thread, workflow, tasks);
+      const lifecycle = ['paused', 'cancelled', 'archived'].includes(workflow.status) ? workflow.status : boardLifecycle(tasks);
+      return { ...workflow, status: lifecycle, tasks, error: '' };
+    } catch (error) {
+      return { ...workflow, tasks: [], error: String(error?.message || error) };
+    }
+  }));
+  return {
+    threadId: thread.id,
+    mode: thread.executionMode === 'work' ? 'work' : 'chat',
+    workerOutputMode: thread.workerOutputMode === 'all' ? 'all' : 'summary',
+    activeWorkflowId: thread.collaboration?.activeWorkflowId || '',
+    cursor: Number(thread.collaboration?.eventCursor || 0),
+    workflows: hydrated,
+    events: collaborationEventsAfter(thread.collaboration || {}, 0, requestedWorkflowId).slice(-200),
+    fallbackDecisionAgentId: state.ui?.fallbackDecisionAgentId || resolveDefaultAgentId(state),
+  };
+}
+
+function projectCollaborationTaskTransitions(thread, snapshot) {
+  let changed = false;
+  for (const hydrated of snapshot.workflows || []) {
+    const workflow = workflowById(thread, hydrated.id);
+    if (!workflow) continue;
+    const previousById = workflow.taskStatusProjection || {};
+    const nextById = {};
+    for (const task of hydrated.tasks || []) {
+      const previous = previousById[task.id];
+      nextById[task.id] = { status: task.status, title: task.title || task.id };
+      const rootCompleted = (workflow.rootTaskIds || []).includes(task.id) && task.status === 'done' && previous?.status !== 'done';
+      const workerCompleted = !(workflow.rootTaskIds || []).includes(task.id) && task.status === 'done' && previous?.status !== 'done';
+      if (rootCompleted) {
+        const externalRunId = `kanban-root:${task.id}`;
+        const summary = String(task.result || task.latest_summary || '').trim();
+        if (summary && !(thread.messages || []).some((message) => message.externalRunId === externalRunId)) {
+          const coordinatorName = [...(thread.messages || [])].reverse().find((message) => message.agentId === workflow.coordinatorAgentId)?.agentName || workflow.coordinatorAgentId || '协调 Agent';
+          thread.messages = [...(thread.messages || []), { id: id('msg'), agentId: workflow.coordinatorAgentId || 'coordinator', agentName: coordinatorName, role: 'Work 协调汇总', content: summary, externalRunId }];
+          changed = true;
+        }
+      }
+      if (workerCompleted && thread.workerOutputMode === 'all') {
+        const externalRunId = `kanban-task:${task.id}`;
+        const summary = String(task.result || task.latest_summary || '').trim();
+        if (summary && !(thread.messages || []).some((message) => message.externalRunId === externalRunId)) {
+          const planTask = (workflow.plan?.tasks || []).find((item) => item.taskId === task.id);
+          const agentId = planTask?.assigneeAgentId || String(task.assignee || 'worker');
+          const agentName = [...(thread.messages || [])].reverse().find((message) => message.agentId === agentId)?.agentName || agentId;
+          thread.messages = [...(thread.messages || []), { id: id('msg'), agentId, agentName, role: 'Work 成员交付', content: summary, externalRunId }];
+          changed = true;
+        }
+      }
+      if (!previous) {
+        changed = true;
+        continue;
+      }
+      const projected = taskStatusEvent(previous, task);
+      if (projected) {
+        appendThreadCollaborationEvent(thread, { ...projected, workflowId: workflow.id });
+        changed = true;
+      }
+      if (previous.status !== 'done' && task.status === 'done') {
+        const dependencies = (thread.collaboration.events || []).filter((event) => event.workflowId === workflow.id && event.type === 'dependency.created' && event.payload?.parentTaskId === task.id);
+        for (const dependency of dependencies) {
+          const alreadySatisfied = (thread.collaboration.events || []).some((event) => event.type === 'dependency.satisfied' && event.workflowId === workflow.id && event.payload?.parentTaskId === task.id && event.taskId === dependency.taskId);
+          if (!alreadySatisfied) {
+            appendThreadCollaborationEvent(thread, { type: 'dependency.satisfied', workflowId: workflow.id, taskId: dependency.taskId || '', title: `${task.title || task.id} 已完成交付`, detail: '等待任务将在所有父任务完成后自动恢复', payload: { parentTaskId: task.id } });
+            changed = true;
+          }
+        }
+      }
+    }
+    if (JSON.stringify(previousById) !== JSON.stringify(nextById)) {
+      workflow.taskStatusProjection = nextById;
+      workflow.updatedAt = now();
+      changed = true;
+    }
+    if (!['paused', 'cancelled', 'archived'].includes(workflow.status) && !workflowControlBusyStates.has(workflow.control?.state)) {
+      const lifecycle = boardLifecycle(hydrated.tasks || []);
+      if (lifecycle !== workflow.status) {
+        workflow.status = lifecycle;
+        workflow.completedAt = lifecycle === 'completed' ? now() : null;
+        if (lifecycle === 'completed') appendThreadCollaborationEvent(thread, { type: 'workflow.completed', workflowId: workflow.id, title: workflow.name });
+        changed = true;
+      }
+    }
+  }
+  if (changed) {
+    snapshot.cursor = Number(thread.collaboration.eventCursor || 0);
+    snapshot.events = collaborationEventsAfter(thread.collaboration || {}, 0, snapshot.workflows.length === 1 ? snapshot.workflows[0].id : '').slice(-200);
+    thread.updatedAt = now();
+  }
+  return changed;
 }
 
 function selectedProviderConfig(config, providerKey) {
@@ -4762,6 +5345,19 @@ async function writeState(state) {
   await writeStateJson(state);
 }
 
+let stateTransactionQueue = Promise.resolve();
+
+async function updateState(mutator) {
+  const transaction = stateTransactionQueue.then(async () => {
+    const state = await readState();
+    const result = await mutator(state);
+    await writeState(state);
+    return result;
+  });
+  stateTransactionQueue = transaction.catch(() => {});
+  return transaction;
+}
+
 async function walkMarkdown(root, limit = 2000) {
   const out = [];
   async function walk(dir) {
@@ -6138,11 +6734,11 @@ async function verifyManagedRuntime(runtimeDir, expectedVersion, logs) {
   if (expectedVersion && !versionOutput.includes(expectedVersion)) {
     throw new Error(`Runtime 版本验证失败：期望 ${expectedVersion}，实际为 ${versionOutput || '未知'}。`);
   }
-  await requireLoggedCommand(runtime.python, ['-c', `import aiohttp, hermes_cli, hermes_cli.main; assert aiohttp.__version__ == "${requiredAiohttpVersion}"; print("Hermes and aiohttp imports ready")`], {
+  await requireLoggedCommand(runtime.python, ['-c', `import aiohttp, hermes_cli, hermes_cli.main, importlib.metadata as metadata, mcp, starlette; assert aiohttp.__version__ == "${requiredAiohttpVersion}"; assert metadata.version("mcp") == "${requiredMcpVersion}"; assert starlette.__version__ == "${requiredStarletteVersion}"; print("Hermes, aiohttp and MCP imports ready")`], {
     cwd: runtimeDir,
     timeout: 30000,
     env: { HERMES_HOME: hermesHome, HERMES_AGENT_ROOT: runtime.pythonRoot },
-    errorMessage: 'Hermes Agent 模块导入失败。',
+    errorMessage: 'Hermes Agent 或 MCP 模块导入失败。',
   }, logs);
 
   const bridgeScript = (await findFrakioBridgeScript())?.path;
@@ -6194,7 +6790,7 @@ async function installManagedHermesRuntime({ tag = '' } = {}, logs = []) {
     await cp(bundled.runtimeDir, staging, { recursive: true, dereference: true, preserveTimestamps: true });
     await repairPortablePythonLinks(staging);
     const stagingRuntime = inspectHermesRuntimeDir(staging, 'managed');
-    await requireLoggedCommand(stagingRuntime.python, ['-m', 'pip', 'install', '--upgrade', '--force-reinstall', '--no-cache-dir', hermesAgentSourcePath, `aiohttp==${requiredAiohttpVersion}`], {
+    await requireLoggedCommand(stagingRuntime.python, ['-m', 'pip', 'install', '--upgrade', '--force-reinstall', '--no-cache-dir', `${hermesAgentSourcePath}[mcp]`, `aiohttp==${requiredAiohttpVersion}`, `mcp==${requiredMcpVersion}`, `starlette==${requiredStarletteVersion}`], {
       cwd: hermesAgentSourcePath,
       timeout: 30 * 60 * 1000,
       env: { HERMES_HOME: hermesHome, HERMES_AGENT_ROOT: stagingRuntime.pythonRoot },
@@ -6210,7 +6806,7 @@ async function installManagedHermesRuntime({ tag = '' } = {}, logs = []) {
       sourceRepo: officialHermesAgentRepo,
       sourceTag: targetTag,
       sourceCommit: commit,
-      pythonDependencies: { aiohttp: requiredAiohttpVersion },
+      pythonDependencies: { aiohttp: requiredAiohttpVersion, mcp: requiredMcpVersion, starlette: requiredStarletteVersion },
       builtAt: now(),
       bridgeProtocolVersion: frakioBridgeProtocolVersion,
     };
@@ -7720,6 +8316,665 @@ app.get('/api/hermes/kanban/stats', async (req, res) => {
   }
 });
 
+app.get('/api/hermes/kanban/capabilities', async (_req, res) => {
+  try {
+    const [{ stdout: kanbanOut, stderr: kanbanErr }, { stdout: boardsOut, stderr: boardsErr }] = await Promise.all([
+      runHermesCommand(['kanban', '--help']),
+      runHermesCommand(['kanban', 'boards', '--help']),
+    ]);
+    const help = `${kanbanOut || ''}\n${kanbanErr || ''}`;
+    const boardHelp = `${boardsOut || ''}\n${boardsErr || ''}`;
+    const has = (command) => new RegExp(`(?:^|\\s)${command}(?:\\s|$)`, 'm').test(help);
+    res.json({ capabilities: { source: 'hermes-cli', available: true, supports: { boards: /list|create/.test(boardHelp), boardArchive: /\brm\b|remove|delete/.test(boardHelp), taskDetail: has('show'), links: has('link'), comments: has('comment'), attachments: has('attach'), runs: has('show'), logs: has('log'), diagnostics: has('diagnostics'), reclaim: has('reclaim'), reassign: has('reassign'), collaborationSse: true } } });
+  } catch (error) {
+    res.json({ capabilities: { source: 'hermes-cli', available: false, supports: {}, error: String(error?.message || error) } });
+  }
+});
+
+app.delete('/api/hermes/kanban/boards/:slug', async (req, res) => {
+  try {
+    const board = kanbanBoard(req.params.slug);
+    if (board === 'default') return res.status(400).json({ error: 'The default board cannot be archived.' });
+    await runHermesCommand(['kanban', 'boards', 'rm', board]);
+    res.json({ ok: true, board });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Hermes kanban board archive failed.' });
+  }
+});
+
+app.get('/api/hermes/kanban/tasks/:id', async (req, res) => {
+  try {
+    const detail = await readKanbanTaskDetail(req.query?.board || 'default', req.params.id);
+    res.json({ detail });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Hermes kanban task detail failed.' });
+  }
+});
+
+app.post('/api/hermes/kanban/tasks/:id/comments', async (req, res) => {
+  try {
+    const board = kanbanBoard(req.body?.board || req.query?.board || 'default');
+    const body = String(req.body?.body || '').trim();
+    if (!body) return res.status(400).json({ error: 'body is required.' });
+    const args = ['kanban', '--board', board, 'comment', req.params.id, body];
+    if (req.body?.author) args.push('--author', String(req.body.author));
+    await runHermesCommand(args);
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Hermes kanban comment failed.' });
+  }
+});
+
+app.post('/api/hermes/kanban/links', async (req, res) => {
+  try {
+    const board = kanbanBoard(req.body?.board || 'default');
+    const parentId = String(req.body?.parentId || req.body?.parent_id || '').trim();
+    const childId = String(req.body?.childId || req.body?.child_id || '').trim();
+    if (!parentId || !childId) return res.status(400).json({ error: 'parentId and childId are required.' });
+    await runHermesCommand(['kanban', '--board', board, 'link', parentId, childId]);
+    res.json({ ok: true, parentId, childId });
+  } catch (error) {
+    const message = String(error.message || 'Hermes kanban link failed.');
+    res.status(error.status || (/cycle/i.test(message) ? 409 : 500)).json({ error: message, code: /cycle/i.test(message) ? 'KANBAN_DEPENDENCY_CYCLE' : undefined });
+  }
+});
+
+app.delete('/api/hermes/kanban/links', async (req, res) => {
+  try {
+    const board = kanbanBoard(req.body?.board || req.query?.board || 'default');
+    const parentId = String(req.body?.parentId || req.query?.parentId || '').trim();
+    const childId = String(req.body?.childId || req.query?.childId || '').trim();
+    if (!parentId || !childId) return res.status(400).json({ error: 'parentId and childId are required.' });
+    await runHermesCommand(['kanban', '--board', board, 'unlink', parentId, childId]);
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Hermes kanban unlink failed.' });
+  }
+});
+
+app.get('/api/hermes/kanban/tasks/:id/log', async (req, res) => {
+  try {
+    const board = kanbanBoard(req.query?.board || 'default');
+    const tail = Math.max(100, Math.min(100000, Number(req.query?.tail || 20000)));
+    const { stdout } = await runHermesCommand(['kanban', '--board', board, 'log', req.params.id, '--tail', String(tail)]);
+    res.json({ log: String(stdout || '') });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Hermes kanban log failed.' });
+  }
+});
+
+app.get('/api/hermes/kanban/diagnostics', async (req, res) => {
+  try {
+    const board = kanbanBoard(req.query?.board || 'default');
+    const args = ['kanban', '--board', board, 'diagnostics', '--json'];
+    if (req.query?.task) args.push('--task', String(req.query.task));
+    if (req.query?.severity) args.push('--severity', String(req.query.severity));
+    const { stdout } = await runHermesCommand(args);
+    res.json({ diagnostics: parseHermesJson(stdout, []) });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Hermes kanban diagnostics failed.' });
+  }
+});
+
+app.post('/api/hermes/kanban/tasks/:id/reclaim', async (req, res) => {
+  try {
+    const board = kanbanBoard(req.body?.board || 'default');
+    const args = ['kanban', '--board', board, 'reclaim', req.params.id];
+    if (req.body?.reason) args.push('--reason', String(req.body.reason));
+    await runHermesCommand(args);
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Hermes kanban reclaim failed.' });
+  }
+});
+
+app.post('/api/hermes/kanban/tasks/:id/reassign', async (req, res) => {
+  try {
+    const board = kanbanBoard(req.body?.board || 'default');
+    const assignee = String(req.body?.assignee || '').trim();
+    if (!assignee) return res.status(400).json({ error: 'assignee is required.' });
+    const args = ['kanban', '--board', board, 'reassign', req.params.id, assignee];
+    if (req.body?.reclaim) args.push('--reclaim');
+    if (req.body?.reason) args.push('--reason', String(req.body.reason));
+    await runHermesCommand(args);
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Hermes kanban reassign failed.' });
+  }
+});
+
+app.post('/api/hermes/kanban/tasks/:id/attachments', async (req, res) => {
+  try {
+    const board = kanbanBoard(req.body?.board || 'default');
+    const filePath = path.resolve(String(req.body?.path || ''));
+    if (!req.body?.path || !(await exists(filePath))) return res.status(400).json({ error: 'A readable attachment path is required.' });
+    await runHermesCommand(['kanban', '--board', board, 'attach', req.params.id, filePath]);
+    res.json({ ok: true, path: filePath });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Hermes kanban attachment failed.' });
+  }
+});
+
+app.get('/api/threads/:id/collaboration', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    if (!thread) return res.status(404).json({ error: 'Thread not found.' });
+    const snapshot = await collaborationSnapshot(state, thread, String(req.query?.workflowId || ''));
+    if (projectCollaborationTaskTransitions(thread, snapshot)) await writeState(state);
+    res.json({ snapshot });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Collaboration snapshot failed.' });
+  }
+});
+
+app.get('/api/collaboration/overview', async (_req, res) => {
+  try {
+    const state = await readState();
+    const entries = [];
+    for (const thread of state.threads.filter((item) => !item.archivedAt)) {
+      const snapshot = await collaborationSnapshot(state, thread);
+      for (const workflow of snapshot.workflows) entries.push({ ...workflow, threadId: thread.id, threadTitle: thread.title });
+    }
+    res.json({ workflows: entries, checkedAt: now() });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Collaboration overview failed.' });
+  }
+});
+
+app.get('/api/collaboration/resolve', async (req, res) => {
+  try {
+    const state = await readState();
+    const taskId = String(req.query?.taskId || '').trim();
+    const boardSlug = String(req.query?.boardSlug || '').trim();
+    if (!taskId && !boardSlug) return res.status(400).json({ error: 'taskId or boardSlug is required.' });
+    for (const thread of state.threads) {
+      for (const workflow of thread.collaboration?.workflows || []) {
+        if (boardSlug && workflow.boardSlug !== boardSlug) continue;
+        if (taskId) {
+          try {
+            const detail = await readKanbanTaskDetail(workflow.boardSlug, taskId);
+            if (!detail?.task?.id) continue;
+          } catch {
+            continue;
+          }
+        }
+        return res.json({ threadId: thread.id, workflowId: workflow.id, boardSlug: workflow.boardSlug, coordinatorAgentId: workflow.coordinatorAgentId, fallbackDecisionAgentId: workflow.fallbackDecisionAgentId, taskId });
+      }
+    }
+    res.status(404).json({ error: 'No collaboration workflow owns this task or board.' });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Collaboration context resolve failed.' });
+  }
+});
+
+app.post('/api/threads/:id/collaboration/workflows', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    if (!thread) return res.status(404).json({ error: 'Thread not found.' });
+    const result = await createCollaborationWorkflow(state, thread, req.body || {});
+    thread.updatedAt = now();
+    await writeState(state);
+    res.json(result);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Collaboration workflow create failed.' });
+  }
+});
+
+app.patch('/api/threads/:id/collaboration/workflows/:workflowId', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    const workflow = workflowById(thread, req.params.workflowId);
+    if (!thread || !workflow) return res.status(404).json({ error: 'Workflow not found.' });
+    if (req.body?.active === true) thread.collaboration.activeWorkflowId = workflow.id;
+    if (['active', 'completed', 'archived'].includes(req.body?.status)) {
+      workflow.status = req.body.status;
+      workflow.updatedAt = now();
+      if (workflow.status === 'completed') workflow.completedAt = now();
+      if (workflow.status === 'archived') {
+        workflow.archivedAt = now();
+        if (workflow.boardSlug !== 'default') await runHermesCommand(['kanban', 'boards', 'rm', workflow.boardSlug]);
+      }
+      if (workflow.status === 'completed' || workflow.status === 'archived') {
+        appendThreadCollaborationEvent(thread, { type: `workflow.${workflow.status}`, workflowId: workflow.id, title: workflow.name });
+      }
+    }
+    thread.updatedAt = now();
+    await writeState(state);
+    res.json({ workflow });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Collaboration workflow update failed.' });
+  }
+});
+
+for (const action of ['pause', 'resume', 'cancel']) {
+  app.post(`/api/threads/:id/collaboration/workflows/:workflowId/${action}`, async (req, res) => {
+    try {
+      const state = await readState();
+      const thread = state.threads.find((item) => item.id === req.params.id);
+      const workflow = workflowById(thread, req.params.workflowId);
+      if (!thread || !workflow) return res.status(404).json({ error: 'Workflow not found.', code: 'WORKFLOW_NOT_FOUND' });
+      const idempotencyKey = String(req.body?.idempotencyKey || '').trim();
+      if (!idempotencyKey) return res.status(400).json({ error: 'idempotencyKey is required.', code: 'IDEMPOTENCY_KEY_REQUIRED' });
+      const result = action === 'pause'
+        ? await pauseCollaborationWorkflow(state, thread, workflow, idempotencyKey)
+        : action === 'resume'
+          ? await resumeCollaborationWorkflow(state, thread, workflow, idempotencyKey)
+          : await cancelCollaborationWorkflow(state, thread, workflow, idempotencyKey);
+      const snapshot = await collaborationSnapshot(state, thread, workflow.id);
+      res.json({ ...result, workflow, snapshot });
+    } catch (error) {
+      res.status(error.status || 500).json({ error: error.message || `Workflow ${action} failed.`, code: error.code, details: error.details });
+    }
+  });
+}
+
+app.post('/api/threads/:id/collaboration/roots', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    const workflow = workflowById(thread, req.body?.workflowId);
+    if (!thread || !workflow) return res.status(404).json({ error: 'Workflow not found.' });
+    const result = await createCollaborationRoot(state, thread, workflow, req.body || {});
+    thread.updatedAt = now();
+    await writeState(state);
+    res.json(result);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Collaboration root task create failed.' });
+  }
+});
+
+app.get('/api/threads/:id/collaboration/plans/:rootTaskId', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    const workflow = workflowById(thread, String(req.query?.workflowId || ''));
+    if (!thread || !workflow) return res.status(404).json({ error: 'Workflow not found.' });
+    if (workflow.currentRootTaskId && workflow.currentRootTaskId !== req.params.rootTaskId) return res.status(404).json({ error: 'Root task is not active in this workflow.' });
+    res.json({ threadId: thread.id, workflowId: workflow.id, rootTaskId: req.params.rootTaskId, planRevision: Number(workflow.planRevision || 0), plan: workflow.plan || null, executionBindings: workflow.executionBindings || {} });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Collaboration plan read failed.', code: error.code || '' });
+  }
+});
+
+app.post('/api/threads/:id/collaboration/plans', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    const workflow = workflowById(thread, req.body?.workflowId);
+    if (!thread || !workflow) return res.status(404).json({ error: 'Workflow not found.' });
+    const cached = idempotentResult(thread.collaboration, req.body?.idempotencyKey);
+    if (cached) return res.json({ ...cached, idempotent: true });
+    const rootTaskId = String(req.body?.rootTaskId || workflow.currentRootTaskId || '').trim();
+    if (!rootTaskId) return res.status(400).json({ error: 'rootTaskId is required.' });
+    const plan = validateCollaborationPlan(req.body || {}, {
+      agentIds: state.agents.map((agent) => agent.id),
+      currentRevision: Number(workflow.planRevision || 0),
+      rootTaskId,
+    });
+    const previousPlan = workflow.plan || { tasks: [] };
+    const diff = diffCollaborationPlans(previousPlan, plan);
+    const previousByKey = new Map((previousPlan.tasks || []).map((task) => [task.key, task]));
+    const taskByKey = new Map();
+
+    for (const task of plan.tasks) {
+      const previous = previousByKey.get(task.key);
+      if (previous?.taskId) {
+        task.taskId = previous.taskId;
+        taskByKey.set(task.key, task);
+        const taskDetail = await readKanbanTaskDetail(workflow.boardSlug, task.taskId).catch(() => ({}));
+        const currentTask = taskDetail?.task || taskDetail || {};
+        const currentStatus = String(currentTask.status || '');
+        const currentRun = Array.isArray(taskDetail?.runs) ? taskDetail.runs.at(-1) || {} : {};
+        const contentChanged = previous.title !== task.title || previous.description !== task.description || previous.expectedResult !== task.expectedResult;
+        const dependenciesChanged = JSON.stringify(previous.dependsOnKeys || []) !== JSON.stringify(task.dependsOnKeys || []);
+        if (currentStatus === 'done' && !task.cancelled && (contentChanged || dependenciesChanged || previous.assigneeAgentId !== task.assigneeAgentId)) {
+          const completedTaskId = task.taskId;
+          const assignee = agentProfileForId(state, task.assigneeAgentId);
+          const revisionNumber = Number(workflow.planRevision || 0) + 1;
+          const body = [task.description, task.expectedResult ? `预期结果：${task.expectedResult}` : '', `这是已完成任务 ${completedTaskId} 的第 ${revisionNumber} 版修订任务。`, `Frakio 协作上下文：threadId=${thread.id} workflowId=${workflow.id} rootTaskId=${rootTaskId} taskKey=${task.key}`].filter(Boolean).join('\n\n');
+          const args = ['kanban', '--board', workflow.boardSlug, 'create', `修订：${task.title}`, '--json', '--body', body, '--idempotency-key', `plan-revision:${workflow.id}:${rootTaskId}:${task.key}:${revisionNumber}`];
+          if (assignee) args.push('--assignee', assignee);
+          const revisionTask = parseHermesJson((await runHermesCommand(args)).stdout, {});
+          task.taskId = revisionTask.id;
+          task.revisionOfTaskId = completedTaskId;
+          taskByKey.set(task.key, task);
+          await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'link', completedTaskId, revisionTask.id]);
+          appendThreadCollaborationEvent(thread, { type: 'task.created', workflowId: workflow.id, taskId: revisionTask.id, actorAgentId: workflow.coordinatorAgentId, title: `修订：${task.title}`, detail: `基于已完成任务 ${completedTaskId} 创建修订任务`, payload: { rootTaskId, taskKey: task.key, revisionOfTaskId: completedTaskId, assigneeAgentId: task.assigneeAgentId } });
+        } else if (task.cancelled && !previous.cancelled && currentStatus !== 'done') {
+          if (currentStatus === 'running') await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'reclaim', task.taskId, '--reason', '方案修订已取消任务']).catch(() => {});
+          await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'archive', task.taskId]).catch(async () => {
+            await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'block', task.taskId, '方案修订已取消该任务', '--kind', 'needs_input']);
+          });
+        } else if (!task.cancelled && JSON.stringify(previous) !== JSON.stringify(task)) {
+          if (previous.assigneeAgentId !== task.assigneeAgentId) {
+            const assignee = agentProfileForId(state, task.assigneeAgentId);
+            if (assignee) await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'reassign', task.taskId, assignee, '--reclaim', '--reason', '执行方案修订']);
+          }
+          await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'comment', task.taskId, `PLAN REVISION ${Number(workflow.planRevision || 0) + 1}: ${task.description || task.expectedResult || task.title}`, '--author', 'Frakio Work']);
+          if (currentStatus === 'running' && previous.assigneeAgentId === task.assigneeAgentId && contentChanged && !dependenciesChanged) {
+            const sessionId = String(currentRun.session_id || currentRun.sessionId || workflow.executionBindings?.[task.key]?.sessionId || '');
+            let steered = false;
+            if (sessionId) {
+              const steer = await requestHermesBridge({ action: 'steer', session_id: sessionId, text: `执行方案已修订：${task.description || task.expectedResult || task.title}` }, { timeoutMs: 3000, retryMs: 0 }).catch(() => null);
+              steered = Boolean(steer?.accepted);
+            }
+            if (!steered) await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'reclaim', task.taskId, '--reason', '任务内容修订，安全重启当前 worker']).catch(() => {});
+          } else if (currentStatus === 'running' && dependenciesChanged && previous.assigneeAgentId === task.assigneeAgentId) {
+            await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'reclaim', task.taskId, '--reason', '新增依赖，在安全点暂停']).catch(() => {});
+          }
+        }
+        continue;
+      }
+      const assignee = agentProfileForId(state, task.assigneeAgentId);
+      const body = [task.description, task.expectedResult ? `预期结果：${task.expectedResult}` : '', `Frakio 协作上下文：threadId=${thread.id} workflowId=${workflow.id} rootTaskId=${rootTaskId} taskKey=${task.key}`].filter(Boolean).join('\n\n');
+      const args = ['kanban', '--board', workflow.boardSlug, 'create', task.title, '--json', '--body', body, '--idempotency-key', `plan:${workflow.id}:${rootTaskId}:${task.key}`];
+      if (assignee) args.push('--assignee', assignee);
+      const created = parseHermesJson((await runHermesCommand(args)).stdout, {});
+      task.taskId = created.id;
+      taskByKey.set(task.key, task);
+      appendThreadCollaborationEvent(thread, { type: 'task.created', workflowId: workflow.id, taskId: created.id, actorAgentId: workflow.coordinatorAgentId, title: task.title, detail: task.description || task.expectedResult, payload: { rootTaskId, taskKey: task.key, assigneeAgentId: task.assigneeAgentId } });
+    }
+
+    for (const task of plan.tasks.filter((item) => !item.cancelled)) {
+      const previous = previousByKey.get(task.key);
+      for (const removedDependencyKey of (previous?.dependsOnKeys || []).filter((key) => !task.dependsOnKeys.includes(key))) {
+        const previousDependency = previousByKey.get(removedDependencyKey);
+        if (previousDependency?.taskId && task.taskId) await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'unlink', previousDependency.taskId, task.taskId]).catch(() => {});
+      }
+      for (const dependencyKey of task.dependsOnKeys) {
+        const dependency = taskByKey.get(dependencyKey);
+        if (!dependency?.taskId || !task.taskId) continue;
+        await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'link', dependency.taskId, task.taskId]);
+        const alreadyRecorded = (thread.collaboration.events || []).some((event) => event.type === 'dependency.created' && event.workflowId === workflow.id && event.taskId === task.taskId && event.payload?.parentTaskId === dependency.taskId);
+        if (!alreadyRecorded) appendThreadCollaborationEvent(thread, { type: 'dependency.created', workflowId: workflow.id, taskId: task.taskId, actorAgentId: workflow.coordinatorAgentId, title: `${task.title} 等待 ${dependency.title}`, detail: '执行方案依赖', payload: { parentTaskId: dependency.taskId, requesterTaskId: task.taskId, rootTaskId } });
+      }
+    }
+
+    const activePlanTasks = plan.tasks.filter((task) => !task.cancelled && task.taskId);
+    for (const task of activePlanTasks) await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'link', task.taskId, rootTaskId]);
+    if (activePlanTasks.length) {
+      await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'comment', rootTaskId, '执行方案已发布。所有父任务完成并自动恢复后，请读取父任务结果与交付物，生成面向用户的最终汇总，然后完成根任务。不要再次拆解同一批任务。', '--author', 'Frakio Work']);
+      await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'block', rootTaskId, '等待执行方案中的任务完成', '--kind', 'dependency']);
+    }
+
+    const nextRevision = Number(workflow.planRevision || 0) + 1;
+    const storedPlan = { ...plan, revision: nextRevision, tasks: plan.tasks, publishedAt: now(), coordinatorAgentId: workflow.coordinatorAgentId };
+    workflow.plan = storedPlan;
+    workflow.planRevision = nextRevision;
+    workflow.executionBindings = Object.fromEntries(plan.tasks.filter((task) => task.taskId).map((task) => [task.key, {
+      ...(workflow.executionBindings?.[task.key] || {}),
+      taskId: task.taskId,
+      agentId: task.assigneeAgentId,
+      revision: nextRevision,
+      sessionId: workflow.executionBindings?.[task.key]?.sessionId || `work-task-${task.taskId}-${task.assigneeAgentId}`,
+      runId: workflow.executionBindings?.[task.key]?.runId || '',
+      status: task.cancelled ? 'cancelled' : workflow.executionBindings?.[task.key]?.status || 'ready',
+    }]));
+    workflow.updatedAt = now();
+    const eventType = nextRevision === 1 ? 'plan.published' : 'plan.revised';
+    const event = appendThreadCollaborationEvent(thread, {
+      type: eventType,
+      workflowId: workflow.id,
+      taskId: rootTaskId,
+      actorAgentId: workflow.coordinatorAgentId,
+      title: nextRevision === 1 ? '执行方案已发布' : `执行方案已更新至第 ${nextRevision} 版`,
+      detail: plan.summary || plan.goal,
+      payload: { revision: nextRevision, taskCount: activePlanTasks.length, agentIds: [...new Set(activePlanTasks.map((task) => task.assigneeAgentId))], diff },
+    });
+    const result = { workflowId: workflow.id, rootTaskId, plan: storedPlan, planRevision: nextRevision, diff, event };
+    rememberIdempotent(thread.collaboration, req.body?.idempotencyKey, result);
+    thread.updatedAt = now();
+    for (const agentId of [...new Set(activePlanTasks.map((task) => task.assigneeAgentId))]) {
+      const agent = state.agents.find((item) => item.id === agentId);
+      if (agent) await ensureWorkbenchMcpServers(await resolveHermesProfileNameForAgent(agent));
+    }
+    await writeState(state);
+    let dispatch = null;
+    try {
+      dispatch = parseHermesJson((await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'dispatch', '--max', '32', '--json'])).stdout, {});
+    } catch (error) {
+      dispatch = { deferredToGateway: true, error: String(error?.message || error) };
+    }
+    res.json({ ...result, dispatch });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Collaboration plan publish failed.', code: error.code || '' });
+  }
+});
+
+app.post('/api/threads/:id/collaboration/dependencies', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    const workflow = workflowById(thread, req.body?.workflowId);
+    if (!thread || !workflow) return res.status(404).json({ error: 'Workflow not found.' });
+    const cached = idempotentResult(thread.collaboration, req.body?.idempotencyKey);
+    if (cached) return res.json({ ...cached, idempotent: true });
+    const requesterTaskId = String(req.body?.requesterTaskId || '').trim();
+    const title = String(req.body?.title || '').trim();
+    if (!requesterTaskId || !title) return res.status(400).json({ error: 'requesterTaskId and title are required.' });
+    if (req.body?.targetAgentId && !state.agents.some((agent) => agent.id === req.body.targetAgentId)) return res.status(400).json({ error: 'targetAgentId must reference an available Agent.' });
+    const requesterDetail = await readKanbanTaskDetail(workflow.boardSlug, requesterTaskId).catch(() => ({}));
+    const requesterTitle = requesterDetail?.task?.title || requesterTaskId;
+    const assignee = agentProfileForId(state, req.body?.targetAgentId);
+    const createArgs = ['kanban', '--board', workflow.boardSlug, 'create', title, '--json'];
+    if (req.body?.body) createArgs.push('--body', String(req.body.body));
+    if (assignee) createArgs.push('--assignee', assignee);
+    if (req.body?.idempotencyKey) createArgs.push('--idempotency-key', String(req.body.idempotencyKey));
+    const created = await runHermesCommand(createArgs);
+    const dependencyTask = parseHermesJson(created.stdout, {});
+    await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'link', dependencyTask.id, requesterTaskId]);
+    const reason = String(req.body?.reason || `等待 ${dependencyTask.title || dependencyTask.id} 交付`).trim();
+    await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'block', requesterTaskId, reason, '--kind', 'dependency']);
+    const event = appendThreadCollaborationEvent(thread, { type: 'dependency.created', workflowId: workflow.id, taskId: requesterTaskId, actorAgentId: req.body?.actorAgentId || '', title: `${requesterTitle} 等待 ${dependencyTask.title || dependencyTask.id}`, detail: reason, payload: { parentTaskId: dependencyTask.id, requesterTaskId, targetAgentId: req.body?.targetAgentId || '' } });
+    appendThreadCollaborationEvent(thread, { type: 'task.waiting', workflowId: workflow.id, taskId: requesterTaskId, title: `${requesterTitle} 正在等待`, detail: reason, payload: { blockKind: 'dependency', parentTaskId: dependencyTask.id } });
+    const result = { dependencyTask, requesterTaskId, event };
+    rememberIdempotent(thread.collaboration, req.body?.idempotencyKey, result);
+    thread.updatedAt = now();
+    await writeState(state);
+    const dispatch = await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'dispatch', '--max', '8', '--json']).then(({ stdout }) => parseHermesJson(stdout, {})).catch((error) => ({ deferredToGateway: true, error: String(error?.message || error) }));
+    res.json({ ...result, dispatch });
+  } catch (error) {
+    const message = String(error.message || 'Collaboration dependency request failed.');
+    res.status(error.status || (/cycle/i.test(message) ? 409 : 500)).json({ error: message, code: /cycle/i.test(message) ? 'KANBAN_DEPENDENCY_CYCLE' : undefined });
+  }
+});
+
+app.post('/api/threads/:id/collaboration/blockers', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    const workflow = workflowById(thread, req.body?.workflowId);
+    if (!thread || !workflow) return res.status(404).json({ error: 'Workflow not found.' });
+    const kind = ['dependency', 'needs_input', 'capability', 'transient'].includes(req.body?.kind) ? req.body.kind : 'needs_input';
+    if (kind === 'dependency') return res.status(400).json({ error: 'Use the dependency request endpoint for dependency blockers.' });
+    const cached = idempotentResult(thread.collaboration, req.body?.idempotencyKey);
+    if (cached) return res.json({ ...cached, idempotent: true });
+    const taskId = String(req.body?.taskId || '').trim();
+    const evidence = String(req.body?.evidence || req.body?.reason || '').trim();
+    if (!taskId || !evidence) return res.status(400).json({ error: 'taskId and evidence are required.' });
+    if (kind === 'transient') {
+      const priorFailures = (thread.collaboration.events || []).filter((event) => event.workflowId === workflow.id && event.taskId === taskId && event.type === 'task.failed' && event.payload?.blockKind === 'transient').length;
+      if (priorFailures < 2) {
+        await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'block', taskId, evidence, '--kind', 'transient']);
+        await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'unblock', '--reason', `临时故障自动重试 ${priorFailures + 1}/2`, taskId]);
+        const event = appendThreadCollaborationEvent(thread, { type: 'task.failed', workflowId: workflow.id, taskId, actorAgentId: req.body?.actorAgentId || '', title: '任务遇到临时故障', detail: evidence, payload: { blockKind: kind, retryAttempt: priorFailures + 1, retryLimit: 2 } });
+        appendThreadCollaborationEvent(thread, { type: 'task.resumed', workflowId: workflow.id, taskId, actorAgentId: 'system', title: `正在进行第 ${priorFailures + 1} 次自动重试`, detail: evidence, payload: { blockKind: kind, retryAttempt: priorFailures + 1 } });
+        const result = { taskId, kind, retryScheduled: true, retryAttempt: priorFailures + 1, event };
+        rememberIdempotent(thread.collaboration, req.body?.idempotencyKey, result);
+        await writeState(state);
+        const dispatch = await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'dispatch', '--max', '4', '--json']).then(({ stdout }) => parseHermesJson(stdout, {})).catch((error) => ({ deferredToGateway: true, error: String(error?.message || error) }));
+        return res.json({ ...result, dispatch });
+      }
+    }
+    const actorAgentId = String(req.body?.actorAgentId || '');
+    const decisionAgentId = actorAgentId === workflow.coordinatorAgentId
+      ? workflow.fallbackDecisionAgentId
+      : workflow.coordinatorAgentId;
+    const isFallback = decisionAgentId === workflow.fallbackDecisionAgentId;
+    const priorEscalations = (thread.collaboration.events || []).filter((event) => event.workflowId === workflow.id && event.taskId === taskId && event.type === 'escalation.started').length;
+    const decisionAgentAvailable = state.agents.some((agent) => agent.id === decisionAgentId);
+    const mustAskHuman = Boolean(req.body?.requiresUserApproval) || !decisionAgentAvailable || actorAgentId === workflow.fallbackDecisionAgentId || decisionAgentId === actorAgentId;
+    if (!decisionAgentId || priorEscalations >= 2 || mustAskHuman) {
+      await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'block', taskId, evidence, '--kind', kind]);
+      const event = appendThreadCollaborationEvent(thread, { type: 'human.required', workflowId: workflow.id, taskId, actorAgentId, title: '需要人工介入', detail: evidence, payload: { blockKind: kind, attempts: priorEscalations, requiresUserApproval: Boolean(req.body?.requiresUserApproval) } });
+      const result = { taskId, kind, humanRequired: true, event };
+      rememberIdempotent(thread.collaboration, req.body?.idempotencyKey, result);
+      await writeState(state);
+      return res.json(result);
+    }
+    const decisionTitle = `解决阻塞：${String(req.body?.taskTitle || taskId).slice(0, 80)}`;
+    const decisionBody = `来源任务：${taskId}\n阻塞类型：${kind}\n证据：${evidence}\n请提出可执行解决方案；能解决则完成本任务并写明决定，无法解决则调用请求决策工具继续升级。`;
+    const assignee = agentProfileForId(state, decisionAgentId);
+    const createArgs = ['kanban', '--board', workflow.boardSlug, 'create', decisionTitle, '--json', '--body', decisionBody];
+    if (assignee) createArgs.push('--assignee', assignee);
+    if (req.body?.idempotencyKey) createArgs.push('--idempotency-key', `${req.body.idempotencyKey}:decision`);
+    const created = await runHermesCommand(createArgs);
+    const decisionTask = parseHermesJson(created.stdout, {});
+    await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'link', decisionTask.id, taskId]);
+    await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'block', taskId, evidence, '--kind', 'dependency']);
+    const event = appendThreadCollaborationEvent(thread, { type: 'escalation.started', workflowId: workflow.id, taskId, actorAgentId: req.body?.actorAgentId || '', title: isFallback ? '已升级给全局决策 Agent' : '已交给工作流协调 Agent', detail: evidence, payload: { blockKind: kind, decisionTaskId: decisionTask.id, decisionAgentId, level: isFallback ? 'fallback' : 'coordinator' } });
+    const result = { taskId, kind, decisionTask, decisionAgentId, event };
+    rememberIdempotent(thread.collaboration, req.body?.idempotencyKey, result);
+    thread.updatedAt = now();
+    await writeState(state);
+    const dispatch = await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'dispatch', '--max', '4', '--json']).then(({ stdout }) => parseHermesJson(stdout, {})).catch((error) => ({ deferredToGateway: true, error: String(error?.message || error) }));
+    res.json({ ...result, dispatch });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Collaboration blocker report failed.' });
+  }
+});
+
+app.post('/api/threads/:id/collaboration/tasks/:taskId/artifacts', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    const workflow = workflowById(thread, req.body?.workflowId);
+    if (!thread || !workflow) return res.status(404).json({ error: 'Workflow not found.' });
+    const summary = String(req.body?.summary || '').trim();
+    if (!summary && !req.body?.path) return res.status(400).json({ error: 'summary or path is required.' });
+    if (summary) await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'comment', req.params.taskId, `ARTIFACT: ${summary}`, '--author', String(req.body?.author || 'Frakio Work')]);
+    if (req.body?.path) await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'attach', req.params.taskId, path.resolve(String(req.body.path))]);
+    const event = appendThreadCollaborationEvent(thread, { type: 'artifact.published', workflowId: workflow.id, taskId: req.params.taskId, actorAgentId: req.body?.actorAgentId || '', title: req.body?.name || '已发布交付物', detail: summary, payload: { path: req.body?.path || '' } });
+    await writeState(state);
+    res.json({ ok: true, event });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Collaboration artifact publish failed.' });
+  }
+});
+
+app.post('/api/threads/:id/collaboration/tasks/:taskId/complete', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    const workflow = workflowById(thread, req.body?.workflowId);
+    if (!thread || !workflow) return res.status(404).json({ error: 'Workflow not found.' });
+    const summary = String(req.body?.summary || 'Completed from Frakio Work');
+    await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'complete', req.params.taskId, '--summary', summary]);
+    const event = appendThreadCollaborationEvent(thread, { type: 'task.completed', workflowId: workflow.id, taskId: req.params.taskId, actorAgentId: req.body?.actorAgentId || '', title: req.body?.title || '任务已完成', detail: summary });
+    for (const dependency of (thread.collaboration.events || []).filter((item) => item.workflowId === workflow.id && item.type === 'dependency.created' && item.payload?.parentTaskId === req.params.taskId)) {
+      const alreadySatisfied = (thread.collaboration.events || []).some((item) => item.type === 'dependency.satisfied' && item.workflowId === workflow.id && item.taskId === dependency.taskId && item.payload?.parentTaskId === req.params.taskId);
+      if (!alreadySatisfied) appendThreadCollaborationEvent(thread, { type: 'dependency.satisfied', workflowId: workflow.id, taskId: dependency.taskId || '', title: `${req.body?.title || req.params.taskId} 已完成交付`, detail: '等待任务将在所有父任务完成后自动恢复', payload: { parentTaskId: req.params.taskId } });
+    }
+    workflow.taskStatusProjection = { ...(workflow.taskStatusProjection || {}), [req.params.taskId]: { status: 'done', title: req.body?.title || req.params.taskId } };
+    await writeState(state);
+    const dispatch = await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'dispatch', '--max', '8', '--json']).then(({ stdout }) => parseHermesJson(stdout, {})).catch((error) => ({ deferredToGateway: true, error: String(error?.message || error) }));
+    res.json({ ok: true, event, dispatch });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Collaboration task complete failed.' });
+  }
+});
+
+app.post('/api/threads/:id/collaboration/interventions', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    const workflow = workflowById(thread, req.body?.workflowId);
+    if (!thread || !workflow) return res.status(404).json({ error: 'Workflow not found.' });
+    const taskId = String(req.body?.taskId || (req.body?.action === 'steer' ? workflow.currentRootTaskId : '') || '').trim();
+    const action = String(req.body?.action || 'message');
+    const detail = String(req.body?.message || req.body?.reason || '').trim();
+    if (!taskId) return res.status(400).json({ error: 'taskId is required.' });
+    if (workflow.status === 'paused' && ['pause', 'resume', 'reassign', 'human_required'].includes(action)) {
+      return res.status(409).json({ error: '工作流已全局暂停，请先恢复工作流。', code: 'WORKFLOW_PAUSED' });
+    }
+    if (action === 'steer') {
+      const result = await queueWorkSteer(state, thread, workflow, { message: detail, idempotencyKey: req.body?.idempotencyKey || `intervention:${req.body?.interventionId || id('steer')}`, actorAgentId: 'user' });
+      await writeState(state);
+      return res.json({ ok: true, ...result });
+    }
+    if (action === 'pause') await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'block', taskId, detail || '用户暂停', '--kind', 'needs_input']);
+    else if (action === 'resume') await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'unblock', '--reason', detail || '用户恢复', taskId]);
+    else if (action === 'reassign') {
+      const assignee = agentProfileForId(state, req.body?.targetAgentId);
+      if (!assignee) return res.status(400).json({ error: 'targetAgentId is required for reassign.' });
+      const args = ['kanban', '--board', workflow.boardSlug, 'reassign', taskId, assignee, '--reason', detail || '用户转交'];
+      if (req.body?.reclaim) args.push('--reclaim');
+      await runHermesCommand(args);
+    } else if (action === 'human_required') {
+      await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'block', taskId, detail || '需要人工介入', '--kind', 'needs_input']);
+    } else if (detail) {
+      await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'comment', taskId, detail, '--author', 'user']);
+      const taskDetail = await readKanbanTaskDetail(workflow.boardSlug, taskId).catch(() => ({}));
+      const task = taskDetail?.task || taskDetail || {};
+      if (task.status === 'blocked' || task.status === 'scheduled') {
+        await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'unblock', '--reason', '收到用户补充指令', taskId]);
+        workflow.taskStatusProjection = { ...(workflow.taskStatusProjection || {}), [taskId]: { ...task, status: 'ready' } };
+        appendThreadCollaborationEvent(thread, { type: 'task.resumed', workflowId: workflow.id, taskId, actorAgentId: 'user', title: `${task.title || taskId} 已恢复`, detail: '收到用户补充指令后自动恢复执行' });
+      }
+    }
+    const type = action === 'human_required' ? 'human.required' : 'intervention.sent';
+    const event = appendThreadCollaborationEvent(thread, { type, workflowId: workflow.id, taskId, actorAgentId: 'user', title: `用户${action === 'message' ? '发送了指令' : action}`, detail, payload: { action, targetAgentId: req.body?.targetAgentId || '' } });
+    await writeState(state);
+    res.json({ ok: true, event });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Collaboration intervention failed.' });
+  }
+});
+
+app.get('/api/threads/:id/collaboration/events', async (req, res) => {
+  const state = await readState();
+  const thread = state.threads.find((item) => item.id === req.params.id);
+  if (!thread) return res.status(404).json({ error: 'Thread not found.' });
+  const workflowId = String(req.query?.workflowId || '');
+  const afterCursor = Number(req.query?.afterCursor || req.headers['last-event-id'] || 0);
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+  });
+  res.write('retry: 2000\n\n');
+  for (const event of collaborationEventsAfter(thread.collaboration || {}, afterCursor, workflowId)) {
+    res.write(`id: ${event.cursor}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+  }
+  let lastSnapshot = '';
+  const pushSnapshot = async () => {
+    try {
+      const currentState = await readState();
+      const currentThread = currentState.threads.find((item) => item.id === thread.id);
+      if (!currentThread) return;
+      const snapshot = await collaborationSnapshot(currentState, currentThread, workflowId);
+      if (projectCollaborationTaskTransitions(currentThread, snapshot)) await writeState(currentState);
+      const serialized = JSON.stringify(snapshot);
+      if (serialized !== lastSnapshot) {
+        lastSnapshot = serialized;
+        res.write(`event: collaboration.snapshot\ndata: ${serialized}\n\n`);
+      } else {
+        res.write(': heartbeat\n\n');
+      }
+    } catch (error) {
+      res.write(`event: collaboration.error\ndata: ${JSON.stringify({ error: String(error?.message || error) })}\n\n`);
+    }
+  };
+  await pushSnapshot();
+  const timer = setInterval(() => void pushSnapshot(), 1500);
+  req.on('close', () => {
+    clearInterval(timer);
+  });
+});
+
 app.get('/api/agents', (_req, res) => {
   readState().then((state) => res.json({ agents: state.agents }));
 });
@@ -8909,28 +10164,32 @@ app.post('/api/workspaces', async (req, res) => {
 });
 
 app.patch('/api/workspaces/:id', async (req, res) => {
-  const state = await readState();
-  const workspace = state.workspaces.find((item) => item.id === req.params.id);
-  if (!workspace) return res.status(404).json({ error: 'Workspace 不存在。' });
-  if ('name' in req.body) workspace.name = String(req.body.name || workspace.name).slice(0, 60);
-  if ('archived' in req.body) workspace.archivedAt = req.body.archived ? now() : null;
-  if ('pinned' in req.body) workspace.pinnedAt = req.body.pinned ? now() : null;
-  workspace.updatedAt = now();
-  await writeState(state);
-  res.json({ workspace: publicWorkspace(workspace, state) });
+  const result = await updateState(async (state) => {
+    const workspace = state.workspaces.find((item) => item.id === req.params.id);
+    if (!workspace) return null;
+    if ('name' in req.body) workspace.name = String(req.body.name || workspace.name).slice(0, 60);
+    if ('archived' in req.body) workspace.archivedAt = req.body.archived ? now() : null;
+    if ('pinned' in req.body) workspace.pinnedAt = req.body.pinned ? now() : null;
+    workspace.updatedAt = now();
+    return { workspace: publicWorkspace(workspace, state) };
+  });
+  if (!result) return res.status(404).json({ error: 'Workspace 不存在。' });
+  res.json(result);
 });
 
 app.delete('/api/workspaces/:id', async (req, res) => {
-  const state = await readState();
-  const workspace = state.workspaces.find((item) => item.id === req.params.id);
-  if (!workspace) return res.status(404).json({ error: 'Workspace 不存在。' });
-  const deletedThreadIds = state.threads.filter((thread) => thread.workspaceId === workspace.id).map((thread) => thread.id);
-  state.threads = state.threads.filter((thread) => thread.workspaceId !== workspace.id);
-  state.workspaces = state.workspaces.filter((item) => item.id !== workspace.id);
-  if (state.defaultVaultId === workspace.vaultId) state.defaultVaultId = state.vaults.find((vault) => state.workspaces.some((item) => item.vaultId === vault.id))?.id || state.vaults[0]?.id || null;
-  await writeState(state);
-  await attachmentStore.removeForThreads(deletedThreadIds);
-  res.json({ ok: true, deletedWorkspaceId: workspace.id, deletedThreadIds });
+  const result = await updateState(async (state) => {
+    const workspace = state.workspaces.find((item) => item.id === req.params.id);
+    if (!workspace) return null;
+    const deletedThreadIds = state.threads.filter((thread) => thread.workspaceId === workspace.id).map((thread) => thread.id);
+    state.threads = state.threads.filter((thread) => thread.workspaceId !== workspace.id);
+    state.workspaces = state.workspaces.filter((item) => item.id !== workspace.id);
+    if (state.defaultVaultId === workspace.vaultId) state.defaultVaultId = state.vaults.find((vault) => state.workspaces.some((item) => item.vaultId === vault.id))?.id || state.vaults[0]?.id || null;
+    return { deletedWorkspaceId: workspace.id, deletedThreadIds };
+  });
+  if (!result) return res.status(404).json({ error: 'Workspace 不存在。' });
+  await attachmentStore.removeForThreads(result.deletedThreadIds);
+  res.json({ ok: true, ...result });
 });
 
 app.get('/api/conversations', async (_req, res) => {
@@ -8953,34 +10212,43 @@ app.get('/api/threads/archived', async (_req, res) => {
 });
 
 app.post('/api/conversations', async (req, res) => {
-  const state = await readState();
-  const defaultAgentId = resolveDefaultAgentId(state);
-  const spaceId = state.spaces.some((space) => space.id === req.body?.spaceId && !space.archivedAt) ? req.body.spaceId : state.ui.activeSpaceId || state.spaces[0]?.id || null;
-  const primaryAgentId = state.agents.some((agent) => agent.id === req.body?.primaryAgentId) ? req.body.primaryAgentId : defaultAgentId;
-  const primaryAgent = state.agents.find((agent) => agent.id === primaryAgentId);
-  const selectedAgents = Array.from(new Set([primaryAgentId || defaultAgentId].filter(Boolean)));
-  const agentModelOverrides = normalizeAgentModelOverrides(req.body?.agentModelOverrides, state.agents, state.models);
-  const agentRunOverrides = normalizeAgentRunOverrides(req.body?.agentRunOverrides, state.agents);
-  const thread = createThreadRecord({
-    spaceId,
-    workspaceId: null,
-    title: String(req.body?.title || (primaryAgent ? `${primaryAgent.name} 对话` : '新的对话')).slice(0, 60),
-    vaultId: null,
-    selectedAgents,
-    agentModelOverrides,
-    agentRunOverrides,
-    mode: 'direct',
-    primaryAgentId,
-    defaultAgentId: primaryAgentId,
-    agents: state.agents,
-    intro: primaryAgent ? `已开启临时对话，当前默认 Agent 是 ${primaryAgent.name}。需要更多成员时，直接 @Agent。` : '已开启临时对话。需要某个 Agent 参与时，直接 @Agent。',
-  });
-  state.threads.unshift(thread);
-  if (spaceId) state.ui.activeSpaceId = spaceId;
-  await writeState(state);
-  captureTelemetry('conversation_created', { kind: 'direct' });
-  captureMeaningfulActivity('conversation_created');
-  res.json({ thread, conversation: summarizeThread(thread, state) });
+  try {
+    const result = await updateState(async (state) => {
+      const defaultAgentId = resolveDefaultAgentId(state);
+      const spaceId = state.spaces.some((space) => space.id === req.body?.spaceId && !space.archivedAt) ? req.body.spaceId : state.ui.activeSpaceId || state.spaces[0]?.id || null;
+      const requestedCoordinatorId = state.agents.some((agent) => agent.id === req.body?.coordinatorAgentId) ? req.body.coordinatorAgentId : '';
+      const primaryAgentId = state.agents.some((agent) => agent.id === req.body?.primaryAgentId) ? req.body.primaryAgentId : requestedCoordinatorId || defaultAgentId;
+      const primaryAgent = state.agents.find((agent) => agent.id === primaryAgentId);
+      const selectedAgents = Array.from(new Set([primaryAgentId || defaultAgentId].filter(Boolean)));
+      const executionMode = req.body?.executionMode === 'work' ? 'work' : 'chat';
+      const thread = createThreadRecord({
+        spaceId,
+        workspaceId: null,
+        title: String(req.body?.title || (primaryAgent ? `${primaryAgent.name} 对话` : '新的对话')).slice(0, 60),
+        vaultId: null,
+        selectedAgents,
+        agentModelOverrides: normalizeAgentModelOverrides(req.body?.agentModelOverrides, state.agents, state.models),
+        agentRunOverrides: normalizeAgentRunOverrides(req.body?.agentRunOverrides, state.agents),
+        mode: 'direct',
+        executionMode,
+        primaryAgentId,
+        defaultAgentId: primaryAgentId,
+        agents: state.agents,
+        intro: primaryAgent ? `已开启临时对话，当前默认 Agent 是 ${primaryAgent.name}。需要更多成员时，直接 @Agent。` : '已开启临时对话。需要某个 Agent 参与时，直接 @Agent。',
+      });
+      let work = null;
+      if (executionMode === 'work') work = await initializeNewThreadWorkMode(state, thread, requestedCoordinatorId || primaryAgentId, String(req.body?.requestId || ''));
+      state.threads.unshift(thread);
+      if (spaceId) state.ui.activeSpaceId = spaceId;
+      const snapshot = work ? await collaborationSnapshot(state, thread, work.workflow.id) : null;
+      return { state, thread, work, snapshot, executionMode };
+    });
+    captureTelemetry('conversation_created', { kind: 'direct', executionMode: result.executionMode });
+    captureMeaningfulActivity('conversation_created');
+    res.json({ thread: result.thread, conversation: summarizeThread(result.thread, result.state), workflow: result.work?.workflow || null, capability: result.work?.capability || null, snapshot: result.snapshot });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || '新对话创建失败。', code: error.code || '', details: error.details || {} });
+  }
 });
 
 app.get('/api/workspaces/:id/threads', async (req, res) => {
@@ -9030,33 +10298,44 @@ app.get('/api/workspaces/:id/files/content', async (req, res) => {
 });
 
 app.post('/api/workspaces/:id/threads', async (req, res) => {
-  const state = await readState();
-  const workspace = state.workspaces.find((item) => item.id === req.params.id);
-  if (!workspace) return res.status(404).json({ error: 'Workspace 不存在。' });
-  const defaultAgentId = resolveDefaultAgentId(state);
-  const vaultId = workspace.vaultId || null;
-  const thread = createThreadRecord({
-    spaceId: workspace.spaceId || state.ui.activeSpaceId || state.spaces[0]?.id || null,
-    workspaceId: workspace.id,
-    title: String(req.body?.title || '新的团队议事').slice(0, 40),
-    vaultId,
-    selectedAgents: Array.from(new Set([defaultAgentId, 'max'].filter(Boolean))),
-    agentModelOverrides: normalizeAgentModelOverrides(req.body?.agentModelOverrides, state.agents, state.models),
-    agentRunOverrides: normalizeAgentRunOverrides(req.body?.agentRunOverrides, state.agents),
-    mode: 'workspace',
-    primaryAgentId: defaultAgentId,
-    defaultAgentId,
-    agents: state.agents,
-    intro: `新项目对话已创建。项目目录是 ${workspace.rootPath}，自动写入会限制在这个文件夹内。`,
-  });
-  state.threads.unshift(thread);
-  workspace.activeThreadId = thread.id;
-  workspace.updatedAt = now();
-  if (thread.spaceId) state.ui.activeSpaceId = thread.spaceId;
-  await writeState(state);
-  captureTelemetry('conversation_created', { kind: 'workspace' });
-  captureMeaningfulActivity('conversation_created');
-  res.json({ thread });
+  try {
+    const result = await updateState(async (state) => {
+      const workspace = state.workspaces.find((item) => item.id === req.params.id);
+      if (!workspace) return null;
+      const defaultAgentId = resolveDefaultAgentId(state);
+      const coordinatorAgentId = state.agents.some((agent) => agent.id === req.body?.coordinatorAgentId) ? req.body.coordinatorAgentId : defaultAgentId;
+      const executionMode = req.body?.executionMode === 'work' ? 'work' : 'chat';
+      const thread = createThreadRecord({
+        spaceId: workspace.spaceId || state.ui.activeSpaceId || state.spaces[0]?.id || null,
+        workspaceId: workspace.id,
+        title: String(req.body?.title || '新的团队议事').slice(0, 40),
+        vaultId,
+        selectedAgents: Array.from(new Set([defaultAgentId, coordinatorAgentId, 'max'].filter(Boolean))),
+        agentModelOverrides: normalizeAgentModelOverrides(req.body?.agentModelOverrides, state.agents, state.models),
+        agentRunOverrides: normalizeAgentRunOverrides(req.body?.agentRunOverrides, state.agents),
+        mode: 'workspace',
+        executionMode,
+        primaryAgentId: defaultAgentId,
+        defaultAgentId,
+        agents: state.agents,
+        intro: `新项目对话已创建。项目目录是 ${workspace.rootPath}，自动写入会限制在这个文件夹内。`,
+      });
+      let work = null;
+      if (executionMode === 'work') work = await initializeNewThreadWorkMode(state, thread, coordinatorAgentId, String(req.body?.requestId || ''));
+      state.threads.unshift(thread);
+      workspace.activeThreadId = thread.id;
+      workspace.updatedAt = now();
+      if (thread.spaceId) state.ui.activeSpaceId = thread.spaceId;
+      const snapshot = work ? await collaborationSnapshot(state, thread, work.workflow.id) : null;
+      return { thread, work, snapshot, executionMode };
+    });
+    if (!result) return res.status(404).json({ error: 'Workspace 不存在。' });
+    captureTelemetry('conversation_created', { kind: 'workspace', executionMode: result.executionMode });
+    captureMeaningfulActivity('conversation_created');
+    res.json({ thread: result.thread, workflow: result.work?.workflow || null, capability: result.work?.capability || null, snapshot: result.snapshot });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || '新项目对话创建失败。', code: error.code || '', details: error.details || {} });
+  }
 });
 
 app.get('/api/threads/:id', async (req, res) => {
@@ -9067,66 +10346,132 @@ app.get('/api/threads/:id', async (req, res) => {
   res.json({ thread });
 });
 
-app.patch('/api/threads/:id', async (req, res) => {
-  const state = await readState();
-  const thread = state.threads.find((item) => item.id === req.params.id);
-  if (!thread) return res.status(404).json({ error: '会话不存在。' });
-  if ('title' in req.body) thread.title = String(req.body.title || thread.title).slice(0, 60);
-  if ('vaultId' in req.body && thread.mode !== 'workspace') thread.vaultId = req.body.vaultId || null;
-  if (Array.isArray(req.body.selectedAgents)) thread.selectedAgents = req.body.selectedAgents;
-  if ('agentModelOverrides' in req.body) thread.agentModelOverrides = normalizeAgentModelOverrides(req.body.agentModelOverrides, state.agents, state.models);
-  if ('agentRunOverrides' in req.body) thread.agentRunOverrides = normalizeAgentRunOverrides(req.body.agentRunOverrides, state.agents);
-  if ('mode' in req.body && ['workspace', 'direct'].includes(req.body.mode)) thread.mode = req.body.mode;
-  if ('primaryAgentId' in req.body && state.agents.some((agent) => agent.id === req.body.primaryAgentId)) thread.primaryAgentId = req.body.primaryAgentId;
-  if ('defaultAgentId' in req.body && state.agents.some((agent) => agent.id === req.body.defaultAgentId)) thread.defaultAgentId = req.body.defaultAgentId;
-  if ('activeAgentId' in req.body && state.agents.some((agent) => agent.id === req.body.activeAgentId)) thread.activeAgentId = req.body.activeAgentId;
-  if ('followMode' in req.body && ['default', 'conversation'].includes(req.body.followMode)) thread.followMode = req.body.followMode;
-  if ('permissionMode' in req.body && ['manual', 'smart', 'off'].includes(req.body.permissionMode)) thread.permissionMode = req.body.permissionMode;
-  if ('archived' in req.body) thread.archivedAt = req.body.archived ? now() : null;
-  if ('pinned' in req.body) thread.pinnedAt = req.body.pinned ? now() : null;
-  thread.collaboration = normalizeCollaboration({ ...(thread.collaboration || {}), activeAgentId: thread.activeAgentId }, { defaultAgentId: thread.defaultAgentId });
-  thread.updatedAt = now();
-  if (thread.workspaceId && 'archived' in req.body) {
-    const workspace = state.workspaces.find((item) => item.id === thread.workspaceId);
-    if (workspace?.activeThreadId === thread.id && thread.archivedAt) {
-      const nextThread = state.threads
-        .filter((item) => item.workspaceId === thread.workspaceId && item.id !== thread.id && item.mode !== 'direct' && !item.archivedAt)
-        .sort(sortPinnedThenUpdated)[0] || null;
-      workspace.activeThreadId = nextThread?.id || null;
-      workspace.updatedAt = now();
-    } else if (workspace && !thread.archivedAt && !workspace.activeThreadId) {
-      workspace.activeThreadId = thread.id;
-      workspace.updatedAt = now();
+app.patch('/api/threads/:id/mode', async (req, res) => {
+  try {
+    const targetMode = String(req.body?.mode || '').toLowerCase();
+    if (!['chat', 'work'].includes(targetMode)) return res.status(400).json({ error: 'mode must be chat or work.' });
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    if (!thread) return res.status(404).json({ error: '会话不存在。' });
+    const previousMode = thread.executionMode === 'work' ? 'work' : 'chat';
+    if (targetMode === 'chat') {
+      thread.executionMode = 'chat';
+      thread.updatedAt = now();
+      if (previousMode !== 'chat') appendThreadCollaborationEvent(thread, { type: 'mode.changed', workflowId: thread.collaboration?.activeWorkflowId || '', actorAgentId: 'user', title: '已切换到 Chat', detail: '后台 Work 任务会继续运行', payload: { mode: 'chat', previousMode } });
+      await writeState(state);
+      return res.json({ thread, mode: 'chat', workflow: workflowById(thread), backgroundWorkContinues: true });
     }
+
+    const coordinatorAgentId = state.agents.some((agent) => agent.id === req.body?.agentId)
+      ? req.body.agentId
+      : thread.activeAgentId || thread.defaultAgentId || resolveDefaultAgentId(state);
+    const coordinatorAgent = state.agents.find((agent) => agent.id === coordinatorAgentId);
+    const profileName = await resolveHermesProfileNameForAgent(coordinatorAgent || {});
+    const reusableWorkflowStatuses = new Set(['active', 'paused']);
+    let workflow = (thread.collaboration?.workflows || []).find((item) => item.id === thread.collaboration?.activeWorkflowId && reusableWorkflowStatuses.has(item.status))
+      || (thread.collaboration?.workflows || []).find((item) => reusableWorkflowStatuses.has(item.status));
+    let capability;
+    try {
+      capability = await ensureCollaborationRuntimeCapability(profileName);
+    } catch (error) {
+      if (workflow) {
+        workflow.capability = { status: 'blocked', protocolVersion: 0, checkedAt: now(), error: String(error.message || error) };
+        appendThreadCollaborationEvent(thread, { type: 'capability.blocked', workflowId: workflow.id, actorAgentId: 'system', title: '协作工具未加载', detail: String(error.message || error), payload: { profileName, missingTools: error.details?.missingTools || [] } });
+        thread.updatedAt = now();
+        await writeState(state);
+      }
+      error.details = { ...(error.details || {}), mode: 'chat', requestedMode: 'work' };
+      throw error;
+    }
+    if (!workflow) {
+      const created = await createCollaborationWorkflow(state, thread, {
+        name: thread.title || '协作工作流',
+        coordinatorAgentId,
+        idempotencyKey: `mode-work:${thread.id}`,
+      });
+      workflow = created.workflow;
+    } else {
+      workflow.coordinatorAgentId = coordinatorAgentId;
+      workflow.updatedAt = now();
+      thread.collaboration.activeWorkflowId = workflow.id;
+    }
+    workflow.capability = { status: 'ready', protocolVersion: capability.protocolVersion, checkedAt: now(), reloaded: Boolean(capability.reloaded), error: '' };
+    thread.executionMode = 'work';
+    thread.updatedAt = now();
+    if (previousMode !== 'work') appendThreadCollaborationEvent(thread, { type: 'mode.changed', workflowId: workflow.id, actorAgentId: 'user', title: '已切换到 Work', detail: `协调 Agent：${coordinatorAgent?.name || coordinatorAgentId}`, payload: { mode: 'work', previousMode, coordinatorAgentId } });
+    await writeState(state);
+    const snapshot = await collaborationSnapshot(state, thread, workflow.id);
+    res.json({ thread, mode: 'work', workflow, snapshot, capability });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || '对话模式切换失败。', code: error.code || '', details: error.details || {} });
   }
-  await writeState(state);
-  res.json({ thread });
+});
+
+app.patch('/api/threads/:id', async (req, res) => {
+  const result = await updateState(async (state) => {
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    if (!thread) return null;
+    if ('title' in req.body) thread.title = String(req.body.title || thread.title).slice(0, 60);
+    if ('vaultId' in req.body && thread.mode !== 'workspace') thread.vaultId = req.body.vaultId || null;
+    if (Array.isArray(req.body.selectedAgents)) thread.selectedAgents = req.body.selectedAgents;
+    if ('agentModelOverrides' in req.body) thread.agentModelOverrides = normalizeAgentModelOverrides(req.body.agentModelOverrides, state.agents, state.models);
+    if ('agentRunOverrides' in req.body) thread.agentRunOverrides = normalizeAgentRunOverrides(req.body.agentRunOverrides, state.agents);
+    if ('mode' in req.body && ['workspace', 'direct'].includes(req.body.mode)) thread.mode = req.body.mode;
+    if ('primaryAgentId' in req.body && state.agents.some((agent) => agent.id === req.body.primaryAgentId)) thread.primaryAgentId = req.body.primaryAgentId;
+    if ('defaultAgentId' in req.body && state.agents.some((agent) => agent.id === req.body.defaultAgentId)) thread.defaultAgentId = req.body.defaultAgentId;
+    if ('activeAgentId' in req.body && state.agents.some((agent) => agent.id === req.body.activeAgentId)) thread.activeAgentId = req.body.activeAgentId;
+    if ('followMode' in req.body && ['default', 'conversation'].includes(req.body.followMode)) thread.followMode = req.body.followMode;
+    if ('permissionMode' in req.body && ['manual', 'smart', 'off'].includes(req.body.permissionMode)) thread.permissionMode = req.body.permissionMode;
+    if ('workerOutputMode' in req.body && ['summary', 'all'].includes(req.body.workerOutputMode)) thread.workerOutputMode = req.body.workerOutputMode;
+    if ('archived' in req.body) thread.archivedAt = req.body.archived ? now() : null;
+    if ('pinned' in req.body) thread.pinnedAt = req.body.pinned ? now() : null;
+    thread.collaboration = normalizeCollaboration({ ...(thread.collaboration || {}), activeAgentId: thread.activeAgentId }, { defaultAgentId: thread.defaultAgentId });
+    thread.updatedAt = now();
+    if (thread.workspaceId && 'archived' in req.body) {
+      const workspace = state.workspaces.find((item) => item.id === thread.workspaceId);
+      if (workspace?.activeThreadId === thread.id && thread.archivedAt) {
+        const nextThread = state.threads
+          .filter((item) => item.workspaceId === thread.workspaceId && item.id !== thread.id && item.mode !== 'direct' && !item.archivedAt)
+          .sort(sortPinnedThenUpdated)[0] || null;
+        workspace.activeThreadId = nextThread?.id || null;
+        workspace.updatedAt = now();
+      } else if (workspace && !thread.archivedAt && !workspace.activeThreadId) {
+        workspace.activeThreadId = thread.id;
+        workspace.updatedAt = now();
+      }
+    }
+    return { thread };
+  });
+  if (!result) return res.status(404).json({ error: '会话不存在。' });
+  res.json(result);
 });
 
 app.delete('/api/threads/:id', async (req, res) => {
-  const state = await readState();
-  const thread = state.threads.find((item) => item.id === req.params.id);
-  if (!thread) return res.status(404).json({ error: '会话不存在。' });
-  state.threads = state.threads.filter((item) => item.id !== thread.id);
-  let nextThread = null;
-  if (thread.workspaceId) {
-    const workspace = state.workspaces.find((item) => item.id === thread.workspaceId);
-    const remaining = state.threads
-      .filter((item) => item.workspaceId === thread.workspaceId && item.mode !== 'direct' && !item.archivedAt)
-      .sort(sortPinnedThenUpdated);
-    nextThread = remaining[0] || null;
-    if (workspace) {
-      workspace.activeThreadId = nextThread?.id || null;
-      workspace.updatedAt = now();
+  const result = await updateState(async (state) => {
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    if (!thread) return null;
+    state.threads = state.threads.filter((item) => item.id !== thread.id);
+    let nextThread = null;
+    if (thread.workspaceId) {
+      const workspace = state.workspaces.find((item) => item.id === thread.workspaceId);
+      const remaining = state.threads
+        .filter((item) => item.workspaceId === thread.workspaceId && item.mode !== 'direct' && !item.archivedAt)
+        .sort(sortPinnedThenUpdated);
+      nextThread = remaining[0] || null;
+      if (workspace) {
+        workspace.activeThreadId = nextThread?.id || null;
+        workspace.updatedAt = now();
+      }
+    } else {
+      nextThread = state.threads
+        .filter((item) => item.mode === 'direct' && !item.archivedAt)
+        .sort(sortPinnedThenUpdated)[0] || null;
     }
-  } else {
-    nextThread = state.threads
-      .filter((item) => item.mode === 'direct' && !item.archivedAt)
-      .sort(sortPinnedThenUpdated)[0] || null;
-  }
-  await writeState(state);
-  await attachmentStore.removeForThreads([thread.id]);
-  res.json({ ok: true, deletedThreadId: thread.id, nextThreadId: nextThread?.id || null, nextThread: nextThread ? summarizeThread(nextThread, state) : null });
+    return { ok: true, deletedThreadId: thread.id, nextThreadId: nextThread?.id || null, nextThread: nextThread ? summarizeThread(nextThread, state) : null };
+  });
+  if (!result) return res.status(404).json({ error: '会话不存在。' });
+  await attachmentStore.removeForThreads([result.deletedThreadId]);
+  res.json(result);
 });
 
 app.post('/api/threads/:id/convert-to-workspace', async (req, res) => {
@@ -9194,7 +10539,7 @@ app.post('/api/threads/:id/convert-to-workspace', async (req, res) => {
   }
 });
 
-function createThreadRecord({ spaceId, workspaceId, title, vaultId, selectedAgents, agentModelOverrides = {}, agentRunOverrides = {}, mode, primaryAgentId, defaultAgentId, followMode = 'default', intro, agents = [] }) {
+function createThreadRecord({ spaceId, workspaceId, title, vaultId, selectedAgents, agentModelOverrides = {}, agentRunOverrides = {}, mode, executionMode = 'chat', primaryAgentId, defaultAgentId, followMode = 'default', intro, agents = [] }) {
   const threadDefaultAgentId = defaultAgentId || primaryAgentId || selectedAgents?.[0] || 'iris';
   const introAgent = agents.find((agent) => agent.id === threadDefaultAgentId) || agents.find((agent) => agent.id === 'iris') || { id: 'iris', name: 'Iris', role: '书记官 / 默认入口' };
   return {
@@ -9202,6 +10547,8 @@ function createThreadRecord({ spaceId, workspaceId, title, vaultId, selectedAgen
     spaceId: spaceId || null,
     workspaceId,
     mode,
+    executionMode: executionMode === 'work' ? 'work' : 'chat',
+    workerOutputMode: 'summary',
     primaryAgentId: primaryAgentId || threadDefaultAgentId,
     defaultAgentId: threadDefaultAgentId,
     activeAgentId: threadDefaultAgentId,
@@ -9217,6 +10564,7 @@ function createThreadRecord({ spaceId, workspaceId, title, vaultId, selectedAgen
     updatedAt: now(),
     workflow: [],
     workflowState: [],
+    runTranscripts: [],
     proposals: [],
     artifacts: [],
     contextPacket: null,
@@ -9249,6 +10597,8 @@ function summarizeThread(thread, state) {
     workspaceId: thread.workspaceId || null,
     workspaceRootPath: workspace?.rootPath || '',
     mode: thread.mode || 'workspace',
+    executionMode: thread.executionMode === 'work' ? 'work' : 'chat',
+    workerOutputMode: thread.workerOutputMode === 'all' ? 'all' : 'summary',
     primaryAgentId: thread.primaryAgentId || null,
     defaultAgentId: thread.defaultAgentId || null,
     activeAgentId: thread.activeAgentId || null,
@@ -9660,6 +11010,28 @@ function agentIdentityRunInstruction(agent, agents = []) {
   ].join('\n');
 }
 
+function collaborationRunInstruction(thread, agent) {
+  if (thread.executionMode !== 'work') {
+    return '当前对话处于 Chat 模式。按普通多人聊天方式回复；不要创建协作工作流、看板任务或执行方案。需要其他成员接话时继续使用普通 @Agent 路由。';
+  }
+  const workflow = workflowById(thread);
+  const lines = [
+    '当前对话处于 Work 模式。忽略上方关于使用正文 @Agent 交接的群聊规则。你是本根任务的协调 Agent。必须先理解目标，再使用结构化工具发布完整执行方案；不得用正文里的 @Agent 触发实际调度。',
+    `当前 Frakio 对话 threadId：${thread.id}。`,
+  ];
+  if (workflow) {
+    lines.push(`当前工作流 workflowId：${workflow.id}；名称：${workflow.name}；看板：${workflow.boardSlug}；协调 Agent：${workflow.coordinatorAgentId || '未指定'}。`);
+    lines.push(`当前根任务 rootTaskId：${workflow.currentRootTaskId || '未创建'}；当前方案 revision：${Number(workflow.planRevision || 0)}。`);
+    lines.push('根任务已经由 Frakio 创建。不要再次创建 workflow 或 root。先调用 hermes_workbench_collaboration_plan_get，再调用 hermes_workbench_collaboration_plan_publish，提交目标、摘要、稳定 task key、负责人、预期结果和 dependsOnKeys。首次发布 baseRevision 为 0；重规划使用读取到的 revision。发布成功后用简洁自然语言概括方案。');
+    lines.push('用户补充消息中的 @Agent 只表示调整意图。由你决定是否改派、增加任务或修改依赖，并通过新 revision 落地；不要直接唤醒被提及者。');
+  } else {
+    lines.push('协作工作流缺失。这是 capability 阻塞，不得退回普通聊天计划。调用 blocker 工具报告问题。');
+  }
+  lines.push(`你自己的 Agent id：${agent?.id || ''}。所有写操作都使用稳定且唯一的 idempotencyKey。`);
+  lines.push('dependency 类型会自动恢复。needs_input 或 capability 必须调用 hermes_workbench_collaboration_blocker_report，系统会先交给工作流协调 Agent，再升级给全局决策 Agent，最后才请求人工。支付、授权、删除和外部发布不得由决策 Agent 代替用户批准。');
+  return lines.join('\n');
+}
+
 function hermesAgentSessionId(thread, agentId) {
   return String(thread?.agentSessionIds?.[agentId] || `workbench-${thread.id}-${agentId}`);
 }
@@ -9730,23 +11102,29 @@ function normalizeHermesRunEvent(event) {
   const name = String(event?.event || '');
   if (name === 'tool.started' || name === 'tool.running') {
     const display = toolDisplayFromEvent(event, '正在调用工具');
+    const activity = normalizeRunActivityItem(event, 'running');
     return {
       event: 'tool.running',
       runId: event.run_id || '',
       tool: display.toolName || event.tool || '',
       ...display,
+      activity,
+      raw: event,
       timestamp: event.timestamp || Date.now() / 1000,
     };
   }
   if (name === 'tool.completed') {
     const display = toolDisplayFromEvent(event, '工具调用完成');
+    const activity = normalizeRunActivityItem(event, event.error || event.is_error ? 'failed' : 'completed');
     return {
       event: 'tool.completed',
       runId: event.run_id || '',
       tool: display.toolName || event.tool || '',
       ...display,
       duration: event.duration || 0,
-      error: Boolean(event.error),
+      error: Boolean(event.error || event.is_error),
+      activity,
+      raw: event,
       timestamp: event.timestamp || Date.now() / 1000,
     };
   }
@@ -9798,13 +11176,63 @@ function normalizeHermesBridgeChunkEvent(rawEvent) {
 async function mergeHermesWorkflowEvent(threadId, event) {
   const nextStep = stepFromHermesEvent(event);
   if (!nextStep || event.event === 'run.completed') return;
-  const state = await readState();
-  const thread = state.threads.find((item) => item.id === threadId);
-  if (!thread) return;
-  thread.workflowState = mergeWorkflowStep(thread.workflowState || [], nextStep);
-  thread.workflow = thread.workflowState.map((step) => step.title);
-  thread.updatedAt = now();
-  await writeState(state);
+  await updateState(async (state) => {
+    const thread = state.threads.find((item) => item.id === threadId);
+    if (!thread) return;
+    thread.workflowState = mergeWorkflowStep(thread.workflowState || [], nextStep);
+    thread.workflow = thread.workflowState.map((step) => step.title);
+    thread.updatedAt = now();
+  });
+}
+
+function runTranscriptForOutput(thread, runId, outputState) {
+  if (outputState.transcript) return outputState.transcript;
+  const stored = normalizeRunTranscripts(thread?.runTranscripts).find((item) => item.runId === runId);
+  outputState.transcript = stored || {
+    runId,
+    turnId: thread?.activeRunTurnId || runId,
+    messageId: '',
+    agentId: thread?.activeRunAgentId || '',
+    status: 'running',
+    groups: [],
+    partialContent: '',
+    createdAt: now(),
+    updatedAt: now(),
+  };
+  return outputState.transcript;
+}
+
+function finalizeStoredRunTranscript(thread, runId, status, partialContent = '', messageId = '') {
+  const transcript = normalizeRunTranscripts(thread?.runTranscripts).find((item) => item.runId === runId);
+  if (!transcript) return null;
+  transcript.status = status;
+  transcript.messageId = messageId || transcript.messageId || '';
+  transcript.partialContent = status === 'completed' ? '' : String(partialContent || '').slice(0, 20000);
+  transcript.updatedAt = now();
+  transcript.groups = transcript.groups.map((group) => {
+    const items = group.items.map((item) => item.status === 'running'
+      ? { ...item, status: status === 'failed' ? 'failed' : status === 'cancelled' ? 'cancelled' : 'completed', updatedAt: now() }
+      : item);
+    const groupStatus = items.some((item) => item.status === 'failed') ? 'failed'
+      : items.some((item) => item.status === 'cancelled') ? 'cancelled' : 'completed';
+    return { ...group, items, status: groupStatus, summary: summarizeActivityItems(items), updatedAt: now() };
+  });
+  return upsertRunTranscript(thread, transcript);
+}
+
+async function recordRunActivity(threadId, runId, outputState, event) {
+  return updateState(async (state) => {
+    const thread = state.threads.find((item) => item.id === threadId);
+    if (!thread) return event;
+    const transcript = runTranscriptForOutput(thread, runId, outputState);
+    const activity = event.activity || normalizeRunActivityItem(event.raw || event, event.event === 'tool.completed' ? (event.error ? 'failed' : 'completed') : 'running');
+    const applied = applyRunActivityToTranscript(transcript, activity, { contentOffset: outputState.text.length, groupOpen: outputState.activityGroupOpen });
+    outputState.transcript = applied.transcript;
+    outputState.activityGroupOpen = applied.groupOpen;
+    upsertRunTranscript(thread, applied.transcript);
+    thread.updatedAt = now();
+    return { ...event, activity, groupId: applied.group.id, contentOffset: applied.group.contentOffset, groupSummary: applied.group.summary, groupStatus: applied.group.status };
+  });
 }
 
 function writeHermesRunSse(res, event) {
@@ -9887,7 +11315,7 @@ function hermesChunkError(chunk) {
   return '';
 }
 
-async function completeHermesRunFromOutput(threadId, runId, output, usage, res) {
+async function completeHermesRunFromOutput(threadId, runId, output, usage, res, outputState = {}) {
   const telemetryState = await readState().catch(() => null);
   const telemetryThread = telemetryState?.threads?.find((item) => item.id === threadId);
   if (!output) {
@@ -9897,7 +11325,9 @@ async function completeHermesRunFromOutput(threadId, runId, output, usage, res) 
     writeHermesRunSse(res, { event: 'run.failed', runId, error, thread, timestamp: Date.now() / 1000 });
     return { completed: true, failed: true, thread };
   }
-  const thread = await appendHermesRunResult(threadId, output, runId, usage || {});
+  const streamedText = String(outputState.text || '');
+  const contentOffsetShift = streamedText.length - trimLeadingBlankLines(streamedText).length;
+  const thread = await appendHermesRunResult(threadId, output, runId, usage || {}, contentOffsetShift);
   const completedMessage = thread?.messages?.find((message) => message.externalRunId === runId);
   captureTelemetry('agent_run_completed', runTelemetryProperties(telemetryThread));
   writeHermesRunSse(res, {
@@ -9915,23 +11345,25 @@ async function completeHermesRunFromOutput(threadId, runId, output, usage, res) 
   return { completed: true, failed: false, thread };
 }
 
-async function failHermesRunFromChunk(threadId, runId, errorMessage, res) {
+async function failHermesRunFromChunk(threadId, runId, errorMessage, res, outputState = {}) {
   const details = hermesRuntimeErrorDetails(errorMessage || 'Hermes Bridge run failed', 'default');
   const event = { event: 'run.failed', runId, error: enrichMissingExecutableError(errorMessage || 'Hermes Bridge run failed', 'default'), details, timestamp: Date.now() / 1000 };
-  const state = await readState();
-  let thread = state.threads.find((item) => item.id === threadId);
-  const telemetryProperties = runTelemetryProperties(thread);
-  if (thread) {
-    thread.runStatus = 'failed';
+  let telemetryProperties = {};
+  const thread = await updateState(async (state) => {
+    const currentThread = state.threads.find((item) => item.id === threadId);
+    telemetryProperties = runTelemetryProperties(currentThread);
+    if (!currentThread) return null;
+    currentThread.runStatus = 'failed';
+    finalizeStoredRunTranscript(currentThread, runId, 'failed', outputState.text || '');
     finishStoredModelRun(state, { runId, threadId, status: 'failed', error: event.error });
-    finishActiveRunGroupChild(thread, runId, 'failed');
-    clearHermesRunState(thread);
-    thread.workflowState = mergeWorkflowStep(closeOpenWorkflowSteps(thread.workflowState || [], 'failed'), stepFromHermesEvent(event));
-    thread.workflow = thread.workflowState.map((step) => step.title);
-    thread.updatedAt = now();
-    await writeState(state);
-    event.thread = thread;
-  }
+    finishActiveRunGroupChild(currentThread, runId, 'failed');
+    clearHermesRunState(currentThread);
+    currentThread.workflowState = mergeWorkflowStep(closeOpenWorkflowSteps(currentThread.workflowState || [], 'failed'), stepFromHermesEvent(event));
+    currentThread.workflow = currentThread.workflowState.map((step) => step.title);
+    currentThread.updatedAt = now();
+    return currentThread;
+  });
+  if (thread) event.thread = thread;
   captureTelemetry('agent_run_failed', { stage: 'runtime', error_code: telemetryErrorCode({ message: errorMessage }), ...telemetryProperties });
   writeHermesRunSse(res, event);
   return { completed: true, failed: true, thread };
@@ -9946,6 +11378,7 @@ async function processHermesBridgeChunk({ threadId, runId, chunk, res, outputSta
       const delta = String(rawEvent.delta || '');
       if (delta) {
         outputState.text += delta;
+        outputState.activityGroupOpen = false;
         writeHermesRunSse(res, { event: 'message.delta', runId, delta, timestamp: Date.now() / 1000 });
       }
       continue;
@@ -9956,6 +11389,7 @@ async function processHermesBridgeChunk({ threadId, runId, chunk, res, outputSta
       const delta = String(event.delta || '');
       if (delta) {
         outputState.text += delta;
+        outputState.activityGroupOpen = false;
         writeHermesRunSse(res, { ...event, runId: event.runId || runId, delta });
       }
       continue;
@@ -9963,60 +11397,68 @@ async function processHermesBridgeChunk({ threadId, runId, chunk, res, outputSta
 
     if (event.event === 'run.completed') {
       const output = extractHermesOutput(outputState.text, event.output, chunk.output, chunk.result);
-      return completeHermesRunFromOutput(threadId, runId, output, event.usage || chunk.usage || {}, res);
+      return completeHermesRunFromOutput(threadId, runId, output, event.usage || chunk.usage || {}, res, outputState);
     }
 
     if (event.event === 'run.failed' || event.event === 'run.cancelled') {
-      const state = await readState();
-      const thread = state.threads.find((item) => item.id === threadId);
-      const telemetryProperties = runTelemetryProperties(thread);
-      if (thread) {
-        thread.runStatus = event.event === 'run.failed' ? 'failed' : 'idle';
+      let telemetryProperties = {};
+      const thread = await updateState(async (state) => {
+        const currentThread = state.threads.find((item) => item.id === threadId);
+        telemetryProperties = runTelemetryProperties(currentThread);
+        if (!currentThread) return null;
+        currentThread.runStatus = event.event === 'run.failed' ? 'failed' : 'idle';
+        finalizeStoredRunTranscript(currentThread, runId, event.event === 'run.failed' ? 'failed' : 'cancelled', outputState.text || '');
         finishStoredModelRun(state, {
           runId,
           threadId,
           status: event.event === 'run.failed' ? 'failed' : 'cancelled',
           error: event.error || (event.event === 'run.cancelled' ? '用户已停止运行。' : ''),
         });
-        finishActiveRunGroupChild(thread, runId, event.event === 'run.failed' ? 'failed' : 'cancelled');
-        clearHermesRunState(thread);
-        thread.workflowState = closeOpenWorkflowSteps(thread.workflowState || [], event.event === 'run.failed' ? 'failed' : 'completed');
-        thread.workflow = thread.workflowState.map((step) => step.title);
-        thread.updatedAt = now();
-        await writeState(state);
-        event.thread = thread;
-      }
+        finishActiveRunGroupChild(currentThread, runId, event.event === 'run.failed' ? 'failed' : 'cancelled');
+        clearHermesRunState(currentThread);
+        currentThread.workflowState = closeOpenWorkflowSteps(currentThread.workflowState || [], event.event === 'run.failed' ? 'failed' : 'completed');
+        currentThread.workflow = currentThread.workflowState.map((step) => step.title);
+        currentThread.updatedAt = now();
+        return currentThread;
+      });
+      if (thread) event.thread = thread;
       if (event.event === 'run.failed') captureTelemetry('agent_run_failed', { stage: 'runtime', error_code: 'bridge_failed', ...telemetryProperties });
       writeHermesRunSse(res, event);
       return { completed: true, failed: event.event === 'run.failed', thread };
     }
 
-    await mergeHermesWorkflowEvent(threadId, event);
-    if (event.event !== 'agent.event' || event.title || event.detail) writeHermesRunSse(res, event);
+    const outgoingEvent = event.event === 'tool.running' || event.event === 'tool.completed'
+      ? await recordRunActivity(threadId, runId, outputState, event)
+      : event;
+    if (outgoingEvent.event !== 'tool.running' && outgoingEvent.event !== 'tool.completed') {
+      await mergeHermesWorkflowEvent(threadId, outgoingEvent);
+    }
+    if (outgoingEvent.event !== 'agent.event' || outgoingEvent.title || outgoingEvent.detail) writeHermesRunSse(res, outgoingEvent);
   }
 
   if (chunk.delta && !sawStreamDeltaEvent) {
     const delta = String(chunk.delta || '');
     outputState.text += delta;
+    outputState.activityGroupOpen = false;
     writeHermesRunSse(res, { event: 'message.delta', runId, delta, timestamp: Date.now() / 1000 });
   }
 
   if (chunk.done || ['complete', 'completed', 'interrupted', 'error', 'failed'].includes(String(chunk.status || '').toLowerCase())) {
     const status = String(chunk.status || '').toLowerCase();
     const terminalError = hermesChunkError(chunk);
-    if (status === 'error' || status === 'failed' || terminalError) return failHermesRunFromChunk(threadId, runId, terminalError || 'Hermes Bridge run failed', res);
+    if (status === 'error' || status === 'failed' || terminalError) return failHermesRunFromChunk(threadId, runId, terminalError || 'Hermes Bridge run failed', res, outputState);
     const output = extractHermesOutput(outputState.text, chunk.output, chunk.result);
-    return completeHermesRunFromOutput(threadId, runId, output, chunk.usage || {}, res);
+    return completeHermesRunFromOutput(threadId, runId, output, chunk.usage || {}, res, outputState);
   }
 
   return { completed: false };
 }
 
-async function appendHermesRunResult(threadId, output, runId, usage = {}) {
-  const state = await readState();
-  const thread = state.threads.find((item) => item.id === threadId);
-  if (!thread) return null;
-  const agent = state.agents.find((item) => item.id === thread.activeRunAgentId)
+async function appendHermesRunResult(threadId, output, runId, usage = {}, contentOffsetShift = 0) {
+  return updateState(async (state) => {
+    const thread = state.threads.find((item) => item.id === threadId);
+    if (!thread) return null;
+    const agent = state.agents.find((item) => item.id === thread.activeRunAgentId)
     || resolveThreadDefaultAgent(state, thread)
     || state.agents[0]
     || { id: 'iris', name: 'Iris', role: 'Hermes Agent' };
@@ -10040,6 +11482,15 @@ async function appendHermesRunResult(threadId, output, runId, usage = {}) {
       }),
     ];
   }
+  const completedRunMessage = (thread.messages || []).find((message) => message.externalRunId === runId);
+  if (contentOffsetShift > 0) {
+    const transcript = normalizeRunTranscripts(thread.runTranscripts).find((item) => item.runId === runId);
+    if (transcript) {
+      transcript.groups = transcript.groups.map((group) => ({ ...group, contentOffset: Math.max(0, group.contentOffset - contentOffsetShift) }));
+      upsertRunTranscript(thread, transcript);
+    }
+  }
+  finalizeStoredRunTranscript(thread, runId, 'completed', '', completedRunMessage?.id || '');
   thread.updatedAt = now();
   thread.runStatus = 'idle';
   clearHermesRunState(thread);
@@ -10057,6 +11508,27 @@ async function appendHermesRunResult(threadId, output, runId, usage = {}) {
   thread.externalSessionId = thread.externalSessionId || hermesAgentSessionId(thread, defaultAgent.id);
   if (thread.activeRunGroup?.turnId === runTurnId) {
     finishActiveRunGroupChild(thread, runId, 'completed');
+  }
+  const activeWorkflow = thread.executionMode === 'work' ? workflowById(thread) : null;
+  if (activeWorkflow?.currentRootTaskId && activeWorkflow.coordinatorAgentId === agent.id && activeWorkflow.plan?.tasks?.length) {
+    const planTasks = activeWorkflow.plan.tasks.filter((task) => !task.cancelled && task.taskId);
+    const taskDetails = await Promise.all(planTasks.map((task) => readKanbanTaskDetail(activeWorkflow.boardSlug, task.taskId).catch(() => null)));
+    const allPlanTasksFinished = planTasks.length > 0 && taskDetails.every((detail) => ['done', 'archived', 'cancelled'].includes(String(detail?.task?.status || detail?.status || '')));
+    if (allPlanTasksFinished) {
+      const rootDetail = await readKanbanTaskDetail(activeWorkflow.boardSlug, activeWorkflow.currentRootTaskId).catch(() => null);
+      const rootStatus = String(rootDetail?.task?.status || rootDetail?.status || '');
+      const rootCompletionRecorded = (thread.collaboration?.events || []).some((event) => event.workflowId === activeWorkflow.id && event.taskId === activeWorkflow.currentRootTaskId && event.type === 'task.completed');
+      if (!rootCompletionRecorded && !['done', 'archived', 'cancelled'].includes(rootStatus)) {
+        await runHermesCommand(['kanban', '--board', activeWorkflow.boardSlug, 'complete', activeWorkflow.currentRootTaskId, '--summary', finalOutput]);
+        appendThreadCollaborationEvent(thread, { type: 'task.completed', workflowId: activeWorkflow.id, taskId: activeWorkflow.currentRootTaskId, actorAgentId: agent.id, title: rootDetail?.task?.title || thread.title, detail: finalOutput, payload: { root: true } });
+      }
+      if (activeWorkflow.status !== 'completed') {
+        activeWorkflow.status = 'completed';
+        activeWorkflow.completedAt = now();
+        activeWorkflow.updatedAt = now();
+        appendThreadCollaborationEvent(thread, { type: 'workflow.completed', workflowId: activeWorkflow.id, actorAgentId: agent.id, title: activeWorkflow.name, detail: '根任务和执行方案已经完成' });
+      }
+    }
   }
   thread.workflowState = mergeWorkflowStep(closeOpenWorkflowSteps(thread.workflowState || [], 'completed'), { title: '生成最终回复', status: 'completed', source: 'run', updatedAt: now() });
   thread.workflow = thread.workflowState.map((step) => step.title);
@@ -10085,8 +11557,8 @@ async function appendHermesRunResult(threadId, output, runId, usage = {}) {
     });
     state.observability.modelUsage = state.observability.modelUsage.slice(-800);
   }
-  await writeState(state);
-  return thread;
+    return thread;
+  });
 }
 
 function extractHermesOutput(...sources) {
@@ -10121,9 +11593,9 @@ function extractHermesOutput(...sources) {
 }
 
 async function failHermesRun(threadId, runId, errorMessage, title = 'Hermes Agent 运行失败') {
-  const state = await readState();
-  const thread = state.threads.find((item) => item.id === threadId);
-  if (thread) {
+  return updateState(async (state) => {
+    const thread = state.threads.find((item) => item.id === threadId);
+    if (!thread) return null;
     thread.runStatus = 'failed';
     finishStoredModelRun(state, { runId, threadId, status: 'failed', error: errorMessage });
     finishActiveRunGroupChild(thread, runId, 'failed');
@@ -10131,9 +11603,8 @@ async function failHermesRun(threadId, runId, errorMessage, title = 'Hermes Agen
     thread.workflowState = mergeWorkflowStep(closeOpenWorkflowSteps(thread.workflowState || [], 'failed'), { title, status: 'failed', source: 'run', detail: String(errorMessage || '').slice(0, 200), updatedAt: now() });
     thread.workflow = thread.workflowState.map((step) => step.title);
     thread.updatedAt = now();
-    await writeState(state);
-  }
-  return thread || null;
+    return thread;
+  });
 }
 
 async function healStaleRunningThreads(state) {
@@ -10185,12 +11656,14 @@ async function healStaleRunningThreads(state) {
 app.post('/api/threads/:id/runs', async (req, res) => {
   let runProfileName = 'default';
   let runDiagnosticId = '';
+  let runTurnId = '';
   try {
     const state = await readState();
     const thread = state.threads.find((item) => item.id === req.params.id);
     if (!thread) return res.status(404).json({ error: '会话不存在。' });
     const message = String(req.body?.message || '').trim();
     const turnId = String(req.body?.turnId || id('turn'));
+    runTurnId = turnId;
     const attachmentMetadata = await attachmentStore.resolveMany(req.body?.attachmentIds);
     if (!message && !attachmentMetadata.length) return res.status(400).json({ error: '消息和附件不能同时为空。' });
     const existingRunGroup = thread.activeRunGroup?.turnId === turnId ? thread.activeRunGroup : null;
@@ -10212,7 +11685,10 @@ app.post('/api/threads/:id/runs', async (req, res) => {
 
     const selected = Array.isArray(req.body?.selectedAgents) ? req.body.selectedAgents : thread.selectedAgents || [resolveDefaultAgentId(state)];
     const selectedAgents = state.agents.filter((agent) => selected.includes(agent.id));
-    const primaryAgent = resolveRunTargetAgent(state, thread, req.body?.targetAgentId, selectedAgents);
+    let primaryAgent = resolveRunTargetAgent(state, thread, req.body?.targetAgentId, selectedAgents);
+    if (thread.executionMode === 'work' && workflowById(thread)?.currentRootTaskId) {
+      primaryAgent = state.agents.find((agent) => agent.id === workflowById(thread).coordinatorAgentId) || primaryAgent;
+    }
     if (!primaryAgent) return res.status(400).json({ error: '没有可用的 Agent。' });
     const routingMessage = message || '请查看并处理这些附件。';
     const mentionedAgents = matchMentionedAgents(routingMessage, state.agents, selected, resolveDefaultAgentId(state));
@@ -10251,6 +11727,65 @@ app.post('/api/threads/:id/runs', async (req, res) => {
       error.code = 'MCP_COMMAND_MISSING';
       error.details = missingMcpCommands[0];
       throw error;
+    }
+    let workRoot = null;
+    let workReplan = false;
+    if (thread.executionMode === 'work' && !req.body?.sourceAgentId) {
+      let workflow = workflowById(thread);
+      if (workflow?.status === 'cancelled') {
+        const created = await createCollaborationWorkflow(state, thread, {
+          name: thread.title || '协作工作流',
+          coordinatorAgentId: primaryAgent.id,
+          idempotencyKey: `post-cancel-work:${turnId}`,
+        });
+        workflow = created.workflow;
+      }
+      if (!workflow) throw Object.assign(new Error('Work 模式没有可用工作流。请重新切换到 Work。'), { status: 409, code: 'WORKFLOW_MISSING' });
+      let capability;
+      try {
+        capability = await ensureCollaborationRuntimeCapability(profileName);
+      } catch (error) {
+        workflow.capability = { status: 'blocked', protocolVersion: 0, checkedAt: now(), error: String(error.message || error) };
+        appendThreadCollaborationEvent(thread, { type: 'capability.blocked', workflowId: workflow.id, taskId: workflow.currentRootTaskId || '', actorAgentId: 'system', title: '协作工具未加载', detail: String(error.message || error), payload: { profileName, missingTools: error.details?.missingTools || [] } });
+        await writeState(state);
+        throw error;
+      }
+      workflow.capability = { status: 'ready', protocolVersion: capability.protocolVersion, checkedAt: now(), reloaded: Boolean(capability.reloaded), error: '' };
+      let hasUnfinishedRoot = false;
+      if (workflow.currentRootTaskId) {
+        const detail = await readKanbanTaskDetail(workflow.boardSlug, workflow.currentRootTaskId).catch(() => null);
+        const rootStatus = detail?.task?.status || detail?.status || '';
+        hasUnfinishedRoot = Boolean(rootStatus && !['done', 'archived', 'cancelled', 'failed'].includes(rootStatus));
+      }
+      if (hasUnfinishedRoot) {
+        const intervention = await queueWorkSteer(state, thread, workflow, { message: routingMessage, idempotencyKey: `run-steer:${turnId}`, actorAgentId: 'user' });
+        if (intervention.queueStatus === 'delivered' || intervention.queueStatus === 'held') {
+          const userMessage = { id: id('msg'), agentId: 'user', agentName: '你', role: 'Workspace Owner', content: message, attachments: attachmentMetadata.map(attachmentStore.publicAttachment) };
+          await attachmentStore.claim(attachmentMetadata, thread.id, userMessage.id);
+          thread.messages = [...(thread.messages || []), userMessage];
+          await writeState(state);
+          return res.status(202).json({ kind: 'steer', status: intervention.queueStatus, thread, workflowId: workflow.id, rootTaskId: workflow.currentRootTaskId, ...intervention });
+        }
+        workReplan = true;
+        workRoot = { id: workflow.currentRootTaskId };
+      }
+      if (!hasUnfinishedRoot) {
+        workflow.coordinatorAgentId = primaryAgent.id;
+        workflow.status = 'active';
+        workflow.completedAt = null;
+        if (workflow.plan) workflow.planHistory = [...(workflow.planHistory || []), workflow.plan].slice(-50);
+        workflow.plan = null;
+        workflow.planRevision = 0;
+        workflow.executionBindings = {};
+        const rootResult = await createCollaborationRoot(state, thread, workflow, {
+          title: message.slice(0, 120) || attachmentMetadata.map((item) => item.name).join('、') || '新的协作任务',
+          body: hermesStoredMessageContent(message, attachmentMetadata),
+          assigneeAgentId: primaryAgent.id,
+          actorAgentId: 'user',
+          idempotencyKey: `run-root:${turnId}`,
+        });
+        workRoot = rootResult.task;
+      }
     }
     const sessionId = hermesAgentSessionId(thread, primaryAgent.id);
     const userMessage = { id: id('msg'), agentId: 'user', agentName: '你', role: 'Workspace Owner', content: message, attachments: attachmentMetadata.map(attachmentStore.publicAttachment) };
@@ -10301,30 +11836,63 @@ app.post('/api/threads/:id/runs', async (req, res) => {
     thread.profileName = profileName;
     thread.bridgeEndpoint = bridge.endpoint;
     thread.updatedAt = now();
-    appendModelRunDiagnostic(state, createModelRunDiagnostic({
-      id: runDiagnosticId,
-      createdAt: thread.activeRunStartedAt,
-      thread,
-      agent: primaryAgent,
-      profileName,
-      runModel,
-      runCapability,
-      runMapping,
-    }));
-    await writeState(state);
+    const preparedThread = await updateState(async (latestState) => {
+      const currentThread = latestState.threads.find((item) => item.id === req.params.id);
+      if (!currentThread) throw Object.assign(new Error('会话不存在。'), { status: 404 });
+      if (currentThread.runStatus === 'running' && currentThread.activeRunTurnId !== turnId) {
+        throw Object.assign(new Error('当前对话已有任务正在运行。'), { status: 409, code: 'THREAD_RUN_ACTIVE' });
+      }
+      Object.assign(currentThread, {
+        messages: thread.messages,
+        agentRunOverrides: thread.agentRunOverrides,
+        collaboration: thread.collaboration,
+        selectedAgents: thread.selectedAgents,
+        agentSessionIds: thread.agentSessionIds,
+        externalSessionId: thread.externalSessionId,
+        runStatus: thread.runStatus,
+        workflowState: thread.workflowState,
+        workflow: thread.workflow,
+        activeRunId: thread.activeRunId,
+        activeSessionId: thread.activeSessionId,
+        activeRunStartedAt: thread.activeRunStartedAt,
+        activeRunAgentId: thread.activeRunAgentId,
+        activeRunMentionedAgentId: thread.activeRunMentionedAgentId,
+        activeRunRouteReason: thread.activeRunRouteReason,
+        activeRunMentionDepth: thread.activeRunMentionDepth,
+        activeRunParentMessageId: thread.activeRunParentMessageId,
+        activeRunSourceAgentId: thread.activeRunSourceAgentId,
+        activeRunTurnId: thread.activeRunTurnId,
+        activeRunGroup: thread.activeRunGroup,
+        runtime: thread.runtime,
+        profileName: thread.profileName,
+        bridgeEndpoint: thread.bridgeEndpoint,
+        updatedAt: thread.updatedAt,
+      });
+      appendModelRunDiagnostic(latestState, createModelRunDiagnostic({
+        id: runDiagnosticId,
+        createdAt: currentThread.activeRunStartedAt,
+        thread: currentThread,
+        agent: primaryAgent,
+        profileName,
+        runModel,
+        runCapability,
+        runMapping,
+      }));
+      return currentThread;
+    });
 
     const bridgeAttachments = await Promise.all(attachmentMetadata.map(async (metadata) => {
       const { filePath } = await attachmentStore.content(metadata.id);
       return { id: metadata.id, name: metadata.name, mime_type: metadata.mimeType, size: metadata.size, kind: metadata.kind, path: filePath };
     }));
-    const runtimeMessage = `${agentIdentityRunInstruction(primaryAgent, state.agents)}\n\n用户或群聊消息：\n${routingMessage}`;
+    const runtimeMessage = `${agentIdentityRunInstruction(primaryAgent, state.agents)}\n\n${collaborationRunInstruction(preparedThread, primaryAgent)}\n\n用户或群聊消息：\n${routingMessage}`;
     const started = await requestHermesBridge({
       action: 'chat',
       session_id: sessionId,
       message: runtimeMessage,
       storage_message: hermesStoredMessageContent(message, bridgeAttachments),
       attachments: bridgeAttachments,
-      conversation_history: await threadHistoryForHermes({ ...thread, messages: relayMessage ? thread.messages : (thread.messages || []).slice(0, -1) }, primaryAgent),
+      conversation_history: await threadHistoryForHermes({ ...preparedThread, messages: relayMessage ? preparedThread.messages : (preparedThread.messages || []).slice(0, -1) }, primaryAgent),
       profile: profileName,
       model: runModel.model || undefined,
       provider: runModel.provider || undefined,
@@ -10336,11 +11904,11 @@ app.post('/api/threads/:id/runs', async (req, res) => {
       timeoutMs: 120000,
       retryMs: 5000,
     });
-    const stateAfterStart = await readState();
-    const threadAfterStart = stateAfterStart.threads.find((item) => item.id === req.params.id);
     const sentAt = now();
-    updateModelRunDiagnostic(stateAfterStart, { diagnosticId: runDiagnosticId }, (record) => markModelRunSent(record, started.run_id, sentAt));
-    if (threadAfterStart) {
+    await updateState(async (stateAfterStart) => {
+      const threadAfterStart = stateAfterStart.threads.find((item) => item.id === req.params.id);
+      updateModelRunDiagnostic(stateAfterStart, { diagnosticId: runDiagnosticId }, (record) => markModelRunSent(record, started.run_id, sentAt));
+      if (!threadAfterStart) return;
       threadAfterStart.activeRunId = started.run_id;
       threadAfterStart.activeSessionId = started.session_id || sessionId;
       threadAfterStart.activeRunAgentId = primaryAgent.id;
@@ -10350,6 +11918,14 @@ app.post('/api/threads/:id/runs', async (req, res) => {
       threadAfterStart.activeRunParentMessageId = String(req.body?.parentMessageId || '');
       threadAfterStart.activeRunTurnId = turnId;
       threadAfterStart.agentSessionIds = { ...(threadAfterStart.agentSessionIds || {}), [primaryAgent.id]: started.session_id || sessionId };
+      if (workReplan) {
+        const activeWorkflow = workflowById(threadAfterStart);
+        if (activeWorkflow?.interventionQueue?.length) {
+          activeWorkflow.interventionQueue = activeWorkflow.interventionQueue.map((entry, index, all) => index === all.length - 1 && entry.status === 'pending'
+            ? { ...entry, status: 'delivered', deliveredAt: sentAt, sessionId: started.session_id || sessionId }
+            : entry);
+        }
+      }
       if (threadAfterStart.activeRunGroup?.turnId === turnId) {
         const activeRuns = { ...(threadAfterStart.activeRunGroup.activeRuns || {}) };
         delete activeRuns[runDiagnosticId];
@@ -10357,8 +11933,7 @@ app.post('/api/threads/:id/runs', async (req, res) => {
         threadAfterStart.activeRunGroup = { ...threadAfterStart.activeRunGroup, activeRuns, status: 'running', updatedAt: sentAt };
       }
       threadAfterStart.updatedAt = sentAt;
-    }
-    await writeState(stateAfterStart);
+    });
     captureTelemetry('agent_run_started', {
       agent_count: selectedAgentIds.length,
       attachment_count: attachmentMetadata.length,
@@ -10388,23 +11963,25 @@ app.post('/api/threads/:id/runs', async (req, res) => {
       agentName: primaryAgent.name,
       mentionDepth: Number(req.body?.mentionDepth || 0),
       parentMessageId: String(req.body?.parentMessageId || ''),
+      kind: thread.executionMode === 'work' ? (workReplan ? 'work-replan' : 'work-root') : 'chat',
+      workflowId: thread.executionMode === 'work' ? workflowById(thread)?.id || '' : '',
+      rootTaskId: workRoot?.id || '',
     });
   } catch (error) {
     const details = { ...hermesRuntimeErrorDetails(error, error.details?.profileName || runProfileName), ...(error.details || {}) };
     const enriched = enrichMissingExecutableError(error.message || 'Hermes Bridge run 创建失败。', details.profileName || runProfileName);
     try {
-      const state = await readState();
-      const thread = state.threads.find((item) => item.id === req.params.id);
-      finishStoredModelRun(state, { diagnosticId: runDiagnosticId, threadId: req.params.id, status: 'failed', error: enriched });
-      if (thread?.runStatus === 'running') {
+      await updateState(async (state) => {
+        const thread = state.threads.find((item) => item.id === req.params.id);
+        finishStoredModelRun(state, { diagnosticId: runDiagnosticId, threadId: req.params.id, status: 'failed', error: enriched });
+        if (thread?.runStatus !== 'running' || thread.activeRunTurnId !== runTurnId) return;
         thread.runStatus = 'failed';
         finishActiveRunGroupChild(thread, runDiagnosticId, 'failed');
         clearHermesRunState(thread);
         thread.workflowState = mergeWorkflowStep(closeOpenWorkflowSteps(thread.workflowState || [], 'failed'), { title: 'Hermes Agent 启动失败', status: 'failed', source: 'run', detail: enriched.slice(0, 200), updatedAt: now() });
         thread.workflow = thread.workflowState.map((step) => step.title);
         thread.updatedAt = now();
-      }
-      await writeState(state);
+      });
     } catch {}
     captureTelemetry('agent_run_failed', { stage: 'startup', error_code: telemetryErrorCode(error) });
     res.status(error.status || 500).json({ error: enriched, code: error.code || details.errorType || '', details });
@@ -10448,18 +12025,18 @@ app.get('/api/threads/:id/runs/:runId/events', async (req, res) => {
   } catch (error) {
     const formattedError = enrichMissingExecutableError(String(error?.message || error), 'default');
     try {
-      const state = await readState();
-      const thread = state.threads.find((item) => item.id === req.params.id);
-      if (thread) {
+      await updateState(async (state) => {
+        const thread = state.threads.find((item) => item.id === req.params.id);
+        if (!thread) return;
         thread.runStatus = 'failed';
+        finalizeStoredRunTranscript(thread, req.params.runId, 'failed', outputState.text || '');
         finishStoredModelRun(state, { runId: req.params.runId, threadId: req.params.id, status: 'failed', error: formattedError });
         finishActiveRunGroupChild(thread, req.params.runId, 'failed');
         clearHermesRunState(thread);
         thread.workflowState = mergeWorkflowStep(closeOpenWorkflowSteps(thread.workflowState || [], 'failed'), { title: 'Hermes Agent 运行失败', status: 'failed', source: 'run', detail: formattedError.slice(0, 200), updatedAt: now() });
         thread.workflow = thread.workflowState.map((step) => step.title);
         thread.updatedAt = now();
-        await writeState(state);
-      }
+      });
     } catch {}
     captureTelemetry('agent_run_failed', { stage: 'runtime', error_code: telemetryErrorCode(error) });
     res.write(`data: ${JSON.stringify({ event: 'run.failed', runId: req.params.runId, error: formattedError, details: hermesRuntimeErrorDetails(error, 'default') })}\n\n`);
@@ -10644,7 +12221,10 @@ export async function createApp() {
   await runPresetProviderCredentialMigration().catch((error) => {
     console.warn('Preset Provider credential migration skipped:', error?.message || error);
   });
-  await readState();
+  const startupState = await readState();
+  await recoverWorkflowControls(startupState).catch((error) => {
+    console.warn('Workflow control recovery skipped:', error?.message || error);
+  });
   await runLegacyDemoDataCleanupMigration().catch((error) => {
     console.warn('Legacy demo data cleanup skipped:', error?.message || error);
   });

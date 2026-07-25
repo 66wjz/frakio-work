@@ -2,19 +2,24 @@ import { cp, mkdir, readFile, realpath, readdir, rm, stat } from 'node:fs/promis
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { execFile } from 'node:child_process';
+import { promisify } from 'node:util';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
 const runtimeRoot = path.join(projectRoot, 'runtime', 'hermes');
 const bridgeDest = path.join(projectRoot, 'runtime', 'agent-bridge', 'python');
 const bridgeProtocolVersion = 2;
+const requiredPythonDependencies = { aiohttp: '3.14.1', mcp: '1.26.0', starlette: '1.0.1' };
+const execFileAsync = promisify(execFile);
+const targetArch = process.env.FRAKIO_WORK_TARGET_ARCH || process.arch;
 
 function platformDir() {
-  if (process.platform === 'darwin' && process.arch === 'arm64') return 'mac-arm64';
+  if (process.platform === 'darwin' && targetArch === 'arm64') return 'mac-arm64';
   if (process.platform === 'darwin') return 'mac-x64';
-  if (process.platform === 'win32' && process.arch === 'arm64') return 'win-arm64';
+  if (process.platform === 'win32' && targetArch === 'arm64') return 'win-arm64';
   if (process.platform === 'win32') return 'win-x64';
-  if (process.platform === 'linux' && process.arch === 'arm64') return 'linux-arm64';
+  if (process.platform === 'linux' && targetArch === 'arm64') return 'linux-arm64';
   return 'linux-x64';
 }
 
@@ -94,6 +99,17 @@ async function validateRuntime(runtimeDir) {
   }
   const python = path.join(runtimeDir, 'python', process.platform === 'win32' ? 'python.exe' : 'bin/python3');
   await assertContainedExecutable(runtimeDir, python);
+  for (const [name, version] of Object.entries(requiredPythonDependencies)) {
+    if (String(manifest.pythonDependencies?.[name] || '') !== version) {
+      throw new Error(`Runtime Python dependency ${name} must be ${version}, found ${manifest.pythonDependencies?.[name] || 'missing'}. Run npm run runtime:build.`);
+    }
+  }
+  const dependencyCheck = `import aiohttp, importlib.metadata as metadata, mcp, starlette; assert aiohttp.__version__ == "${requiredPythonDependencies.aiohttp}"; assert metadata.version("mcp") == "${requiredPythonDependencies.mcp}"; assert starlette.__version__ == "${requiredPythonDependencies.starlette}"`;
+  try {
+    await execFileAsync(python, ['-c', dependencyCheck], { cwd: runtimeDir, timeout: 30000 });
+  } catch (error) {
+    throw new Error(`Runtime MCP dependency validation failed: ${error.stderr || error.message || error}`);
+  }
   const node = path.join(runtimeDir, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
   if (existsSync(node)) await assertContainedExecutable(runtimeDir, node);
   if (process.platform !== 'win32') {

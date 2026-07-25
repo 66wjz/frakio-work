@@ -2,6 +2,8 @@
 const workbenchUrl = String(process.env.HERMES_WORKBENCH_URL || 'http://127.0.0.1:8787').replace(/\/+$/, '');
 const profile = String(process.env.HERMES_WORKBENCH_PROFILE || 'default');
 const toolset = String(process.env.HERMES_WORKBENCH_MCP_TOOLSET || process.argv[2] || 'use').toLowerCase();
+const protocolVersion = 2;
+let sessionCookie = '';
 
 const apiCatalog = [
   { method: 'GET', path: '/api/state', description: 'Frakio Work UI state and integrations' },
@@ -14,6 +16,10 @@ const apiCatalog = [
   { method: 'GET', path: '/api/hermes-bootstrap/status', description: 'Hermes bootstrap status' },
   { method: 'GET', path: '/api/hermes/mcp/servers', description: 'MCP server list for a profile' },
   { method: 'GET', path: '/api/user-profile', description: 'Frakio Work user profile' },
+  { method: 'GET', path: '/api/threads/:id/collaboration', description: 'Collaboration workflow snapshot for a thread' },
+  { method: 'PATCH', path: '/api/threads/:id/mode', description: 'Switch a thread between Chat and Work execution modes' },
+  { method: 'GET', path: '/api/threads/:id/collaboration/plans/:rootTaskId', description: 'Read a Work execution plan and revision' },
+  { method: 'POST', path: '/api/threads/:id/collaboration/plans', description: 'Publish a validated Work execution plan revision' },
 ];
 
 const toolsBySet = {
@@ -38,6 +44,7 @@ const toolsBySet = {
     },
   ],
   use: [
+    { name: 'hermes_workbench_protocol_get', description: 'Return the Frakio Workbench MCP protocol version and collaboration capabilities.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     { name: 'hermes_workbench_use_threads_list', description: 'List Frakio Work project and direct conversation threads.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     {
       name: 'hermes_workbench_use_thread_get',
@@ -50,6 +57,60 @@ const toolsBySet = {
     { name: 'hermes_workbench_use_runtime_status', description: 'Read local Hermes runtime and bootstrap status as seen by Frakio Work.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     { name: 'hermes_workbench_use_mcp_servers_list', description: 'List MCP servers configured for the current Hermes profile.', inputSchema: { type: 'object', properties: { profile: { type: 'string' } }, additionalProperties: false } },
     { name: 'hermes_workbench_use_user_profile_get', description: 'Read the Frakio Work user profile.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+    {
+      name: 'hermes_workbench_collaboration_workflow_create',
+      description: 'Create and bind a durable Hermes Kanban workflow to a Frakio Work thread. Use once for a new workstream, then reuse the returned workflowId.',
+      inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, name: { type: 'string' }, description: { type: 'string' }, coordinatorAgentId: { type: 'string' }, idempotencyKey: { type: 'string' } }, required: ['threadId', 'name', 'idempotencyKey'], additionalProperties: false },
+    },
+    {
+      name: 'hermes_workbench_collaboration_context_resolve',
+      description: 'Resolve the Frakio threadId and workflowId that own a Hermes Kanban task or board. Kanban workers should call this first when their prompt only provides a task id.',
+      inputSchema: { type: 'object', properties: { taskId: { type: 'string' }, boardSlug: { type: 'string' } }, additionalProperties: false },
+    },
+    {
+      name: 'hermes_workbench_collaboration_root_create',
+      description: 'Create a new root task in an existing collaboration workflow.',
+      inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, workflowId: { type: 'string' }, title: { type: 'string' }, body: { type: 'string' }, assigneeAgentId: { type: 'string' }, actorAgentId: { type: 'string' }, idempotencyKey: { type: 'string' } }, required: ['threadId', 'workflowId', 'title', 'idempotencyKey'], additionalProperties: false },
+    },
+    {
+      name: 'hermes_workbench_collaboration_plan_get',
+      description: 'Read the current structured execution plan and revision for a Work mode root task before publishing a revision.',
+      inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, workflowId: { type: 'string' }, rootTaskId: { type: 'string' } }, required: ['threadId', 'workflowId', 'rootTaskId'], additionalProperties: false },
+    },
+    {
+      name: 'hermes_workbench_collaboration_plan_publish',
+      description: 'Publish or revise the complete structured execution plan for a Work mode root task. Frakio validates Agents, stable keys, revision, dependencies, and DAG safety before dispatch.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string' }, workflowId: { type: 'string' }, rootTaskId: { type: 'string' }, baseRevision: { type: 'integer', minimum: 0 },
+          goal: { type: 'string' }, summary: { type: 'string' }, idempotencyKey: { type: 'string' },
+          tasks: { type: 'array', minItems: 1, items: { type: 'object', properties: { key: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' }, assigneeAgentId: { type: 'string' }, expectedResult: { type: 'string' }, dependsOnKeys: { type: 'array', items: { type: 'string' } }, cancelled: { type: 'boolean' } }, required: ['key', 'title', 'assigneeAgentId'], additionalProperties: false } },
+        },
+        required: ['threadId', 'workflowId', 'rootTaskId', 'baseRevision', 'summary', 'tasks', 'idempotencyKey'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'hermes_workbench_collaboration_dependency_request',
+      description: 'Request missing work from another Agent. Creates a parent task, links it to the requester, and waits until the dependency completes.',
+      inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, workflowId: { type: 'string' }, requesterTaskId: { type: 'string' }, targetAgentId: { type: 'string' }, title: { type: 'string' }, body: { type: 'string' }, reason: { type: 'string' }, actorAgentId: { type: 'string' }, idempotencyKey: { type: 'string' } }, required: ['threadId', 'workflowId', 'requesterTaskId', 'targetAgentId', 'title', 'idempotencyKey'], additionalProperties: false },
+    },
+    {
+      name: 'hermes_workbench_collaboration_blocker_report',
+      description: 'Report a typed blocker. needs_input/capability escalate to the workflow coordinator and then the fallback decision Agent; transient records a retryable failure. Use dependency_request for dependency blockers.',
+      inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, workflowId: { type: 'string' }, taskId: { type: 'string' }, taskTitle: { type: 'string' }, kind: { type: 'string', enum: ['needs_input', 'capability', 'transient'] }, evidence: { type: 'string' }, actorAgentId: { type: 'string' }, requiresUserApproval: { type: 'boolean', description: 'True for payments, authorization, deletion, external publishing, or any action reserved for the user.' }, idempotencyKey: { type: 'string' } }, required: ['threadId', 'workflowId', 'taskId', 'kind', 'evidence', 'idempotencyKey'], additionalProperties: false },
+    },
+    {
+      name: 'hermes_workbench_collaboration_artifact_publish',
+      description: 'Publish an artifact summary or local file path to a collaboration task.',
+      inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, workflowId: { type: 'string' }, taskId: { type: 'string' }, name: { type: 'string' }, summary: { type: 'string' }, path: { type: 'string' }, actorAgentId: { type: 'string' } }, required: ['threadId', 'workflowId', 'taskId'], additionalProperties: false },
+    },
+    {
+      name: 'hermes_workbench_collaboration_task_complete',
+      description: 'Complete a collaboration task with a durable summary so dependent tasks can resume automatically.',
+      inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, workflowId: { type: 'string' }, taskId: { type: 'string' }, title: { type: 'string' }, summary: { type: 'string' }, actorAgentId: { type: 'string' } }, required: ['threadId', 'workflowId', 'taskId', 'summary'], additionalProperties: false },
+    },
   ],
 };
 
@@ -64,6 +125,7 @@ const allowlist = [
   /^\/api\/hermes-bootstrap\/status(?:\?.*)?$/,
   /^\/api\/hermes\/mcp\/servers(?:\?.*)?$/,
   /^\/api\/user-profile(?:\?.*)?$/,
+  /^\/api\/threads\/[A-Za-z0-9_-]+\/collaboration(?:\?.*)?$/,
 ];
 
 function currentTools() {
@@ -78,9 +140,23 @@ function errorResponse(id, code, message) {
   return { jsonrpc: '2.0', id, error: { code, message } };
 }
 
-async function requestJson(path) {
+async function requestJson(path, options = {}) {
   const cleanPath = String(path || '').startsWith('/') ? String(path) : `/${path}`;
-  const res = await fetch(`${workbenchUrl}${cleanPath}`, { method: 'GET', headers: { Accept: 'application/json' } });
+  const method = options.method || 'GET';
+  if (!['GET', 'HEAD'].includes(method) && !sessionCookie) {
+    const sessionResponse = await fetch(`${workbenchUrl}/api/session`, { headers: { Accept: 'application/json' } });
+    if (!sessionResponse.ok) throw new Error(`Frakio Work session bootstrap failed: ${sessionResponse.status}`);
+    sessionCookie = String(sessionResponse.headers.get('set-cookie') || '').split(';')[0];
+  }
+  const res = await fetch(`${workbenchUrl}${cleanPath}`, {
+    method,
+    headers: {
+      Accept: 'application/json',
+      ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(!['GET', 'HEAD'].includes(method) ? { 'X-Frakio-Request': '1', Cookie: sessionCookie } : {}),
+    },
+    ...(options.body ? { body: JSON.stringify(options.body) } : {}),
+  });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(data?.error || `Frakio Work API ${res.status}`);
   return data;
@@ -107,6 +183,7 @@ async function listThreads() {
 }
 
 async function callTool(name, args = {}) {
+  if (name === 'hermes_workbench_protocol_get') return { protocolVersion, toolset, capabilities: { collaborationPlans: true, planRevision: true, steerQueue: true } };
   if (name === 'hermes_workbench_api_catalog_get') return { profile, workbenchUrl, routes: apiCatalog };
   if (name === 'hermes_workbench_api_request') return requestJson(assertAllowedPath(args.path || ''));
   if (name === 'hermes_workbench_use_threads_list') return listThreads();
@@ -126,6 +203,44 @@ async function callTool(name, args = {}) {
     return requestJson(`/api/hermes/mcp/servers?profile=${selectedProfile}`);
   }
   if (name === 'hermes_workbench_use_user_profile_get') return requestJson('/api/user-profile');
+  if (name === 'hermes_workbench_collaboration_workflow_create') {
+    const { threadId, ...body } = args;
+    return requestJson(`/api/threads/${encodeURIComponent(String(threadId || ''))}/collaboration/workflows`, { method: 'POST', body });
+  }
+  if (name === 'hermes_workbench_collaboration_context_resolve') {
+    const params = new URLSearchParams();
+    if (args.taskId) params.set('taskId', String(args.taskId));
+    if (args.boardSlug) params.set('boardSlug', String(args.boardSlug));
+    return requestJson(`/api/collaboration/resolve?${params.toString()}`);
+  }
+  if (name === 'hermes_workbench_collaboration_root_create') {
+    const { threadId, ...body } = args;
+    return requestJson(`/api/threads/${encodeURIComponent(String(threadId || ''))}/collaboration/roots`, { method: 'POST', body });
+  }
+  if (name === 'hermes_workbench_collaboration_plan_get') {
+    const params = new URLSearchParams({ workflowId: String(args.workflowId || '') });
+    return requestJson(`/api/threads/${encodeURIComponent(String(args.threadId || ''))}/collaboration/plans/${encodeURIComponent(String(args.rootTaskId || ''))}?${params.toString()}`);
+  }
+  if (name === 'hermes_workbench_collaboration_plan_publish') {
+    const { threadId, ...body } = args;
+    return requestJson(`/api/threads/${encodeURIComponent(String(threadId || ''))}/collaboration/plans`, { method: 'POST', body });
+  }
+  if (name === 'hermes_workbench_collaboration_dependency_request') {
+    const { threadId, ...body } = args;
+    return requestJson(`/api/threads/${encodeURIComponent(String(threadId || ''))}/collaboration/dependencies`, { method: 'POST', body });
+  }
+  if (name === 'hermes_workbench_collaboration_blocker_report') {
+    const { threadId, ...body } = args;
+    return requestJson(`/api/threads/${encodeURIComponent(String(threadId || ''))}/collaboration/blockers`, { method: 'POST', body });
+  }
+  if (name === 'hermes_workbench_collaboration_artifact_publish') {
+    const { threadId, taskId, ...body } = args;
+    return requestJson(`/api/threads/${encodeURIComponent(String(threadId || ''))}/collaboration/tasks/${encodeURIComponent(String(taskId || ''))}/artifacts`, { method: 'POST', body });
+  }
+  if (name === 'hermes_workbench_collaboration_task_complete') {
+    const { threadId, taskId, ...body } = args;
+    return requestJson(`/api/threads/${encodeURIComponent(String(threadId || ''))}/collaboration/tasks/${encodeURIComponent(String(taskId || ''))}/complete`, { method: 'POST', body });
+  }
   throw new Error(`Unknown tool: ${name}`);
 }
 

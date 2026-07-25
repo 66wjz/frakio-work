@@ -1,6 +1,7 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('frakioDesktop', {
+  platform: process.platform,
   restartService: () => ipcRenderer.invoke('frakio:restart-service'),
   openLogs: () => ipcRenderer.invoke('frakio:open-logs'),
   getLoginStartup: () => ipcRenderer.invoke('frakio:get-login-startup'),

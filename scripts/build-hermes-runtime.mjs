@@ -17,8 +17,11 @@ const pythonVersion = process.env.FRAKIO_PYTHON_VERSION || '3.12.12';
 const nodeVersion = process.env.FRAKIO_NODE_VERSION || '24.16.0';
 const pinnedHermesTag = process.env.HERMES_AGENT_TAG || 'v2026.7.7.2';
 const aiohttpVersion = '3.14.1';
+const mcpVersion = '1.26.0';
+const starletteVersion = '1.0.1';
 
-const buildTarget = runtimeBuildTarget(process.platform, process.arch, nodeVersion);
+const targetArch = process.env.FRAKIO_WORK_TARGET_ARCH || process.arch;
+const buildTarget = runtimeBuildTarget(process.platform, targetArch, nodeVersion);
 
 async function command(commandName, args, options = {}) {
   const { stdout = '', stderr = '' } = await execFileAsync(commandName, args, {
@@ -191,14 +194,14 @@ try {
   await installPortableNode(staging, downloadsRoot);
   const portablePythonEnv = { HERMES_AGENT_ROOT: path.join(staging, 'python'), PIP_BREAK_SYSTEM_PACKAGES: '1' };
   await command(python, ['-m', 'ensurepip', '--upgrade'], { cwd: staging, env: portablePythonEnv });
-  await command(python, ['-m', 'pip', 'install', '--upgrade', '--force-reinstall', '--no-cache-dir', sourceDir, `aiohttp==${aiohttpVersion}`], {
+  await command(python, ['-m', 'pip', 'install', '--upgrade', '--force-reinstall', '--no-cache-dir', `${sourceDir}[mcp]`, `aiohttp==${aiohttpVersion}`, `mcp==${mcpVersion}`, `starlette==${starletteVersion}`], {
     cwd: sourceDir,
     env: portablePythonEnv,
   });
   await rewritePythonEntrypoints(staging);
   const versionOutput = await command(python, ['-m', 'hermes_cli.main', '--version'], { cwd: staging, timeout: 30000, env: { HERMES_AGENT_ROOT: path.join(staging, 'python') } });
   if (!versionOutput.includes(version)) throw new Error(`Built runtime version mismatch: ${versionOutput}`);
-  await command(python, ['-c', `import aiohttp, hermes_cli, hermes_cli.main; assert aiohttp.__version__ == "${aiohttpVersion}"; print("Hermes and aiohttp imports ready")`], { cwd: staging, timeout: 30000 });
+  await command(python, ['-c', `import aiohttp, hermes_cli, hermes_cli.main, importlib.metadata as metadata, mcp, starlette; assert aiohttp.__version__ == "${aiohttpVersion}"; assert metadata.version("mcp") == "${mcpVersion}"; assert starlette.__version__ == "${starletteVersion}"; print("Hermes, aiohttp and MCP imports ready")`], { cwd: staging, timeout: 30000 });
   const bridgeScript = path.join(projectRoot, 'runtime', 'agent-bridge', 'python', 'hermes_bridge.py');
   await command(python, ['-m', 'py_compile', bridgeScript], { cwd: staging, timeout: 30000 });
   await verifyRuntimeApi(python, path.join(staging, 'python'));
@@ -206,14 +209,14 @@ try {
     schema: 1,
     platform,
     targetOs: process.platform,
-    targetArch: process.arch,
+    targetArch,
     hermesAgentVersion: version,
     sourceRepo: officialRepo,
     sourceTag: pinnedHermesTag,
     sourceCommit: commit,
     pythonVersion,
     nodeVersion,
-    pythonDependencies: { aiohttp: aiohttpVersion },
+    pythonDependencies: { aiohttp: aiohttpVersion, mcp: mcpVersion, starlette: starletteVersion },
     builtAt: new Date().toISOString(),
     bridgeProtocolVersion,
   };
