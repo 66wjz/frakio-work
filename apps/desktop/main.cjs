@@ -8,6 +8,7 @@ const os = require('node:os');
 const path = require('node:path');
 const { isAllowedExternalUrl } = require('./external-url.cjs');
 const { electronNodeExecutable: resolveElectronNodeExecutable } = require('./platform-paths.cjs');
+const { closeActionForState, closeNoticeForPlatform, restoreWindow } = require('./window-lifecycle.cjs');
 
 const APP_NAME = 'Frakio Work';
 const DEFAULT_PORT = 8787;
@@ -23,6 +24,7 @@ let apiUrl = `http://127.0.0.1:${DEFAULT_PORT}`;
 let quitting = false;
 let startupError = '';
 let startingPromise = null;
+let closeNoticeShown = false;
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
@@ -246,6 +248,14 @@ function createWindow() {
   });
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
+  mainWindow.on('close', (event) => {
+    if (closeActionForState({ quitting }) === 'close') return;
+    event.preventDefault();
+    mainWindow.hide();
+    if (closeNoticeShown) return;
+    closeNoticeShown = true;
+    void dialog.showMessageBox(closeNoticeForPlatform(process.platform)).catch(() => {});
+  });
   mainWindow.on('closed', () => {
     mainWindow = null;
   });
@@ -352,13 +362,13 @@ function buildMenu() {
           click: (item) => setLoginStartup(item.checked),
         },
         { type: 'separator' },
-        { label: '退出', accelerator: 'Cmd+Q', click: () => app.quit() },
+        { label: '退出', accelerator: 'Cmd+Q', click: () => { quitting = true; app.quit(); } },
       ],
     },
     {
       label: '服务',
       submenu: [
-        { label: '打开 Frakio Work', click: () => loadApp() },
+        { label: '打开 Frakio Work', click: () => showOrLoadMainWindow() },
         { label: '重启本地服务', click: () => restartApiAndReload() },
         { label: '打开日志目录', click: () => openLogsDir() },
       ],
@@ -450,12 +460,7 @@ ipcMain.handle('frakio:open-external', async (_event, targetUrl) => {
 });
 
 app.on('second-instance', () => {
-  if (!mainWindow) {
-    loadApp();
-    return;
-  }
-  if (mainWindow.isMinimized()) mainWindow.restore();
-  mainWindow.focus();
+  showOrLoadMainWindow();
 });
 
 app.on('before-quit', () => {
@@ -467,8 +472,12 @@ app.on('window-all-closed', () => {
 });
 
 app.on('activate', () => {
-  if (!mainWindow) loadApp();
+  showOrLoadMainWindow();
 });
+
+function showOrLoadMainWindow() {
+  if (!restoreWindow(mainWindow)) void loadApp();
+}
 
 app.whenReady().then(async () => {
   ensureLogsDir();

@@ -209,6 +209,7 @@ class AgentPool:
         self._clarify_requests: dict[str, queue.Queue[str]] = {}
         self._run_context = threading.local()
         self._approval_handlers: dict[str, Callable[..., str]] = {}
+        self._tool_progress_events: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
         self._exec_ask_depth = 0
         self._exec_ask_previous: str | None = None
 
@@ -790,17 +791,21 @@ class AgentPool:
 
     def _tool_start_callback(self, session_id: str):
         def callback(tool_call_id, function_name, function_args):
+            progress = self._consume_tool_progress(session_id, "tool.started", function_name)
             self._append_event(session_id, {
                 "event": "tool.started",
                 "tool_call_id": str(tool_call_id) if tool_call_id else "",
                 "tool_name": str(function_name) if function_name else "",
                 "args": _jsonable(function_args) if function_args else {},
+                "args_preview": progress.get("preview") or None,
+                "timestamp": progress.get("timestamp") or time.time(),
             })
 
         return callback
 
     def _tool_complete_callback(self, session_id: str):
         def callback(tool_call_id, function_name, function_args, function_result=None):
+            progress = self._consume_tool_progress(session_id, "tool.completed", function_name)
             result_text = "" if function_result is None else str(function_result)
             print(
                 "[hermes_bridge] tool_complete_callback "
@@ -816,10 +821,42 @@ class AgentPool:
                 "tool_name": str(function_name) if function_name else "",
                 "args": _jsonable(function_args) if function_args else {},
                 "result": _jsonable(function_result) if function_result is not None else None,
-                "result_preview": str(function_result)[:500] if function_result else None,
+                "result_preview": progress.get("preview") or (str(function_result)[:500] if function_result else None),
+                "duration": progress.get("duration") or 0,
+                "is_error": bool(progress.get("is_error") or progress.get("error")),
+                "error": progress.get("error") or None,
+                "timestamp": progress.get("timestamp") or time.time(),
             })
 
         return callback
+
+    def _consume_tool_progress(self, session_id: str, event_type: str, function_name=None) -> dict[str, Any]:
+        key = (session_id, event_type, str(function_name or ""))
+        with self._lock:
+            queued = self._tool_progress_events.get(key) or []
+            if not queued:
+                return {}
+            event = queued.pop(0)
+            if queued:
+                self._tool_progress_events[key] = queued
+            else:
+                self._tool_progress_events.pop(key, None)
+            return event
+
+    def _remember_tool_progress(self, session_id: str, event_type: str, function_name=None, preview=None, function_args=None, **kwargs) -> None:
+        key = (session_id, event_type, str(function_name or ""))
+        event = {
+            "preview": str(preview)[:4096] if preview is not None else "",
+            "args": _jsonable(function_args) if function_args else {},
+            "duration": kwargs.get("duration") or kwargs.get("duration_seconds") or 0,
+            "is_error": kwargs.get("is_error") or kwargs.get("failed") or False,
+            "error": str(kwargs.get("error") or "")[:1000],
+            "timestamp": kwargs.get("timestamp") or time.time(),
+        }
+        with self._lock:
+            self._tool_progress_events.setdefault(key, []).append(event)
+            if len(self._tool_progress_events[key]) > 20:
+                self._tool_progress_events[key] = self._tool_progress_events[key][-20:]
 
     def _tool_progress_callback(self, session_id: str):
         def callback(event_type, function_name=None, preview=None, function_args=None, **kwargs):
@@ -883,10 +920,13 @@ class AgentPool:
             if event_type in (None, "tool.started"):
                 # AIAgent also calls tool_start_callback with the real tool_call_id.
                 # Use that event as canonical so resume/replay can match results.
+                if event_type == "tool.started":
+                    self._remember_tool_progress(session_id, event_type, function_name, preview, function_args, **kwargs)
                 return
 
             if event_type == "tool.completed":
                 # AIAgent sends the full function_result to tool_complete_callback.
+                self._remember_tool_progress(session_id, event_type, function_name, preview, function_args, **kwargs)
                 return
 
         return callback

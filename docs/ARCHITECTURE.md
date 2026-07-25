@@ -12,4 +12,4 @@ Frakio Work is a local-first application with four explicit boundaries.
 
 Persistent data belongs under `~/.frakio-work`. Hermes-owned profiles and credentials remain under `~/.hermes`. The repository contains reproducible build scripts but does not contain user data, generated runtimes, or release binaries.
 
-GitHub Actions validates the source Web UI on macOS, Windows, and Linux. Tagged releases build separate Apple Silicon, Intel Mac, and Windows x64 runtime/application artifacts on native runners.
+GitHub Actions validates the source Web UI on macOS, Windows, and Linux. Tagged releases currently build Apple Silicon and Intel Mac runtime/application artifacts on native macOS runners. Windows users run the source Web UI while desktop distribution is paused.

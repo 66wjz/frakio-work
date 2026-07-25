@@ -289,7 +289,15 @@ class BridgeServer:
     def _handle_mcp_action(self, action: str, req: dict[str, Any], profile: str | None = None) -> dict[str, Any]:
         """Handle MCP management actions in worker process."""
         try:
-            from tools.mcp_tool import discover_mcp_tools, register_mcp_servers, _run_on_mcp_loop, _servers, _lock
+            from tools.mcp_tool import (
+                _MCP_AVAILABLE,
+                _lock,
+                _run_on_mcp_loop,
+                _server_connect_errors,
+                _servers,
+                discover_mcp_tools,
+                register_mcp_servers,
+            )
         except ImportError:
             return {"error": "MCP tool module not available", "ok": False}
 
@@ -303,7 +311,7 @@ class BridgeServer:
             "mcp_server_remove":   lambda: self._mcp_server_remove(req, profile, _servers, _lock, _run_on_mcp_loop),
             "mcp_server_test":     lambda: self._mcp_server_test(req, _servers, _lock),
             "mcp_tools_list":      lambda: self._mcp_tools_list(req, profile, _servers, _lock),
-            "mcp_reload":          lambda: self._mcp_reload(req, profile, _servers, _lock, _run_on_mcp_loop, discover_mcp_tools, register_mcp_servers),
+            "mcp_reload":          lambda: self._mcp_reload(req, profile, _servers, _lock, _run_on_mcp_loop, discover_mcp_tools, register_mcp_servers, _server_connect_errors, _MCP_AVAILABLE),
         }
         handler = dispatch.get(action)
         if handler:
@@ -572,7 +580,8 @@ class BridgeServer:
         return {"ok": True, "results": results}
 
     def _mcp_reload(self, req: dict, profile: str, _servers, _lock, run_on_mcp_loop,
-                    discover_mcp_tools, register_mcp_servers) -> dict[str, Any]:
+                    discover_mcp_tools, register_mcp_servers, server_connect_errors,
+                    mcp_available: bool) -> dict[str, Any]:
         target = str(req.get("server") or "").strip() or None
 
         config = self._read_mcp_config(profile)
@@ -582,25 +591,64 @@ class BridgeServer:
         if target and target not in mcp_configs:
             return {"error": "server \'%s\' not found in config" % target, "ok": False}
 
+        if not mcp_available:
+            return {
+                "ok": False,
+                "connected": False,
+                "mcpAvailable": False,
+                "toolNames": [],
+                "registeredToolNames": [],
+                "connectionErrors": {target or "runtime": "Python package 'mcp' is not installed"},
+                "error": "MCP Python runtime dependency is not installed",
+            }
+
         if target:
             self._shutdown_mcp_server(target, _servers, _lock, run_on_mcp_loop)
         else:
             self._shutdown_mcp_servers(list(profile_server_names), _servers, _lock, run_on_mcp_loop)
 
-        # Run discovery in background to avoid blocking the request
-        if target:
-            def _reload_single():
-                original = _apply_profile_env(profile)
-                try:
-                    server_config = {target: mcp_configs.get(target, {})}
-                    register_mcp_servers(server_config)
-                finally:
-                    _restore_profile_env(original)
-            self._run_mcp_discovery_bg(_reload_single, profile)
-        else:
-            self._run_mcp_discovery_bg(discover_mcp_tools, profile)
+        original = _apply_profile_env(profile)
+        try:
+            if target:
+                register_mcp_servers({target: mcp_configs.get(target, {})})
+            else:
+                discover_mcp_tools()
+        except Exception as exc:
+            with _lock:
+                errors = dict(server_connect_errors)
+            return {
+                "ok": False,
+                "connected": False,
+                "mcpAvailable": True,
+                "toolNames": [],
+                "registeredToolNames": [],
+                "connectionErrors": errors,
+                "error": str(exc),
+            }
+        finally:
+            _restore_profile_env(original)
 
-        return {"ok": True, "message": "MCP servers reloaded"}
+        names = [target] if target else list(profile_server_names)
+        with _lock:
+            active = {name: _servers.get(name) for name in names}
+            errors = {name: server_connect_errors[name] for name in names if name in server_connect_errors}
+        tool_names = []
+        registered_names = []
+        for server in active.values():
+            if server is None:
+                continue
+            tool_names.extend(str(getattr(tool, "name", "")) for tool in (getattr(server, "_tools", None) or []) if getattr(tool, "name", ""))
+            registered_names.extend(str(name) for name in (getattr(server, "_registered_tool_names", None) or []))
+        connected = all(active.get(name) is not None for name in names) and not errors
+        return {
+            "ok": connected,
+            "connected": connected,
+            "mcpAvailable": True,
+            "toolNames": sorted(set(tool_names)),
+            "registeredToolNames": sorted(set(registered_names)),
+            "connectionErrors": errors,
+            "error": "" if connected else "One or more MCP servers failed to connect",
+        }
 
     def _make_server_socket(self) -> socket.socket:
         return _make_listen_socket(self.endpoint)

@@ -16,6 +16,13 @@ export function runtimeBuildTarget(platform = process.platform, arch = process.a
       pythonExecutableParts: ['python.exe'],
     };
   }
+  if (platform === 'win32' && arch === 'arm64') {
+    return {
+      runtimePlatform: 'win-arm64',
+      nodeArchiveName: `node-v${nodeVersion}-win-arm64.zip`,
+      pythonExecutableParts: ['python.exe'],
+    };
+  }
   throw new Error(`Bundled desktop runtimes are not supported on ${platform}-${arch}.`);
 }
 

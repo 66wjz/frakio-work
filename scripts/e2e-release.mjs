@@ -7,9 +7,13 @@ const executablePath = process.env.FRAKIO_E2E_BROWSER || '';
 const browser = await chromium.launch({ ...(executablePath ? { executablePath } : {}), headless: true });
 const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
 const errors = [];
+const failedResponses = [];
 let weixinStatusChecks = 0;
 page.on('console', (message) => { if (message.type() === 'error') errors.push(message.text()); });
 page.on('pageerror', (error) => errors.push(error.message));
+page.on('response', (response) => {
+  if (response.status() >= 400) failedResponses.push(`${response.status()} ${response.url()}`);
+});
 await page.route('**/api/hermes/weixin/qrcode/status?*', async (route) => {
   weixinStatusChecks += 1;
   await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ status: 'wait' }) });
@@ -63,7 +67,7 @@ try {
   await page.waitForTimeout(3500);
   assert.equal(weixinStatusChecks, checksAfterClose, '关闭微信登录弹窗后仍在轮询旧二维码');
   const relevantErrors = errors.filter((value) => !value.includes('favicon'));
-  assert.deepEqual(relevantErrors, [], `Browser console errors: ${relevantErrors.join(' | ')}`);
+  assert.deepEqual(relevantErrors, [], `Browser console errors: ${relevantErrors.join(' | ')}; failed responses: ${failedResponses.join(' | ')}`);
   console.log('Playwright release flow passed.');
 } finally {
   await browser.close();

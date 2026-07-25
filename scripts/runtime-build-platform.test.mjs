@@ -14,7 +14,11 @@ test('runtime build targets select native Node archives', () => {
     nodeArchiveName: 'node-v24.16.0-win-x64.zip',
     pythonExecutableParts: ['python.exe'],
   });
-  assert.throws(() => runtimeBuildTarget('win32', 'arm64'), /not supported/);
+  assert.deepEqual(runtimeBuildTarget('win32', 'arm64', '24.16.0'), {
+    runtimePlatform: 'win-arm64',
+    nodeArchiveName: 'node-v24.16.0-win-arm64.zip',
+    pythonExecutableParts: ['python.exe'],
+  });
 });
 
 test('portable Python roots match native managed layouts', () => {
