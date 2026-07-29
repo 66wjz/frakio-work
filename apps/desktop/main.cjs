@@ -35,7 +35,7 @@ let desktopUpdateService = null;
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
 
-const userHome = path.join(os.homedir(), '.frakio-work');
+const userHome = String(process.env.FRAKIO_WORK_HOME || '').trim() || path.join(os.homedir(), '.frakio-work');
 const logsDir = path.join(userHome, 'logs');
 const desktopLogPath = path.join(logsDir, 'desktop.log');
 const apiLogPath = path.join(logsDir, 'api.log');
@@ -192,6 +192,23 @@ async function waitForHealth(url) {
   return false;
 }
 
+async function waitForHealthOrExit(url, child) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < HEALTH_TIMEOUT_MS) {
+    if (child.exitCode !== null || child.signalCode) {
+      return { healthy: false, exited: true, code: child.exitCode, signal: child.signalCode };
+    }
+    if (await requestHealth(url)) return { healthy: true, exited: false, code: null, signal: null };
+    await wait(HEALTH_INTERVAL_MS);
+  }
+  return { healthy: false, exited: false, code: null, signal: null };
+}
+
+function apiExitError(code, signal) {
+  const detail = signal ? `信号 ${signal}` : `退出代码 ${code ?? '未知'}`;
+  return `Frakio Work 本地服务启动失败（${detail}）。`;
+}
+
 async function waitForPage(url) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < HEALTH_TIMEOUT_MS) {
@@ -272,32 +289,39 @@ async function startApi() {
     };
 
     writeDesktopLog(`Starting API on ${apiUrl}`);
-    apiProcess = spawn(electronNodeExecutable(), [serverEntry()], {
+    const child = spawn(electronNodeExecutable(), [serverEntry()], {
       cwd: root,
       env,
       stdio: ['ignore', 'pipe', 'pipe'],
     });
+    apiProcess = child;
 
-    apiProcess.stdout.on('data', (chunk) => appendApiLog(chunk));
-    apiProcess.stderr.on('data', (chunk) => appendApiLog(chunk));
-    apiProcess.once('spawn', () => {
-      writeDesktopLog(`API child spawned pid=${apiProcess.pid || ''} entry=${serverEntry()}`);
+    child.stdout.on('data', (chunk) => appendApiLog(chunk));
+    child.stderr.on('data', (chunk) => appendApiLog(chunk));
+    child.once('spawn', () => {
+      writeDesktopLog(`API child spawned pid=${child.pid || ''} entry=${serverEntry()}`);
     });
-    apiProcess.once('error', (error) => {
+    child.once('error', (error) => {
       startupError = error?.message || String(error);
       writeDesktopLog(`API spawn error: ${startupError}`);
     });
-    apiProcess.once('exit', (code, signal) => {
+    child.once('exit', (code, signal) => {
       writeDesktopLog(`API exited code=${code ?? ''} signal=${signal ?? ''}`);
-      apiProcess = null;
-      if (!quitting) {
-        startupError = 'Frakio Work 本地服务已退出。';
+      const wasActiveProcess = apiProcess === child;
+      if (wasActiveProcess) apiProcess = null;
+      if (!quitting && wasActiveProcess) {
+        startupError = apiExitError(code, signal);
         showErrorPage();
       }
     });
 
-    const healthy = await waitForHealth(apiUrl);
-    if (!healthy) {
+    const health = await waitForHealthOrExit(apiUrl, child);
+    if (!health.healthy) {
+      if (health.exited) {
+        startupError = apiExitError(health.code, health.signal);
+        writeDesktopLog(startupError);
+        throw new Error(startupError);
+      }
       startupError = 'Frakio Work 本地服务启动超时。';
       writeDesktopLog(startupError);
       throw new Error(startupError);

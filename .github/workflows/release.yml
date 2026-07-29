@@ -47,6 +47,8 @@ jobs:
         run: PATH="$HOME/.local/bin:$PATH" npm run runtime:build
       - run: npm run notices:generate
       - run: npm run ${{ matrix.package_script }}
+      - name: Verify packaged desktop API
+        run: npm run verify:desktop-package -- "$(find release -type d -name 'Frakio Work.app' -print -quit)"
       - name: Generate checksums and SBOM
         run: node scripts/generate-release-metadata.mjs ${{ matrix.platform }} ${{ matrix.arch }}
       - uses: actions/upload-artifact@v7
@@ -54,10 +56,7 @@ jobs:
           name: ${{ matrix.platform }}-${{ matrix.arch }}
           path: |
             release/*.dmg
-            release/*.zip
             release/*SHA256SUMS.txt
-            release/*sbom.json
-            THIRD_PARTY_NOTICES.txt
           if-no-files-found: error
 
   publish:
@@ -71,8 +70,6 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      - name: Add platform installers to release artifacts
-        run: cp scripts/install.sh scripts/install.ps1 artifacts/
       - name: Verify complete release artifact set
         run: npm run verify:release-artifacts -- artifacts
       - name: Publish GitHub release
@@ -103,12 +100,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - runner: macos-15
-            platform: mac
-            arch: arm64
-          - runner: macos-15-intel
-            platform: mac
-            arch: x64
           - runner: windows-2025
             platform: win
             arch: x64
@@ -134,7 +125,9 @@ jobs:
       - uses: actions/upload-artifact@v7
         with:
           name: web-${{ matrix.platform }}-${{ matrix.arch }}
-          path: release/managed-web/*
+          path: |
+            release/managed-web/*.tar.gz
+            release/managed-web/*.zip
           if-no-files-found: error
 
   docker:

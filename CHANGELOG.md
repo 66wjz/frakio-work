@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.0.1 — 2026-07-29
+
+补齐 `beautiful-mermaid 1.1.3`，并在 macOS 桌面端本地 API 提前退出时直接显示退出原因。发布构建会真实启动包内 API，避免依赖或资源遗漏直到用户安装后才暴露。
+
+发布下载精简为 Apple Silicon 与 Intel Mac 桌面 DMG、Windows x64 与 Linux x64 托管 Web 包，以及两个 Mac 更新校验文件。托管 Web 不再提供 macOS 包；Linux 和 Windows 可通过 README 的一行命令下载、校验并安装，无需预装 Node、Python 或 Hermes。
+
 ## 1.0.0 — 2026-07-29
 
 Frakio Work 1.0.0 是首个正式发布版。桌面端与 Web UI 现在共用同一套工作台体验：侧栏、设置、输入区、流式回复、工具活动与紧凑选择托盘在不同入口保持一致。macOS 增加了独立于内容滚动层的固定顶部窗口拖拽区，启动、设置和对话页面都可以稳定移动窗口。
@@ -8,7 +14,7 @@ Frakio Work 1.0.0 是首个正式发布版。桌面端与 Web UI 现在共用同
 
 Agent `@` 接力改由 API 后台持久化调度。页面刷新、SSE 重连和 Hermes 完成事件差异不会再中断 Iris、Max 等 Agent 的连续回复。流式正文接管与最终持久化交接也改为同一展示节点，移除了思考态切换和回复完成时的闪烁。
 
-本版提供 Apple Silicon 与 Intel Mac 桌面包；同时提供 macOS ARM64/x64、Windows x64、Linux x64 的免依赖托管 Web 包，以及 Linux x64 Docker 镜像。托管 Web 自带 Node、Python、Hermes Runtime 和 Bridge，可通过生成的管理员密码在可信局域网使用。
+本版提供 Apple Silicon 与 Intel Mac 桌面包；同时提供 Windows x64、Linux x64 的免依赖托管 Web 包，以及 Linux x64 Docker 镜像。托管 Web 自带 Node、Python、Hermes Runtime 和 Bridge，可通过生成的管理员密码在可信局域网使用。
 
 macOS 桌面包尚未经过 Apple 签名与公证。首次被系统阻止打开时，请在 Finder 中按住 Control 点击应用并选择“打开”。
 

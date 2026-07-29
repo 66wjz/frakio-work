@@ -38,18 +38,18 @@ xattr -dr com.apple.quarantine "/Applications/Frakio Work.app"
 
 ### 自托管 Web UI
 
-Web UI 与桌面版使用同一套工作台。原生自托管包内置 Node、Python、Hermes Runtime 和 Bridge，不需要预装 Node、Python 或 Hermes Agent。当前提供 macOS ARM64/x64、Windows x64 与 Linux x64 包。
+Web UI 与桌面版使用同一套工作台。原生自托管包内置 Node、Python、Hermes Runtime 和 Bridge，不需要预装 Node、Python 或 Hermes Agent。当前提供 Windows x64 与 Linux x64 包；macOS 请使用桌面版 DMG。
 
-macOS 或 Linux：
+Linux x64：
 
 ```bash
-curl -fsSL https://github.com/MadsGao/frakio-work/releases/latest/download/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/MadsGao/frakio-work/main/scripts/install.sh | sh
 ```
 
 Windows PowerShell：
 
 ```powershell
-irm https://github.com/MadsGao/frakio-work/releases/latest/download/install.ps1 | iex
+irm https://raw.githubusercontent.com/MadsGao/frakio-work/main/scripts/install.ps1 | iex
 ```
 
 安装完成后，服务会自动启动并只显示一次管理员密码。本机访问 `http://127.0.0.1:8787`，同一可信局域网内的设备可以使用主机局域网地址登录。可信局域网 HTTP 适合私有网络；如需公网访问，请自行通过 HTTPS 反向代理接入。服务管理命令为 `frakio-work start`、`stop`、`restart`、`status`、`logs`、`update`、`rollback` 和 `password reset`。

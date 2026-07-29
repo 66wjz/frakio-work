@@ -11,18 +11,18 @@ The desktop app includes the Web UI, local API, and bundled Runtime. You do not 
 
 ### Self-hosted Web UI
 
-The Web UI uses the same workbench as the desktop app. Native self-hosted packages include Node, Python, Hermes Runtime, and Bridge, so Node, Python, and Hermes Agent do not need to be installed separately. Packages are available for macOS ARM64/x64, Windows x64, and Linux x64.
+The Web UI uses the same workbench as the desktop app. Native self-hosted packages include Node, Python, Hermes Runtime, and Bridge, so Node, Python, and Hermes Agent do not need to be installed separately. Packages are available for Windows x64 and Linux x64; macOS users should use the desktop DMG.
 
-macOS or Linux:
+Linux x64:
 
 ```bash
-curl -fsSL https://github.com/MadsGao/frakio-work/releases/latest/download/install.sh | sh
+curl -fsSL https://raw.githubusercontent.com/MadsGao/frakio-work/main/scripts/install.sh | sh
 ```
 
 Windows PowerShell:
 
 ```powershell
-irm https://github.com/MadsGao/frakio-work/releases/latest/download/install.ps1 | iex
+irm https://raw.githubusercontent.com/MadsGao/frakio-work/main/scripts/install.ps1 | iex
 ```
 
 The service starts automatically and prints the generated administrator password once. Open `http://127.0.0.1:8787` locally, or use the host's private LAN address from another device on the same trusted network. Trusted-LAN HTTP is intended for private networks; use your own HTTPS reverse proxy for public access. The `frakio-work` command supports `start`, `stop`, `restart`, `status`, `logs`, `update`, `rollback`, and `password reset`.

@@ -12,7 +12,7 @@ if (!['mac', 'win'].includes(platform) || !['arm64', 'x64'].includes(arch)) {
 }
 
 const releaseDir = path.resolve('release');
-const extensions = platform === 'mac' ? ['.dmg', '.zip'] : ['.exe'];
+const extensions = platform === 'mac' ? ['.dmg'] : ['.exe'];
 const packageVersion = JSON.parse(await readFile(path.resolve('package.json'), 'utf8')).version;
 const artifactPrefix = `Frakio.Work-${packageVersion}-${arch}`.toLowerCase();
 const files = (await readdir(releaseDir))

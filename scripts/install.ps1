@@ -24,18 +24,25 @@ $DetectedArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitect
 if ($DetectedArch -ne "X64") { throw "The Windows self-hosted package currently supports x64 only." }
 $Arch = "x64"
 $Platform = "win-$Arch"
-$Tag = if ($env:FRAKIO_WORK_VERSION) { $env:FRAKIO_WORK_VERSION } else { (Invoke-RestMethod "https://api.github.com/repos/$Repository/releases/latest").tag_name }
+$Release = if ($env:FRAKIO_WORK_VERSION) {
+  $RequestedTag = $env:FRAKIO_WORK_VERSION.Trim()
+  if (-not $RequestedTag.StartsWith("v")) { $RequestedTag = "v$RequestedTag" }
+  Invoke-RestMethod "https://api.github.com/repos/$Repository/releases/tags/$RequestedTag"
+} else {
+  Invoke-RestMethod "https://api.github.com/repos/$Repository/releases/latest"
+}
+$Tag = $Release.tag_name
 $Version = $Tag.TrimStart("v")
 $Asset = "Frakio.Work.Web-$Version-$Platform.zip"
-$ChecksumAsset = "Frakio.Work.Web-$Version-$Platform.SHA256SUMS.txt"
+$ReleaseAsset = $Release.assets | Where-Object { $_.name -eq $Asset } | Select-Object -First 1
+if (-not $ReleaseAsset -or -not $ReleaseAsset.digest -or -not $ReleaseAsset.digest.StartsWith("sha256:")) { throw "Release metadata does not contain a SHA-256 digest for $Asset." }
+$Expected = $ReleaseAsset.digest.Substring("sha256:".Length).ToLower()
 $BaseUrl = "https://github.com/$Repository/releases/download/$Tag"
 $Temp = Join-Path ([System.IO.Path]::GetTempPath()) ("frakio-work-" + [guid]::NewGuid())
 New-Item -ItemType Directory -Force $Temp | Out-Null
 
 try {
   Invoke-WebRequest "$BaseUrl/$Asset" -OutFile (Join-Path $Temp $Asset)
-  Invoke-WebRequest "$BaseUrl/$ChecksumAsset" -OutFile (Join-Path $Temp $ChecksumAsset)
-  $Expected = ((Get-Content (Join-Path $Temp $ChecksumAsset))[0] -split "\s+")[0].ToLower()
   $Actual = (Get-FileHash (Join-Path $Temp $Asset) -Algorithm SHA256).Hash.ToLower()
   if ($Expected -ne $Actual) { throw "Frakio Work package checksum mismatch." }
 

@@ -19,24 +19,16 @@ async function collectFiles(directory) {
 const files = await collectFiles(artifactDir);
 const required = [
   `Frakio.Work-${packageVersion}-arm64.dmg`,
-  `Frakio.Work-${packageVersion}-arm64.zip`,
   `Frakio.Work-${packageVersion}-x64.dmg`,
-  `Frakio.Work-${packageVersion}-x64.zip`,
   'Frakio-Work-mac-arm64-SHA256SUMS.txt',
-  'Frakio-Work-mac-arm64-sbom.json',
   'Frakio-Work-mac-x64-SHA256SUMS.txt',
-  'Frakio-Work-mac-x64-sbom.json',
-  'THIRD_PARTY_NOTICES.txt',
-  'install.sh',
-  'install.ps1',
-  ...['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64'].flatMap((platform) => [
-    `Frakio.Work.Web-${packageVersion}-${platform}${platform === 'win-x64' ? '.zip' : '.tar.gz'}`,
-    `Frakio.Work.Web-${packageVersion}-${platform}.SHA256SUMS.txt`,
-    `Frakio.Work.Web-${packageVersion}-${platform}.sbom.json`,
-  ]),
+  `Frakio.Work.Web-${packageVersion}-win-x64.zip`,
+  `Frakio.Work.Web-${packageVersion}-linux-x64.tar.gz`,
 ];
 
 const missing = required.filter((name) => !files.has(name));
 if (missing.length) throw new Error(`Release artifacts are incomplete: ${missing.join(', ')}`);
+const unexpected = [...files.keys()].filter((name) => !required.includes(name));
+if (unexpected.length) throw new Error(`Release artifacts contain unexpected public files: ${unexpected.join(', ')}`);
 for (const name of required) await access(files.get(name));
 console.log(`Verified ${required.length} Frakio Work ${packageVersion} release artifacts in ${artifactDir}.`);
