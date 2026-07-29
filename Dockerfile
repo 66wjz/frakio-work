@@ -3,6 +3,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends curl git ca-cer
 RUN curl -LsSf https://astral.sh/uv/install.sh | sh
 WORKDIR /src
 COPY package.json package-lock.json ./
+COPY tsconfig.json ./
 COPY apps ./apps
 COPY packages ./packages
 COPY runtime ./runtime
