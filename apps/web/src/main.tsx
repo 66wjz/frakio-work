@@ -1,10 +1,83 @@
 import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef, useState } from 'react';
-import type { AppUpdateStatus, Attachment, RunActivityGroup, RunActivityItem, RunTranscript } from '@frakio/contracts';
+import type {
+  AppUpdateStatus,
+  Attachment,
+  CollaborationMode,
+  HermesAgentTurn,
+  HermesNetworkStatus,
+  PlanDraft,
+  PlanQuestionBatch,
+  PlanSession,
+  RunActivityGroup,
+  RunActivityItem,
+  RunTranscript,
+} from '@frakio/contracts';
 import { createPortal } from 'react-dom';
 import { createRoot } from 'react-dom/client';
 import { QRCodeSVG } from 'qrcode.react';
-import ReactMarkdown from 'react-markdown';
-import remarkGfm from 'remark-gfm';
+import { RichMarkdown } from './rich-content/RichMarkdown';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
+import {
+  DEFAULT_MAC_SIDEBAR_WIDTH,
+  DEFAULT_SIDEBAR_WIDTH,
+  MAC_SIDEBAR_WIDTH_BOUNDS,
+  SIDEBAR_WIDTH_BOUNDS,
+  SIDEBAR_WIDTH_VERSION,
+} from '../../api/lib/sidebar-width.mjs';
+import { availablePaneMax, normalizePaneWidth, paneWidthFromKey, paneWidthFromPointer } from './pane-resize.mjs';
+import {
+  activityElapsedMs,
+  activityGroupPreview,
+  formatActivityDuration,
+  formatRunElapsed,
+  nextActivityExpanded,
+  nextRunPresentationPhase,
+  processingMessageAt,
+  shouldShowRunPresence,
+} from './run-presence.mjs';
+import type { RunPresentationPhase } from './run-presence.mjs';
+import { activityTimelineEntries, buildRunActivityTimeline } from './run-activity-timeline.mjs';
+import { contrastForegroundForTint, workspaceTintAlpha } from './theme-contrast.mjs';
+import { buildProfileActivity } from './profile-activity.mjs';
+import type { ProfileActivityCell, ProfileActivityMode } from './profile-activity.mjs';
+import {
+  STREAM_REVEAL_ANIMATION_MS,
+  STREAM_REVEAL_MAX_LAG_MS,
+  STREAM_REVEAL_MIN_COMMIT_MS,
+  streamRevealTransition,
+} from './stream-reveal.mjs';
+import {
+  SettingsField,
+  SettingsInlineNote,
+  SettingsPanel,
+  SettingsRow,
+  SettingsSwitch,
+  SettingsToggleRow,
+} from './settings-ui';
+import {
+  AppAlertDialog,
+  AppAlertDialogAction,
+  AppAlertDialogCancel,
+  AppAlertDialogContent,
+  AppAlertDialogDescription,
+  AppAlertDialogTitle,
+  AppDialog,
+  AppDialogClose,
+  AppDialogContent,
+  AppDialogDescription,
+  AppDialogTitle,
+  AppMenu,
+  AppMenuContent,
+  AppMenuItem,
+  AppMenuSeparator,
+  AppMenuSub,
+  AppMenuSubContent,
+  AppMenuSubTrigger,
+  AppMenuTrigger,
+  AppPopover,
+  AppPopoverContent,
+  AppPopoverTrigger,
+} from './overlay-primitives';
 import {
   Area,
   AreaChart,
@@ -21,19 +94,24 @@ import {
   ArrowDownToLine,
   ArrowUp,
   ArrowUpFromLine,
+  ArrowUpRight,
   Archive,
   Bot,
   Boxes,
   Brain,
   Briefcase,
   Building2,
+  Cable,
   Check,
   CheckCircle2,
   ChevronDown,
+  ChevronLeft,
   ChevronRight,
   Circle,
+  CircleHelp,
   Clock3,
   Code2,
+  Copy,
   Database,
   ExternalLink,
   File,
@@ -41,12 +119,15 @@ import {
   Folder,
   FolderOpen,
   Gauge,
+  GitBranch,
   Hand,
   Image,
   Library,
+  Lightbulb,
   LoaderCircle,
   Maximize2,
   MessageSquare,
+  Monitor,
   MoreHorizontal,
   Minus,
   Network,
@@ -54,6 +135,7 @@ import {
   PanelLeftOpen,
   PanelRight,
   PanelRightOpen,
+  Palette,
   Pencil,
   Pin,
   Pause,
@@ -71,6 +153,9 @@ import {
   Sun,
   Moon,
   Trash2,
+  TriangleAlert,
+  ThumbsDown,
+  ThumbsUp,
   UserCircle,
   UserPlus,
   X,
@@ -78,7 +163,12 @@ import {
 } from 'lucide-react';
 import frakioBrandLogoUrl from './assets/frakio-brand-logo.png';
 import { installLocalApiFetchGuard } from './api/fetch-guard';
-import { LaunchLoadingScreen } from './features/launch/LaunchLoadingScreen';
+import {
+  LaunchLoadingScreen,
+  type LaunchInstallJob,
+  type LaunchIssue,
+  type LaunchPhase,
+} from './features/launch/LaunchLoadingScreen';
 import '@fontsource/doto/latin-400.css';
 import '@fontsource/doto/latin-600.css';
 import '@fontsource/doto/latin-700.css';
@@ -88,6 +178,7 @@ import '@fontsource/space-grotesk/latin-700.css';
 import '@fontsource/space-mono/latin-400.css';
 import '@fontsource/space-mono/latin-700.css';
 import './styles.css';
+import './settings.css';
 
 installLocalApiFetchGuard();
 
@@ -99,22 +190,82 @@ declare global {
       openLogs?: () => Promise<unknown>;
       getLoginStartup?: () => Promise<unknown>;
       setLoginStartup?: (enabled: boolean) => Promise<unknown>;
+      getAppearance?: () => Promise<{ source?: AppAppearance; dark?: boolean }>;
+      setAppearance?: (appearance: AppAppearance) => Promise<{ source?: AppAppearance; dark?: boolean }>;
+      onAppearanceChanged?: (listener: (state: { source?: AppAppearance; dark?: boolean }) => void) => () => void;
       selectFolder?: () => Promise<{ canceled?: boolean; path?: string; filePaths?: string[] }>;
       windowControl?: (action: 'close' | 'minimize' | 'zoom') => Promise<unknown>;
       showItemInFolder?: (targetPath: string) => Promise<unknown>;
       openRelease?: (targetUrl: string) => Promise<{ ok?: boolean }>;
       openExternal?: (targetUrl: string) => Promise<{ ok?: boolean }>;
+      getUpdateState?: () => Promise<DesktopUpdateState>;
+      checkForUpdates?: () => Promise<DesktopUpdateState>;
+      downloadUpdate?: () => Promise<DesktopUpdateState>;
+      cancelUpdateDownload?: () => Promise<DesktopUpdateState>;
+      openDownloadedUpdate?: () => Promise<DesktopUpdateState>;
+      onUpdateStateChanged?: (listener: (state: DesktopUpdateState) => void) => () => void;
     };
   }
 }
 
 type ProfileModuleUsage = { useCount?: number; viewCount?: number; patchCount?: number; state?: string; lastUsedAt?: string | null };
 type ProfileModuleEntry = string | { name: string; file?: string; description?: string; category?: string; enabled?: boolean; status?: string; statusLabel?: string; source?: string; usage?: ProfileModuleUsage };
+type ManagedHermesModuleKind = 'skill' | 'plugin';
+type ManagedHermesModule = {
+  kind: ManagedHermesModuleKind;
+  scope: 'global' | 'profile';
+  name: string;
+  profileName: string;
+  agentId?: string;
+  agentName?: string;
+  avatarUrl?: string;
+  color?: string;
+  originProfileName?: string;
+  originAgentId?: string;
+  originAgentName?: string;
+  originAvatarUrl?: string;
+  originColor?: string;
+  description: string;
+  category: string;
+  file: string;
+  hash: string;
+  enabled: boolean;
+  promotedAt?: string | null;
+  nativeGlobal?: boolean;
+  duplicateProfileNames?: string[];
+  archivedDuplicateProfiles?: string[];
+};
+type ManagedHermesModulesPayload = {
+  kind: ManagedHermesModuleKind;
+  profiles: Array<{ profileName: string; agentId: string; name: string; role: string; avatarUrl?: string; color?: string; inheritedGlobalCount: number }>;
+  global: ManagedHermesModule[];
+  profile: ManagedHermesModule[];
+};
 type Agent = { id: string; name: string; role: string; model: string; color: string; soul: string; scope: string; profileName?: string; gatewayStatus?: string; source?: string; soulExcerpt?: string; userProfileExcerpt?: string; memoryExcerpt?: string; userProfile?: string; memory?: string; providerSummary?: HermesProviderSummary[]; skills?: ProfileModuleEntry[]; plugins?: ProfileModuleEntry[]; avatarUrl?: string };
 type ModelKind = 'official' | 'relay' | 'local';
 type ModelProtocol = 'OpenAI Compatible' | 'Anthropic Compatible' | 'Custom';
 type ProviderApiMode = 'chat_completions' | 'openai_responses' | 'codex_responses' | 'anthropic_messages' | 'bedrock_converse' | 'codex_app_server' | '';
+type ProviderApiModePreference = 'auto' | 'chat_completions' | 'openai_responses' | 'anthropic_messages';
 type ProviderAuthType = 'codex-device' | 'claude-pkce' | 'gemini-loopback';
+type DesktopUpdatePhase = 'idle' | 'checking' | 'available' | 'downloading' | 'downloaded' | 'up-to-date' | 'error';
+type DesktopUpdateState = {
+  supported: boolean;
+  packaged: boolean;
+  platform: string;
+  arch: string;
+  phase: DesktopUpdatePhase;
+  currentVersion: string;
+  latestVersion: string;
+  checkedAt: string;
+  publishedAt?: string;
+  releaseUrl?: string;
+  releaseNotes?: string;
+  assetName?: string;
+  downloadedFileName?: string;
+  restartRequired?: boolean;
+  error?: string;
+  progress: { percent: number; transferred: number; total: number; bytesPerSecond: number };
+};
 type ModelPricing = { input: number | null; output: number | null; cacheRead: number | null; cacheCreation: number | null };
 type FastMode = 'none' | 'openai_priority' | 'anthropic_fast';
 type ServiceTier = { id: string; name: string; description?: string; requestValue: string; billingNotice?: string };
@@ -123,8 +274,8 @@ type ModelCapabilityOverride = { reasoning: boolean; reasoningEfforts: string[];
 type ModelCapability = { modelId?: string; reasoning: boolean; reasoningType: 'none' | 'binary' | 'levels'; reasoningEfforts: string[]; reasoningMap: Record<string, string | null>; defaultReasoning?: string; serviceTiers: ServiceTier[]; speedModes: string[]; fastMode: FastMode; source: string; confidence: 'confirmed' | 'inferred' | 'unknown'; status: 'confirmed' | 'unsupported' | 'unknown' | 'verification_failed'; reasoningStatus?: 'confirmed' | 'unsupported' | 'unknown' | 'verification_failed'; serviceTierStatus?: 'confirmed' | 'unsupported' | 'unknown' | 'verification_failed'; apiMode?: ProviderApiMode; thinkingFormat?: string; requestOverrides?: Record<string, unknown>; updatedAt?: string | null; verificationError?: string };
 type CapabilityProbeResult = { kind: 'connection' | 'reasoning' | 'service_tier'; option: string; mappedValue: string; status: 'accepted' | 'unsupported' | 'unknown'; error?: string };
 type CatalogInfo = { source: string; rich: boolean; modelIds?: string[]; url?: string; lastRefreshAt?: string | null; lastSuccessAt?: string | null; refreshError?: string; stale?: boolean };
-type ModelPayload = { name: string; provider: string; kind: ModelKind; protocol: ModelProtocol; model: string; models: string[]; baseUrl: string; apiKey: string; pricing: ModelPricing; providerKey?: string; apiMode?: ProviderApiMode; modelsUrl?: string; modelApiModes?: Record<string, ProviderApiMode>; compat?: ModelCompat; modelCompat?: Record<string, ModelCompat>; contextLimit?: number | null; capabilityMode: 'auto' | 'manual'; capabilityOverrides: Record<string, ModelCapabilityOverride> };
-type ModelProfile = Omit<ModelPayload, 'apiKey'> & { id: string; hasApiKey: boolean; source?: 'demo' | 'hermes-studio' | 'hermes-profile' | 'manual'; profileName?: string; providerKey?: string; apiMode?: ProviderApiMode; contextLimit?: number | null };
+type ModelPayload = { name: string; provider: string; kind: ModelKind; protocol: ModelProtocol; model: string; models: string[]; baseUrl: string; apiKey: string; pricing: ModelPricing; providerKey?: string; apiMode?: ProviderApiMode; apiModePreference?: ProviderApiModePreference; modelsUrl?: string; modelApiModes?: Record<string, ProviderApiMode>; compat?: ModelCompat; modelCompat?: Record<string, ModelCompat>; contextLimit?: number | null; capabilityMode: 'auto' | 'manual'; capabilityOverrides: Record<string, ModelCapabilityOverride>; runtimeRevision?: string };
+type ModelProfile = Omit<ModelPayload, 'apiKey'> & { id: string; hasApiKey: boolean; source?: 'demo' | 'hermes-studio' | 'hermes-profile' | 'manual'; profileName?: string; providerKey?: string; apiMode?: ProviderApiMode; apiModePreference?: ProviderApiModePreference; contextLimit?: number | null; runtimeRevision?: string };
 type ModelFetchResult = { models: string[]; capabilities: Record<string, ModelCapability>; catalog?: CatalogInfo };
 type ModelFetchContext = Partial<ModelPayload> & { modelId?: string };
 type FetchAvailableModels = (baseUrl: string, apiKey: string, context?: ModelFetchContext) => Promise<ModelFetchResult>;
@@ -144,9 +295,6 @@ async function openExternalUrl(targetUrl: string): Promise<boolean> {
 type AuxiliaryModelTask = { key: string; label: string; default_timeout?: number; default_download_timeout?: number };
 type AuxiliaryModelSettings = { provider?: string; model?: string; base_url?: string; timeout?: number; download_timeout?: number; extra_body?: Record<string, any> };
 type AuxiliaryModelsConfig = Record<string, AuxiliaryModelSettings>;
-type MoaModelSlot = { provider: string; model: string };
-type MoaPreset = { enabled: boolean; reference_models: MoaModelSlot[]; aggregator: MoaModelSlot; reference_temperature: number | null; aggregator_temperature: number | null; max_tokens: number; reference_max_tokens: number | null; fanout: 'per_iteration' | 'user_turn' };
-type MoaConfig = { default_preset: string; active_preset?: string; save_traces: boolean; trace_dir: string; presets: Record<string, MoaPreset>; reference_models: MoaModelSlot[]; aggregator: MoaModelSlot; reference_temperature: number | null; aggregator_temperature: number | null; max_tokens: number; reference_max_tokens: number | null; fanout: 'per_iteration' | 'user_turn'; enabled: boolean };
 type VaultDoc = { relativePath: string; name: string; category: string; excerpt?: string };
 type Vault = {
   id: string;
@@ -171,7 +319,7 @@ type VaultSummary = {
   lastIndexedAt?: string;
   needsRefresh: boolean;
 };
-type ChatEvent = { id: string; agentId: string; agentName: string; role: string; content: string; attachments?: Attachment[]; reasoning?: string; externalRunId?: string; turnId?: string; mentionDepth?: number; parentMessageId?: string; routeReason?: string };
+type ChatEvent = { id: string; agentId: string; agentName: string; role: string; content: string; attachments?: Attachment[]; reasoning?: string; externalRunId?: string; turnId?: string; mentionDepth?: number; parentMessageId?: string; routeReason?: string; contentType?: 'plan' | 'plan_feedback' | string; planId?: string; planRevision?: number; processingDurationMs?: number; feedback?: 'up' | 'down' | null; createdAt?: string };
 type AttachmentDraft = { localId: string; file: File; previewUrl: string; status: 'uploading' | 'ready' | 'error'; attachment?: Attachment; error?: string };
 const attachmentAcceptValue = [
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.heic', '.svg', '.ico',
@@ -214,6 +362,9 @@ type Thread = {
   workspaceId: string | null;
   mode: ThreadMode;
   executionMode?: 'chat' | 'work';
+  collaborationMode?: CollaborationMode;
+  activePlanId?: string;
+  planSessions?: PlanSession[];
   workerOutputMode?: 'summary' | 'all';
   primaryAgentId: string | null;
   defaultAgentId?: string | null;
@@ -237,16 +388,32 @@ type Thread = {
   collaboration?: ThreadCollaboration;
   externalSessionId?: string | null;
   runStatus?: 'idle' | 'running' | 'failed';
+  activeRunGroup?: HermesAgentTurn;
   archivedAt?: string | null;
   pinnedAt?: string | null;
+  forkedFromThreadId?: string | null;
+  forkedFromMessageId?: string | null;
+  branchRootThreadId?: string | null;
 };
-type ThreadSummary = { id: string; spaceId?: string | null; workspaceId: string | null; workspaceRootPath?: string; title: string; mode: ThreadMode; executionMode?: 'chat' | 'work'; workerOutputMode?: 'summary' | 'all'; primaryAgentId: string | null; primaryAgentName?: string; defaultAgentId?: string | null; activeAgentId?: string | null; participantAgentIds: string[]; followMode?: FollowMode; permissionMode?: PermissionMode; agentModelOverrides?: AgentModelOverrides; agentRunOverrides?: AgentRunOverrides; vaultId: string | null; vaultName: string; updatedAt: string; preview: string; engine?: 'simulate' | 'hermes-studio' | 'model-provider' | 'workspace-group' | 'hermes-agent'; artifactCount?: number; lastArtifactName?: string; runStatus?: 'idle' | 'running' | 'failed'; archivedAt?: string | null; pinnedAt?: string | null };
-type CompletedRunSummary = { threadId: string; beforeMessageId: string | null; elapsedSeconds: number };
+type ThreadSummary = { id: string; spaceId?: string | null; workspaceId: string | null; workspaceRootPath?: string; title: string; mode: ThreadMode; executionMode?: 'chat' | 'work'; collaborationMode?: CollaborationMode; activePlanId?: string; workerOutputMode?: 'summary' | 'all'; primaryAgentId: string | null; primaryAgentName?: string; defaultAgentId?: string | null; activeAgentId?: string | null; participantAgentIds: string[]; followMode?: FollowMode; permissionMode?: PermissionMode; agentModelOverrides?: AgentModelOverrides; agentRunOverrides?: AgentRunOverrides; vaultId: string | null; vaultName: string; updatedAt: string; preview: string; engine?: 'simulate' | 'hermes-studio' | 'model-provider' | 'workspace-group' | 'hermes-agent'; artifactCount?: number; lastArtifactName?: string; runStatus?: 'idle' | 'running' | 'failed'; archivedAt?: string | null; pinnedAt?: string | null; forkedFromThreadId?: string | null; forkedFromMessageId?: string | null; branchRootThreadId?: string | null };
 type ActiveHermesRun = { runId: string; sessionId: string; threadId: string };
-type HermesRunApproval = { id?: string; title: string; command: string; cwd?: string; tool?: string };
+type HermesApprovalChoice = 'once' | 'session' | 'always' | 'deny';
+type HermesRunApproval = {
+  id?: string;
+  title: string;
+  command: string;
+  cwd?: string;
+  tool?: string;
+  choices?: HermesApprovalChoice[];
+  allowPermanent?: boolean;
+  smartDenied?: boolean;
+};
 type HermesRunClarification = { id: string; question: string; choices: string[]; timeoutMs?: number };
 type RunUiState = {
   isRunning: boolean;
+  /** Keeps the composer locked while a completed reply has already been handed to history. */
+  hideStatus: boolean;
+  presentationPhase: RunPresentationPhase;
   startedAt: number | null;
   target: ChatRunTarget | null;
   activeRun: ActiveHermesRun | null;
@@ -260,12 +427,13 @@ type RunUiState = {
   clarificationError: string;
   error: string;
   stopping: boolean;
-  completedSummary: CompletedRunSummary | null;
 };
 
 function createRunUiState(overrides: Partial<RunUiState> = {}): RunUiState {
   return {
     isRunning: false,
+    hideStatus: false,
+    presentationPhase: 'thinking',
     startedAt: null,
     target: null,
     activeRun: null,
@@ -279,7 +447,6 @@ function createRunUiState(overrides: Partial<RunUiState> = {}): RunUiState {
     clarificationError: '',
     error: '',
     stopping: false,
-    completedSummary: null,
     ...overrides,
   };
 }
@@ -320,22 +487,22 @@ type SpaceGradientColor = { id: string; color: string; x: number; y: number; isP
 type ThemeHarmony = 'floating' | 'singleAnalogous' | 'complementary' | 'splitComplementary' | 'analogous' | 'triadic';
 type ThemePreset = { id: string; page: number; colors: string[]; point: { x: number; y: number }; harmony: ThemeHarmony; type?: 'color' | 'grayscale' };
 type SpaceThemeAppearance = 'auto' | 'light' | 'dark';
+type AppAppearance = 'system' | 'light' | 'dark';
+type SpaceThemeColorMode = 'native' | 'custom';
 type SpaceThemePalette = { accentColor: string; sidebarBg: string; opacity: number; noise: number; texture?: number; mode: 'soft' | 'crisp'; gradientColors?: SpaceGradientColor[] };
-type SpaceTheme = SpaceThemePalette & { appearance?: SpaceThemeAppearance; lightTheme?: SpaceThemePalette; darkTheme?: SpaceThemePalette };
+type SpaceTheme = SpaceThemePalette & { colorMode?: SpaceThemeColorMode; appearance?: SpaceThemeAppearance; lightTheme?: SpaceThemePalette; darkTheme?: SpaceThemePalette; renderVersion?: number };
+type LaunchMaterialSnapshot = { activeSpaceId: string; theme: SpaceTheme; dark: boolean };
+type SpaceDraft = { name: string; iconKind: SpaceIconKind; iconValue: string; theme: SpaceTheme };
 type SpaceIconKind = 'dot' | 'emoji' | 'icon';
 type Space = { id: string; name: string; iconKind: SpaceIconKind; iconValue: string; theme: SpaceTheme; createdAt: string; updatedAt: string; archivedAt?: string | null; lastOpenedAt?: string | null };
 type Workspace = { id: string; spaceId?: string | null; name: string; rootPath: string; vaultId: string | null; environment: 'local'; activeThreadId: string | null; createdAt: string; updatedAt: string; archivedAt?: string | null; pinnedAt?: string | null; activeThread?: ThreadSummary | null; threads?: ThreadSummary[] };
 type PinnedNav = Record<string, boolean>;
-type RailConfirm = { kind: 'thread' | 'workspace'; action: 'delete'; id: string; title: string; x: number; y: number } | null;
+type RailConfirm = { kind: 'thread' | 'workspace'; id: string; title: string } | null;
 type RenameDialogTarget = { kind: 'thread' | 'workspace'; id: string; title: string } | null;
 type RailContextMenuSource = { kind: 'thread'; thread: ThreadSummary } | { kind: 'workspace'; workspace: Workspace } | { kind: 'space'; space: Space };
 type RailContextMenuRect = { left: number; top: number; right: number; bottom: number; width: number; height: number };
 type RailContextMenuTarget = RailContextMenuSource & { x: number; y: number; anchorRect?: RailContextMenuRect; sidebarRect?: RailContextMenuRect };
-type LaunchPhase = 'booting' | 'connecting' | 'welcome' | 'done';
-type FirstUseGuideStepStatus = 'pending' | 'running' | 'ready' | 'failed' | 'skipped';
-type FirstUseGuideStatus = 'idle' | 'running' | 'needs-install' | 'ready' | 'failed';
-type FirstUseGuideStep = { id: string; label: string; detail: string; status: FirstUseGuideStepStatus };
-type FirstUseGuideState = { status: FirstUseGuideStatus; title: string; detail: string; steps: FirstUseGuideStep[]; error: string };
+type AppLaunchPhase = LaunchPhase | 'done';
 type WorkbenchUiSettings = {
   defaultProfile?: string;
   defaultModel?: string;
@@ -344,8 +511,10 @@ type WorkbenchUiSettings = {
   newChatPrompt?: string;
   sendKey?: 'enter' | 'mod-enter';
   density?: 'comfortable' | 'compact';
+  appearance?: AppAppearance;
   streamingResponses?: boolean;
   showReasoning?: boolean;
+  richToolDescriptions?: boolean;
   defaultPermissionMode?: PermissionMode;
   contextTriggerTokens?: number;
   groupChatTriggerTokens?: number;
@@ -354,6 +523,8 @@ type WorkbenchUiSettings = {
   libraryCollapsed?: boolean;
   sidebarCollapsed?: boolean;
   sidebarWidth?: number;
+  macSidebarWidth?: number;
+  macSidebarWidthVersion?: number;
   contextWidth?: number;
   activeSpaceId?: string;
   collapsedWorkspaceIds?: string[];
@@ -433,6 +604,14 @@ type HermesRuntimeManager = {
   previousVersion: string;
   bridgeProtocolVersion: number;
   fallbackReason?: string;
+};
+type HermesOfficialRelease = {
+  tag: string;
+  version?: string;
+  releaseDate?: string;
+  label?: string;
+  url?: string;
+  commit?: string;
 };
 type HermesRuntimeDiagnostics = {
   checkedAt: string;
@@ -633,14 +812,13 @@ type MonitoringSummary = {
   hermesAgent?: { databaseCount: number; usageRowCount: number; usageSource: string; profiles: Array<{ profileName: string; dbPath: string; sessionCount: number }> };
   modules: { skills: { total: number; enabled: number; byName: ModuleUsageRow[] }; plugins: { total: number; enabled: number; byName: ModuleUsageRow[] } };
 };
-type ProfileEditableKind = 'notes' | 'user' | 'soul' | 'skill';
+type ProfileEditableKind = 'notes' | 'user' | 'soul';
 type ProfileInspectorTarget = {
   agentId: string;
   agentName: string;
   profileName: string;
   kind: ProfileEditableKind;
   title: string;
-  moduleName?: string;
 };
 type ProfileInspectorState = {
   target: ProfileInspectorTarget | null;
@@ -664,15 +842,30 @@ type ProfileEditorControls = {
 
 const workspaceId = 'workspace_default';
 const defaultProjectParentPath = '';
-const defaultSidebarWidth = 240;
+const defaultSidebarWidth = DEFAULT_SIDEBAR_WIDTH;
+const defaultMacSidebarWidth = DEFAULT_MAC_SIDEBAR_WIDTH;
 const defaultContextWidth = 344;
 const autoCollapseSidebarWidth = 1160;
 const autoCollapseSidebarWithRightRailWidth = 1221;
-const sidebarWidthBounds = { min: 240, max: 420 };
+const sidebarWidthBounds = SIDEBAR_WIDTH_BOUNDS;
+const macSidebarWidthBounds = MAC_SIDEBAR_WIDTH_BOUNDS;
 const contextWidthBounds = { min: 280, max: 520 };
+const macConversationMinMainWidth = 520;
+const macConversationChromeWidth = 72;
 const threadFollowThreshold = 96;
 const launchUserAvatarSnapshotKey = 'frakio-work.launchUserAvatarSnapshot';
-const firstUseGuideStorageKey = 'frakio-work.firstUseGuideCompleted';
+const launchMaterialSnapshotKey = 'frakio-work.launchMaterialSnapshot';
+const launchQaInstallJob: LaunchInstallJob = {
+  id: 'launch-qa-install',
+  status: 'running',
+  currentStepId: 'start-runtime',
+  steps: [
+    { id: 'verify-runtime', label: '验证内置运行环境', status: 'ready', detail: '内置版本 0.19.0' },
+    { id: 'write-config', label: '初始化 Hermes 配置', status: 'ready', detail: 'Hermes Home 已准备' },
+    { id: 'start-runtime', label: '启动 Hermes Runtime', status: 'running' },
+    { id: 'detect', label: '验证本地连接', status: 'pending' },
+  ],
+};
 const navItems = [
   { id: 'council', label: '新对话', icon: MessageSquare, placement: 'system' },
   { id: 'knowledge', label: '知识问答', icon: Library, placement: 'hidden' },
@@ -690,7 +883,7 @@ const managementNavIds = new Set(['settings', 'org', 'models', 'channels', 'plug
 const defaultProductSpaceTheme: SpaceThemePalette = {
   accentColor: '#dce8e3',
   sidebarBg: '#f3f7f5',
-  opacity: 0.74,
+  opacity: 0.5,
   noise: 0.01,
   texture: 0.03,
   mode: 'soft',
@@ -740,10 +933,16 @@ const spaceIconLabels: Record<string, string> = {
 };
 
 function App() {
+  const launchQaMode = import.meta.env.DEV ? new URLSearchParams(window.location.search).get('launchQa') || '' : '';
   const isDesktopShell = Boolean(window.frakioDesktop);
+  const isWorkbenchShell = true;
   const desktopPlatform = window.frakioDesktop?.platform || '';
   const isWindowsDesktop = desktopPlatform === 'win32';
+  const isMacDesktop = isDesktopShell && desktopPlatform === 'darwin';
+  const activeDefaultSidebarWidth = isMacDesktop ? defaultMacSidebarWidth : defaultSidebarWidth;
+  const activeSidebarWidthBounds = isMacDesktop ? macSidebarWidthBounds : sidebarWidthBounds;
   const canSelectFolder = Boolean(window.frakioDesktop?.selectFolder);
+  const launchMaterialSnapshotRef = useRef<LaunchMaterialSnapshot>(readLaunchMaterialSnapshot(isMacDesktop));
   const [activeNav, setActiveNav] = useState('council');
   const [agents, setAgents] = useState<Agent[]>([]);
   const [models, setModels] = useState<ModelProfile[]>([]);
@@ -752,12 +951,14 @@ function App() {
   const [defaultVaultId, setDefaultVaultId] = useState<string | null>(null);
   const [vaultSummary, setVaultSummary] = useState<VaultSummary | null>(null);
   const [spaces, setSpaces] = useState<Space[]>([]);
-  const [activeSpaceId, setActiveSpaceId] = useState('space_default');
+  const [workspaceThemeLoaded, setWorkspaceThemeLoaded] = useState(false);
+  const [activeSpaceId, setActiveSpaceId] = useState(() => launchMaterialSnapshotRef.current.activeSpaceId);
   const [spaceMenuOpen, setSpaceMenuOpen] = useState(false);
   const [spaceCreateOpen, setSpaceCreateOpen] = useState(false);
   const [spaceEditTargetId, setSpaceEditTargetId] = useState<string | null>(null);
   const [spaceSwitchDirection, setSpaceSwitchDirection] = useState<'left' | 'right' | 'none'>('none');
-  const [spaceDraft, setSpaceDraft] = useState({ name: '', iconKind: 'dot' as SpaceIconKind, iconValue: '', theme: buildSpaceThemeFromPoint(0.18, 0.72, '#536006', 'soft' as const) });
+  const [spaceDraft, setSpaceDraft] = useState<SpaceDraft>({ name: '', iconKind: 'dot', iconValue: '', theme: { ...buildSpaceThemeFromPoint(0.18, 0.72, '#536006', 'soft' as const), colorMode: 'native' } });
+  const [spaceThemeAdvancedOpen, setSpaceThemeAdvancedOpen] = useState(false);
   const [spaceColorPoint, setSpaceColorPoint] = useState({ x: 0.18, y: 0.72 });
   const [themePresetPage, setThemePresetPage] = useState(0);
   const [selectedThemePresetId, setSelectedThemePresetId] = useState<string | null>(null);
@@ -766,6 +967,7 @@ function App() {
   const themeDragMovedRef = useRef(false);
   const themeDragStartRef = useRef<{ x: number; y: number } | null>(null);
   const textureDragRef = useRef(false);
+  const macSpaceEditorRef = useRef<HTMLElement | null>(null);
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [conversations, setConversations] = useState<ThreadSummary[]>([]);
@@ -781,6 +983,11 @@ function App() {
   const [newChatAgentPickerOpen, setNewChatAgentPickerOpen] = useState(false);
   const [newChatPermissionMode, setNewChatPermissionMode] = useState<PermissionMode>('manual');
   const [newChatExecutionMode, setNewChatExecutionMode] = useState<'chat' | 'work'>('chat');
+  const [newChatPlanEnabled, setNewChatPlanEnabled] = useState(false);
+  const [planAction, setPlanAction] = useState('');
+  const [planFeedbackDraft, setPlanFeedbackDraft] = useState('');
+  const [planFeedbackOpen, setPlanFeedbackOpen] = useState(false);
+  const [planActionError, setPlanActionError] = useState('');
   const [selectedNewChatWorkspaceId, setSelectedNewChatWorkspaceId] = useState<string | null>(null);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
@@ -800,6 +1007,11 @@ function App() {
   const [isFollowingLatest, setIsFollowingLatest] = useState(true);
   const [hasNewThreadContent, setHasNewThreadContent] = useState(false);
   const messageRefs = useRef<Record<string, HTMLDivElement | null>>({});
+  const [copiedMessageId, setCopiedMessageId] = useState('');
+  const copiedMessageTimerRef = useRef<number | null>(null);
+  const [feedbackMessageId, setFeedbackMessageId] = useState('');
+  const [branchingMessageId, setBranchingMessageId] = useState('');
+  const [messageActionError, setMessageActionError] = useState<{ messageId: string; message: string } | null>(null);
   const [activeOverviewRoundId, setActiveOverviewRoundId] = useState('');
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [agentModelEditorId, setAgentModelEditorId] = useState<string | null>(null);
@@ -810,24 +1022,31 @@ function App() {
   const [projectRootPath, setProjectRootPath] = useState('');
   const [projectParentPath, setProjectParentPath] = useState(defaultProjectParentPath);
   const [projectError, setProjectError] = useState('');
+  const [directoryPicker, setDirectoryPicker] = useState<{ open: boolean; current: string; parent: string; entries: { name: string; path: string }[]; loading: boolean; error: string }>({ open: false, current: '', parent: '', entries: [], loading: false, error: '' });
+  const directoryPickerResolveRef = useRef<((path: string | null) => void) | null>(null);
   const [railConfirm, setRailConfirm] = useState<RailConfirm>(null);
   const [renameDialogTarget, setRenameDialogTarget] = useState<RenameDialogTarget>(null);
   const [railContextMenu, setRailContextMenu] = useState<RailContextMenuTarget | null>(null);
+  const railActionFocusRef = useRef<HTMLElement | null>(null);
   const [archivedThreads, setArchivedThreads] = useState<ThreadSummary[]>([]);
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
-  const userMenuRef = useRef<HTMLDivElement | null>(null);
-  const [settingsSection, setSettingsSection] = useState<SettingsSection>('hermes');
+  const [settingsSection, setSettingsSection] = useState<SettingsSection>('workbench');
   const [libraryCollapsed, setLibraryCollapsed] = useState(false);
+  const [rightRailTab, setRightRailTab] = useState<'collaboration' | 'resources'>('resources');
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
-  const [sidebarManuallyExpanded, setSidebarManuallyExpanded] = useState(false);
+  const [macSidebarOverlayOpen, setMacSidebarOverlayOpen] = useState(false);
+  const [macSidebarOverlayClosing, setMacSidebarOverlayClosing] = useState(false);
+  const macSidebarOverlayVisibleRef = useRef(false);
+  const macSidebarOverlayCloseTimerRef = useRef<number | null>(null);
   const [viewportWidth, setViewportWidth] = useState(() => window.innerWidth);
-  const [sidebarWidth, setSidebarWidth] = useState(defaultSidebarWidth);
+  const [sidebarWidth, setSidebarWidth] = useState(activeDefaultSidebarWidth);
   const [contextWidth, setContextWidth] = useState(defaultContextWidth);
   const [pinnedNav, setPinnedNav] = useState<PinnedNav>(() => Object.fromEntries(railNavItems.map((item) => [item.id, true])));
   const [userProfile, setUserProfile] = useState<UserProfile>({ avatarUrl: '', nickname: '', bio: '', age: '', hobbies: '', occupation: '', defaultAgentAddress: '', otherAgentAddress: '', completedAt: '', updatedAt: '' });
   const [userProfileLoaded, setUserProfileLoaded] = useState(false);
-  const [uiSettings, setUiSettings] = useState<WorkbenchUiSettings>({ sendKey: 'enter', density: 'comfortable', streamingResponses: true, showReasoning: true, defaultAgentId: '', fallbackDecisionAgentId: '', defaultPermissionMode: 'manual', contextTriggerTokens: 500000, groupChatTriggerTokens: 100000, historyTailMessages: 10, agentMentionMaxDepth: 2 });
+  const [uiSettings, setUiSettings] = useState<WorkbenchUiSettings>({ sendKey: 'enter', density: 'comfortable', appearance: 'system', streamingResponses: true, showReasoning: true, richToolDescriptions: true, defaultAgentId: '', fallbackDecisionAgentId: '', defaultPermissionMode: 'manual', contextTriggerTokens: 500000, groupChatTriggerTokens: 100000, historyTailMessages: 10, agentMentionMaxDepth: 2 });
+  const [desktopAppearanceDark, setDesktopAppearanceDark] = useState(false);
   const [telemetryStatus, setTelemetryStatus] = useState<TelemetryStatus | null>(null);
   const [showTelemetryNotice, setShowTelemetryNotice] = useState(false);
   const [hermesStatus, setHermesStatus] = useState<HermesLocalStatus | null>(null);
@@ -840,6 +1059,8 @@ function App() {
   const [updatesBusy, setUpdatesBusy] = useState<UpdateBusy>('');
   const [updatesError, setUpdatesError] = useState('');
   const [updatesResult, setUpdatesResult] = useState<UpdateActionResult | null>(null);
+  const [desktopUpdateState, setDesktopUpdateState] = useState<DesktopUpdateState | null>(null);
+  const [desktopUpdatePopoverOpen, setDesktopUpdatePopoverOpen] = useState(false);
   const [isImportingHermes, setIsImportingHermes] = useState(false);
   const [vaultPathInput, setVaultPathInput] = useState('');
   const [vaultError, setVaultError] = useState('');
@@ -851,21 +1072,23 @@ function App() {
   const [workflowControlInProgress, setWorkflowControlInProgress] = useState(false);
   const [modeSwitching, setModeSwitching] = useState(false);
   const [collaborationModeError, setCollaborationModeError] = useState<{ message: string; code?: string; details?: Record<string, any> } | null>(null);
-  const [animatedMessageContent, setAnimatedMessageContent] = useState<Record<string, string>>({});
-  const [streamingMessageIds, setStreamingMessageIds] = useState<Record<string, boolean>>({});
   const [newAgentOpen, setNewAgentOpen] = useState(false);
   const agentCreationRequestIdRef = useRef('');
   const [selectedOrgAgentId, setSelectedOrgAgentId] = useState('');
   const [editingAgentId, setEditingAgentId] = useState<string | null>(null);
   const [profileInspector, setProfileInspector] = useState<ProfileInspectorState>({ target: null, draft: '', original: '', loading: false, saving: false, error: '', errorStage: '', saved: false });
   const profileInspectorRequestRef = useRef(0);
-  const [launchPhase, setLaunchPhase] = useState<LaunchPhase>('booting');
+  const [launchPhase, setLaunchPhase] = useState<AppLaunchPhase>(launchQaMode === 'installing' ? 'installing' : launchQaMode === 'welcome' ? 'welcome' : 'booting');
   const [launchUserAvatarSnapshot, setLaunchUserAvatarSnapshot] = useState(() => readLaunchUserAvatarSnapshot());
-  const [firstUseGuide, setFirstUseGuide] = useState<FirstUseGuideState>(() => createFirstUseGuideState());
-  const [showFirstUseGuide, setShowFirstUseGuide] = useState(false);
+  const [launchInstallJob, setLaunchInstallJob] = useState<LaunchInstallJob | null>(launchQaMode === 'installing' ? launchQaInstallJob : null);
+  const [launchIssue, setLaunchIssue] = useState<LaunchIssue | null>(null);
   const launchStartedAtRef = useRef(Date.now());
   const launchTimersRef = useRef<number[]>([]);
-  const firstUseGuideAutoStartedRef = useRef(false);
+  const launchOriginRef = useRef<'startup' | 'manual'>('startup');
+  const launchInstallEventsRef = useRef<EventSource | null>(null);
+  const launchInstallCompletedJobRef = useRef('');
+  const launchInstallStartingRef = useRef(false);
+  const bootstrapStartedRef = useRef(false);
   const activeRunUi = activeThread?.id ? runUiByThreadId[activeThread.id] : null;
   const isRunning = Boolean(activeRunUi?.isRunning);
   const runStartedAt = activeRunUi?.startedAt || null;
@@ -873,6 +1096,7 @@ function App() {
   const activeHermesRun = activeRunUi?.activeRun || null;
   const runDraft = activeRunUi?.draft || '';
   const runActivityGroups = activeRunUi?.activityGroups || [];
+  const runPresentationPhase = activeRunUi?.presentationPhase || 'thinking';
   const runApproval = activeRunUi?.approval || null;
   const approvalSubmitting = Boolean(activeRunUi?.approvalSubmitting);
   const approvalError = activeRunUi?.approvalError || '';
@@ -961,12 +1185,17 @@ function App() {
   }
 
   useEffect(() => {
+    if (launchQaMode) return;
+    if (bootstrapStartedRef.current) return;
+    bootstrapStartedRef.current = true;
     void bootstrap();
   }, []);
 
   useEffect(() => () => {
     for (const timer of launchTimersRef.current) window.clearTimeout(timer);
     launchTimersRef.current = [];
+    launchInstallEventsRef.current?.close();
+    launchInstallEventsRef.current = null;
   }, []);
 
   useEffect(() => {
@@ -994,6 +1223,30 @@ function App() {
   }, [activeThread?.vaultId]);
 
   useEffect(() => {
+    if (activeView !== 'thread' || !activeThread?.id || activeThread.collaborationMode !== 'plan') return undefined;
+    const threadId = activeThread.id;
+    const events = new EventSource(`/api/threads/${threadId}/plans/events`);
+    events.onmessage = (event) => {
+      const data = JSON.parse(event.data || '{}');
+      if (data.event !== 'plan.snapshot') return;
+      setActiveThread((current) => {
+        if (!current || current.id !== threadId) return current;
+        const incomingPlan = data.plan as PlanSession | null;
+        const planSessions = incomingPlan
+          ? [...(current.planSessions || []).filter((plan) => plan.id !== incomingPlan.id), incomingPlan].slice(-20)
+          : current.planSessions || [];
+        return {
+          ...current,
+          collaborationMode: data.collaborationMode === 'plan' ? 'plan' : 'default',
+          activePlanId: String(data.activePlanId || ''),
+          planSessions,
+        };
+      });
+    };
+    return () => events.close();
+  }, [activeView, activeThread?.id, activeThread?.collaborationMode]);
+
+  useEffect(() => {
     if (activeThread?.mode === 'workspace' && activeThread.workspaceId) void loadWorkspaceArtifacts(activeThread.workspaceId);
     if (activeThread?.mode !== 'workspace') setWorkspaceArtifacts([]);
   }, [activeThread?.id, activeThread?.workspaceId, activeThread?.mode, activeThread?.messages.length]);
@@ -1017,9 +1270,6 @@ function App() {
     runDraft,
     runError,
     runActivityGroups,
-    animatedMessageContent,
-    streamingMessageIds,
-    activeRunUi?.completedSummary,
   ]);
 
   useEffect(() => {
@@ -1104,6 +1354,7 @@ function App() {
     if (threadScrollFrameRef.current !== null) window.cancelAnimationFrame(threadScrollFrameRef.current);
     if (threadProgrammaticScrollTimerRef.current !== null) window.clearTimeout(threadProgrammaticScrollTimerRef.current);
     if (threadUserScrollIntentTimerRef.current !== null) window.clearTimeout(threadUserScrollIntentTimerRef.current);
+    if (copiedMessageTimerRef.current !== null) window.clearTimeout(copiedMessageTimerRef.current);
   }, []);
 
   useEffect(() => {
@@ -1111,47 +1362,6 @@ function App() {
     const timer = window.setInterval(() => setRunTick((tick) => tick + 1), 1000);
     return () => window.clearInterval(timer);
   }, [isRunning]);
-
-  useEffect(() => {
-    if (!userMenuOpen) return undefined;
-    function handlePointerDown(event: PointerEvent) {
-      if (userMenuRef.current && !userMenuRef.current.contains(event.target as Node)) setUserMenuOpen(false);
-    }
-    window.addEventListener('pointerdown', handlePointerDown);
-    return () => window.removeEventListener('pointerdown', handlePointerDown);
-  }, [userMenuOpen]);
-
-  useEffect(() => {
-    if (!railContextMenu) return undefined;
-    function closeMenu() {
-      setRailContextMenu(null);
-    }
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') closeMenu();
-    }
-    window.addEventListener('pointerdown', closeMenu);
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('pointerdown', closeMenu);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [railContextMenu]);
-
-  useEffect(() => {
-    if (!railConfirm) return undefined;
-    function closeConfirm() {
-      setRailConfirm(null);
-    }
-    function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === 'Escape') closeConfirm();
-    }
-    window.addEventListener('pointerdown', closeConfirm);
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('pointerdown', closeConfirm);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [railConfirm]);
 
   useEffect(() => {
     function handleResize() {
@@ -1164,9 +1374,8 @@ function App() {
 
   const globalDefaultAgentId = agents.some((agent) => agent.id === uiSettings.defaultAgentId) ? uiSettings.defaultAgentId || '' : agents[0]?.id || '';
   const selectedAgentIds = activeThread?.selectedAgents?.length ? activeThread.selectedAgents : [globalDefaultAgentId].filter(Boolean);
-  const permissionMode = activeThread?.permissionMode || 'manual';
+  const permissionMode = activeThread?.permissionMode || 'smart';
   const newChatAgent = agents.find((agent) => agent.id === (newChatAgentId || globalDefaultAgentId)) || agents.find((agent) => agent.id === globalDefaultAgentId) || agents[0] || null;
-  const defaultLaunchAgent = agents.find((agent) => agent.id === globalDefaultAgentId) || newChatAgent || agents[0] || null;
   const launchWelcomeAvatarUrl = userProfile.avatarUrl || launchUserAvatarSnapshot || '';
   const activeComposerAgentId = activeThread?.activeAgentId || activeThread?.collaboration?.activeAgentId || activeThread?.defaultAgentId || activeThread?.primaryAgentId || globalDefaultAgentId;
   const activeComposerAgent = agents.find((agent) => agent.id === activeComposerAgentId) || agents[0] || null;
@@ -1188,13 +1397,24 @@ function App() {
   const visibleWorkspaces = workspaces.filter((workspace) => (workspace.spaceId || activeSpaceId) === activeSpaceId);
   const visibleConversations = conversations.filter((thread) => (thread.spaceId || activeSpaceId) === activeSpaceId);
   const activeWorkspace = activeThread?.workspaceId ? workspaces.find((workspace) => workspace.id === activeThread.workspaceId) || null : null;
+  const activePlan = activeThread?.planSessions?.find((plan) => plan.id === activeThread.activePlanId) || null;
+  const pendingPlanQuestion = activePlan?.questions?.find((batch) => batch.status === 'pending') || null;
   const visibleMessages = (activeThread?.messages || []).filter(isVisibleChatMessage);
   const overviewRounds = buildThreadOverviewRounds(visibleMessages);
-  const activeCompletedRunSummary = activeRunUi?.completedSummary?.threadId === activeThread?.id ? activeRunUi?.completedSummary || null : null;
   const profileInspectorDirty = Boolean(profileInspector.target && profileInspector.draft !== profileInspector.original);
-  const resourceRailAvailable = !spaceCreateOpen && activeView !== 'new-chat' && !isManagementSection && Boolean(activeThread);
+  const spaceEditorReplacesPage = spaceCreateOpen && !isMacDesktop;
+  const macSpaceEditorOpen = spaceCreateOpen && isMacDesktop;
+  const resourceRailAvailable = !spaceEditorReplacesPage && activeView !== 'new-chat' && !isManagementSection && Boolean(activeThread);
   const rightRailKind: 'resources' | null = resourceRailAvailable ? 'resources' : null;
   const rightRailOpen = Boolean(rightRailKind && !libraryCollapsed);
+  const isMacConversationShell = !isSettingsNav && (activeView === 'new-chat' || (!isManagementSection && Boolean(activeThread)));
+  const desktopUpdateBadgeVisible = Boolean(
+    desktopUpdateState?.supported
+    && ['available', 'downloading', 'downloaded', 'error'].includes(desktopUpdateState.phase)
+    && (desktopUpdateState.phase !== 'error' || desktopUpdateState.latestVersion),
+  );
+  const effectiveAppDark = uiSettings.appearance === 'dark'
+    || (isMacDesktop && uiSettings.appearance !== 'light' && desktopAppearanceDark);
   const profileEditorControls: ProfileEditorControls = {
     state: profileInspector,
     dirty: profileInspectorDirty,
@@ -1204,34 +1424,205 @@ function App() {
     close: () => closeProfileInspector(),
     discard: () => closeProfileInspector(true),
   };
-  const autoSidebarCollapsed = isDesktopShell && !isSettingsNav && viewportWidth < (rightRailOpen ? autoCollapseSidebarWithRightRailWidth : autoCollapseSidebarWidth);
-  const effectiveSidebarCollapsed = sidebarCollapsed || (autoSidebarCollapsed && !sidebarManuallyExpanded);
+  const configuredAutoCollapseWidth = rightRailOpen ? autoCollapseSidebarWithRightRailWidth : autoCollapseSidebarWidth;
+  const macPaneSafeCollapseWidth = sidebarWidth
+    + (rightRailOpen ? contextWidth : 0)
+    + macConversationMinMainWidth
+    + macConversationChromeWidth;
+  const autoCollapseWidth = isMacConversationShell
+    ? Math.max(configuredAutoCollapseWidth, macPaneSafeCollapseWidth)
+    : configuredAutoCollapseWidth;
+  const autoSidebarCollapsed = isDesktopShell && !isSettingsNav && viewportWidth < autoCollapseWidth;
+  const effectiveSidebarCollapsed = sidebarCollapsed || autoSidebarCollapsed;
+  const macSidebarUsesOverlay = isMacConversationShell && autoSidebarCollapsed;
+  const macSidebarOverlayVisible = macSidebarOverlayOpen || macSidebarOverlayClosing;
+  const sidebarVisuallyOpen = macSidebarUsesOverlay ? macSidebarOverlayOpen : !effectiveSidebarCollapsed;
+  const clearMacSidebarOverlayCloseTimer = useCallback(() => {
+    if (macSidebarOverlayCloseTimerRef.current === null) return;
+    window.clearTimeout(macSidebarOverlayCloseTimerRef.current);
+    macSidebarOverlayCloseTimerRef.current = null;
+  }, []);
+  const openMacSidebarOverlay = useCallback(() => {
+    clearMacSidebarOverlayCloseTimer();
+    macSidebarOverlayVisibleRef.current = true;
+    setMacSidebarOverlayClosing(false);
+    setMacSidebarOverlayOpen(true);
+  }, [clearMacSidebarOverlayCloseTimer]);
+  const closeMacSidebarOverlay = useCallback((immediate = false) => {
+    if (!macSidebarOverlayVisibleRef.current) return;
+    clearMacSidebarOverlayCloseTimer();
+    setMacSidebarOverlayOpen(false);
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    if (immediate || reduceMotion) {
+      macSidebarOverlayVisibleRef.current = false;
+      setMacSidebarOverlayClosing(false);
+      return;
+    }
+    setMacSidebarOverlayClosing(true);
+    macSidebarOverlayCloseTimerRef.current = window.setTimeout(() => {
+      macSidebarOverlayCloseTimerRef.current = null;
+      macSidebarOverlayVisibleRef.current = false;
+      setMacSidebarOverlayClosing(false);
+    }, 220);
+  }, [clearMacSidebarOverlayCloseTimer]);
+  const macSidebarResizeMax = availablePaneMax({
+    side: 'left',
+    viewportWidth,
+    sidebarWidth,
+    contextWidth,
+    leftVisible: !effectiveSidebarCollapsed,
+    rightVisible: rightRailOpen,
+    minMainWidth: macConversationMinMainWidth,
+    chromeWidth: macConversationChromeWidth,
+    minWidth: activeSidebarWidthBounds.min,
+    maxWidth: activeSidebarWidthBounds.max,
+  });
+  const macContextResizeMax = availablePaneMax({
+    side: 'right',
+    viewportWidth,
+    sidebarWidth,
+    contextWidth,
+    leftVisible: !effectiveSidebarCollapsed,
+    rightVisible: rightRailOpen,
+    minMainWidth: macConversationMinMainWidth,
+    chromeWidth: macConversationChromeWidth,
+    minWidth: contextWidthBounds.min,
+    maxWidth: contextWidthBounds.max,
+  });
 
   useEffect(() => {
-    if (!autoSidebarCollapsed) setSidebarManuallyExpanded(false);
-  }, [autoSidebarCollapsed]);
-  const activeSpaceTheme = resolveEffectiveSpaceTheme(activeSpace?.theme);
-  const activeSpaceRgb = hexToRgb(activeSpaceTheme.sidebarBg);
-  const activeSpaceIsDark = activeSpaceTheme.appearance === 'dark' || (activeSpaceTheme.appearance === 'auto' && isThemeNightTime());
-  const appStyle = {
+    if (!macSidebarUsesOverlay) closeMacSidebarOverlay(true);
+  }, [closeMacSidebarOverlay, macSidebarUsesOverlay]);
+
+  useEffect(() => {
+    closeMacSidebarOverlay();
+  }, [activeNav, activeThread?.id, activeView, closeMacSidebarOverlay]);
+
+  useEffect(() => () => clearMacSidebarOverlayCloseTimer(), [clearMacSidebarOverlayCloseTimer]);
+
+  useEffect(() => {
+    if (!macSidebarOverlayOpen) return undefined;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target instanceof Element ? event.target : null;
+      if (target?.closest('.sidebar, .desktop-window-controls')) return;
+      closeMacSidebarOverlay();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      closeMacSidebarOverlay();
+    };
+    window.addEventListener('pointerdown', handlePointerDown, true);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown, true);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [closeMacSidebarOverlay, macSidebarOverlayOpen]);
+
+  useEffect(() => {
+    if (!macSpaceEditorOpen) return undefined;
+    const handlePointerDown = (event: PointerEvent) => {
+      const target = event.target instanceof Node ? event.target : null;
+      if (target && macSpaceEditorRef.current?.contains(target)) return;
+      closeSpaceEditor();
+    };
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== 'Escape') return;
+      event.preventDefault();
+      closeSpaceEditor();
+    };
+    window.addEventListener('pointerdown', handlePointerDown, true);
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      window.removeEventListener('pointerdown', handlePointerDown, true);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [macSpaceEditorOpen]);
+
+  useEffect(() => {
+    setRightRailTab((activeThread?.executionMode || 'chat') === 'work' ? 'collaboration' : 'resources');
+  }, [activeThread?.id, activeThread?.executionMode]);
+
+  useEffect(() => {
+    if (!isMacDesktop || !window.frakioDesktop?.getAppearance) return undefined;
+    let active = true;
+    void window.frakioDesktop.setAppearance?.(uiSettings.appearance || 'system').then((state) => {
+      if (active) setDesktopAppearanceDark(Boolean(state?.dark));
+    });
+    const unsubscribe = window.frakioDesktop.onAppearanceChanged?.((state) => {
+      if (active) setDesktopAppearanceDark(Boolean(state?.dark));
+    });
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, [isMacDesktop, uiSettings.appearance]);
+
+  useEffect(() => {
+    if (!window.frakioDesktop?.getUpdateState) return undefined;
+    let active = true;
+    void window.frakioDesktop.getUpdateState().then((next) => {
+      if (active && next) setDesktopUpdateState(next);
+    });
+    const unsubscribe = window.frakioDesktop.onUpdateStateChanged?.((next) => {
+      if (active && next) setDesktopUpdateState(next);
+    });
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  }, []);
+
+  const persistedSpaceTheme = isMacDesktop || uiSettings.appearance === 'dark'
+    ? resolveSpaceThemeForAppearance(activeSpace?.theme, effectiveAppDark)
+    : resolveEffectiveSpaceTheme(activeSpace?.theme);
+  const activeSpaceTheme = macSpaceEditorOpen
+    ? resolveSpaceThemeForAppearance(spaceDraft.theme, effectiveAppDark)
+    : persistedSpaceTheme;
+  const launchSnapshot = launchMaterialSnapshotRef.current;
+  const workspaceMaterialDark = workspaceThemeLoaded ? effectiveAppDark : launchSnapshot.dark;
+  const workspaceMaterialTheme = workspaceThemeLoaded
+    ? activeSpaceTheme
+    : resolveSpaceThemeForAppearance(launchSnapshot.theme, workspaceMaterialDark);
+  const workspaceMaterialRgb = hexToRgb(workspaceMaterialTheme.sidebarBg);
+  const workspaceMaterialAccentRgb = hexToRgb(workspaceMaterialTheme.accentColor);
+  const workspaceMaterialIsDark = workspaceMaterialDark
+    || workspaceMaterialTheme.appearance === 'dark'
+    || (workspaceMaterialTheme.appearance === 'auto' && isThemeNightTime());
+  const workspaceMaterialRailTokens = spaceRailContrastTokens(workspaceMaterialTheme, workspaceMaterialDark);
+  const workspaceUsesNativeMaterial = isMacDesktop && workspaceMaterialTheme.colorMode === 'native';
+  const workspaceMaterialStyle = {
     '--sidebar-width': `${sidebarWidth}px`,
     '--context-width': `${contextWidth}px`,
-    '--space-accent': activeSpaceTheme.accentColor,
-    '--space-sidebar-bg': activeSpaceTheme.sidebarBg,
-    '--space-sidebar-rgb': activeSpaceRgb,
-    '--space-sidebar-opacity': String(activeSpaceTheme.opacity),
-    '--space-noise-opacity': String(activeSpaceTheme.noise),
-    '--space-text': activeSpaceIsDark ? '#f7f4ee' : activeSpaceTheme.mode === 'crisp' ? '#16231f' : '#21332e',
-    '--space-muted': activeSpaceIsDark ? '#d1cbc1' : activeSpaceTheme.mode === 'crisp' ? '#53605c' : '#6c7a75',
-    '--rail-edge-rgb': activeSpaceIsDark ? '255 255 255' : '17 24 39',
-    '--space-shell-bg': themeShellBackground(activeSpaceTheme),
-    '--space-stage-bg': themeStageBackground(activeSpaceTheme),
-    ...(spaceCreateOpen ? {
+    '--space-accent': workspaceMaterialTheme.accentColor,
+    '--space-sidebar-bg': workspaceMaterialTheme.sidebarBg,
+    '--space-sidebar-rgb': workspaceMaterialRgb,
+    '--space-accent-rgb': workspaceMaterialAccentRgb,
+    '--space-sidebar-opacity': String(workspaceMaterialTheme.opacity),
+    '--space-noise-opacity': String(workspaceMaterialTheme.noise),
+    '--space-text': workspaceMaterialIsDark ? '#f7f4ee' : workspaceMaterialTheme.mode === 'crisp' ? '#16231f' : '#21332e',
+    '--space-muted': workspaceMaterialIsDark ? '#d1cbc1' : workspaceMaterialTheme.mode === 'crisp' ? '#53605c' : '#6c7a75',
+    '--space-rail-text': workspaceMaterialRailTokens.text,
+    '--space-rail-muted': workspaceMaterialRailTokens.muted,
+    '--rail-edge-rgb': workspaceMaterialIsDark ? '255 255 255' : '17 24 39',
+    '--space-shell-bg': workspaceUsesNativeMaterial ? 'transparent' : isMacDesktop ? macThemeBackground(workspaceMaterialTheme) : themeShellBackground(workspaceMaterialTheme),
+    '--space-stage-bg': workspaceUsesNativeMaterial ? 'transparent' : isMacDesktop ? macThemeBackground(workspaceMaterialTheme) : themeStageBackground(workspaceMaterialTheme),
+    '--app-surface': workspaceMaterialIsDark ? '#181818' : '#fbfbfb',
+    '--app-surface-rgb': workspaceMaterialIsDark ? '24 24 24' : '251 251 251',
+    ...(spaceEditorReplacesPage ? {
       '--draft-shell-bg': themeShellBackground(spaceDraft.theme),
       '--draft-rail-bg': themeRailBackground(spaceDraft.theme),
       '--draft-stage-bg': themeStageBackground(spaceDraft.theme),
     } : {}),
   } as React.CSSProperties;
+
+  useEffect(() => {
+    if (!workspaceThemeLoaded) return;
+    const snapshot = { activeSpaceId, theme: persistedSpaceTheme, dark: effectiveAppDark };
+    launchMaterialSnapshotRef.current = snapshot;
+    writeLaunchMaterialSnapshot(snapshot);
+  }, [workspaceThemeLoaded, activeSpaceId, activeSpace?.updatedAt, effectiveAppDark]);
 
   useEffect(() => {
     const root = threadScrollRef.current;
@@ -1274,8 +1665,11 @@ function App() {
   }, [userProfileLoaded, userProfile.avatarUrl]);
 
   async function bootstrap() {
+    launchOriginRef.current = 'startup';
     launchStartedAtRef.current = Date.now();
     setLaunchPhase('booting');
+    setLaunchIssue(null);
+    setLaunchInstallJob(null);
     const safeJson = <T,>(url: string): Promise<T | null> => fetch(url).then((res) => res.json()).catch(() => null);
     const [agentData, modelData, capabilityData, stateData, vaultData, spaceData, workspaceData, conversationData, hermesData, hermesBootstrapData, hermesRuntimeData, hermesDiagnosticsData, updatesData, userProfileData, telemetryData] = await Promise.all([
       safeJson<{ agents: Agent[] }>('/api/agents'),
@@ -1297,10 +1691,12 @@ function App() {
     const apiOnline = Boolean(agentData || modelData || stateData || vaultData || spaceData || workspaceData || conversationData || hermesData || hermesBootstrapData || hermesRuntimeData || hermesDiagnosticsData || updatesData || userProfileData);
     if (!apiOnline) {
       setHermesApiAvailability('offline');
-      setHermesError('Frakio Work 本地管理服务未运行。请用 npm run dev 同时启动 Web 和 API，或单独运行 npm run dev:api。');
+      const message = 'Frakio Work 本地管理服务未运行。';
+      setHermesError(message);
+      setLaunchIssue(launchProblem('local-service', message));
       setActiveThread(null);
       setActiveView('new-chat');
-      scheduleLaunchWelcome();
+      setLaunchPhase('error');
       return;
     }
     setAgents(agentData?.agents || []);
@@ -1314,8 +1710,10 @@ function App() {
     setUiSettings({
       sendKey: stateData?.ui?.sendKey || 'enter',
       density: stateData?.ui?.density || 'comfortable',
+      appearance: stateData?.ui?.appearance === 'light' || stateData?.ui?.appearance === 'dark' ? stateData.ui.appearance : 'system',
       streamingResponses: stateData?.ui?.streamingResponses !== false,
       showReasoning: stateData?.ui?.showReasoning !== false,
+      richToolDescriptions: stateData?.ui?.richToolDescriptions !== false,
       defaultProfile: stateData?.ui?.defaultProfile || stateData?.integrations?.hermesStudio?.selectedProfile || 'default',
       defaultModel: stateData?.ui?.defaultModel || '',
       defaultAgentId: stateData?.ui?.defaultAgentId || '',
@@ -1329,8 +1727,10 @@ function App() {
         ? 'unlimited'
         : Math.max(0, Math.floor(Number(stateData?.ui?.agentMentionMaxDepth ?? 2) || 0)),
       sidebarCollapsed: Boolean(stateData?.ui?.sidebarCollapsed),
-      sidebarWidth: clampNumber(Number(stateData?.ui?.sidebarWidth || defaultSidebarWidth), sidebarWidthBounds.min, sidebarWidthBounds.max),
-      contextWidth: clampNumber(Number(stateData?.ui?.contextWidth || defaultContextWidth), contextWidthBounds.min, contextWidthBounds.max),
+      sidebarWidth: normalizePaneWidth(stateData?.ui?.sidebarWidth ?? defaultSidebarWidth, sidebarWidthBounds.min, sidebarWidthBounds.max),
+      macSidebarWidth: normalizePaneWidth(stateData?.ui?.macSidebarWidth ?? defaultMacSidebarWidth, macSidebarWidthBounds.min, macSidebarWidthBounds.max),
+      macSidebarWidthVersion: Number(stateData?.ui?.macSidebarWidthVersion || SIDEBAR_WIDTH_VERSION),
+      contextWidth: normalizePaneWidth(stateData?.ui?.contextWidth || defaultContextWidth, contextWidthBounds.min, contextWidthBounds.max),
       activeSpaceId: stateData?.ui?.activeSpaceId || spaceData?.activeSpaceId || spaceData?.spaces?.[0]?.id || 'space_default',
       collapsedWorkspaceIds: Array.isArray(stateData?.ui?.collapsedWorkspaceIds) ? stateData?.ui?.collapsedWorkspaceIds : [],
       telemetryEnabled: stateData?.ui?.telemetryEnabled === true,
@@ -1339,8 +1739,12 @@ function App() {
     if (telemetryData) setTelemetryStatus(telemetryData);
     setShowTelemetryNotice(!stateData?.ui?.telemetryNoticeSeenAt);
     setSidebarCollapsed(Boolean(stateData?.ui?.sidebarCollapsed));
-    setSidebarWidth(clampNumber(Number(stateData?.ui?.sidebarWidth || defaultSidebarWidth), sidebarWidthBounds.min, sidebarWidthBounds.max));
-    setContextWidth(clampNumber(Number(stateData?.ui?.contextWidth || defaultContextWidth), contextWidthBounds.min, contextWidthBounds.max));
+    setSidebarWidth(normalizePaneWidth(
+      isMacDesktop ? stateData?.ui?.macSidebarWidth ?? defaultMacSidebarWidth : stateData?.ui?.sidebarWidth ?? defaultSidebarWidth,
+      activeSidebarWidthBounds.min,
+      activeSidebarWidthBounds.max,
+    ));
+    setContextWidth(normalizePaneWidth(stateData?.ui?.contextWidth || defaultContextWidth, contextWidthBounds.min, contextWidthBounds.max));
     if (hermesData || hermesBootstrapData || hermesRuntimeData) setHermesApiAvailability('online');
     else {
       setHermesApiAvailability('offline');
@@ -1356,18 +1760,26 @@ function App() {
     setDefaultVaultId(vaultData?.defaultVaultId || null);
     setSpaces(spaceData?.spaces || []);
     setActiveSpaceId(stateData?.ui?.activeSpaceId || spaceData?.activeSpaceId || spaceData?.spaces?.[0]?.id || 'space_default');
+    setWorkspaceThemeLoaded(true);
     setWorkspaces(workspaceData?.workspaces || []);
     setConversations(conversationData?.conversations || []);
     setActiveThread(null);
     setActiveView('new-chat');
     setNewChatAgentId(stateData?.ui?.defaultAgentId || '');
+    if (hermesBootstrapData?.error) {
+      const message = hermesBootstrapData.error || 'Hermes 检测失败。';
+      setHermesError(message);
+      setLaunchIssue(launchProblem('hermes', message));
+      setLaunchPhase('error');
+      return;
+    }
+    if (hermesBootstrapData?.status === 'missing') {
+      void startHermesInstall();
+      return;
+    }
     const runtimeStatus = hermesRuntimeData && !hermesRuntimeData.error ? hermesRuntimeData.autoStart?.status : null;
     if (runtimeStatus === 'starting') setLaunchPhase('connecting');
     else scheduleLaunchWelcome();
-    if (!firstUseGuideAutoStartedRef.current && !readFirstUseGuideCompleted()) {
-      firstUseGuideAutoStartedRef.current = true;
-      window.setTimeout(() => void runFirstUseGuide({ manual: false }), 950);
-    }
   }
 
   function scheduleLaunchWelcome() {
@@ -1438,12 +1850,16 @@ function App() {
     }
   }
 
-  async function installHermesRuntime() {
+  async function installHermesRuntime(tag?: string) {
     setUpdatesBusy('runtime-install');
     setUpdatesError('');
     setUpdatesResult(null);
     try {
-      const res = await fetch('/api/hermes-runtime/install', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
+      const res = await fetch('/api/hermes-runtime/install', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(tag ? { tag } : {}),
+      });
       const data = await res.json();
       if (data.runtime) setHermesRuntime(data.runtime);
       setUpdatesResult({ ok: data.ok, target: 'hermes-agent', phase: data.phase, logs: data.logs, error: data.error, runtime: data.runtime });
@@ -1503,41 +1919,14 @@ function App() {
     }
   }
 
-  async function runUpdateAction(action: 'check' | 'hermes-agent' | 'frakio-work') {
-    setUpdatesBusy(action);
-    setUpdatesError('');
-    setUpdatesResult(null);
-    const endpoint = action === 'check' ? '/api/updates/check' : `/api/updates/${action}`;
-    try {
-      if (action === 'frakio-work') {
-        const release = await fetch('/api/app-update/status?refresh=1').then((response) => response.json());
-        const targetUrl = release.asset?.browser_download_url || release.releaseUrl;
-        if (!targetUrl) throw new Error(release.error || '没有找到可用的 GitHub Release。');
-        if (window.frakioDesktop?.openRelease) await window.frakioDesktop.openRelease(targetUrl);
-        else window.open(targetUrl, '_blank', 'noopener,noreferrer');
-        setUpdatesResult({ ok: true, target: 'frakio-work', phase: 'release-download', logs: [`已打开 ${release.latestVersion ? `v${release.latestVersion}` : 'GitHub Releases'}`] });
-        return;
-      }
-      const res = await fetch(endpoint, { method: 'POST' });
-      const data: UpdateActionResult = await res.json();
-      if (data.status) setUpdatesStatus(data.status);
-      setUpdatesResult(data);
-      if (data.bootstrap) setHermesBootstrap(data.bootstrap);
-      if (data.runtime) setHermesRuntime(data.runtime);
-      if (!res.ok) {
-        setUpdatesError(data.error || '更新操作失败。');
-        return;
-      }
-      if (action === 'hermes-agent') {
-        await refreshHermesRuntime();
-        await refreshHermesStatus();
-      }
-    } catch (error) {
-      setUpdatesError(error instanceof Error ? error.message : '更新操作失败。');
-    } finally {
-      setUpdatesBusy('');
-      await refreshUpdatesStatus();
+  async function checkDesktopUpdate() {
+    if (desktopUpdateState?.supported && window.frakioDesktop?.checkForUpdates) {
+      const next = await window.frakioDesktop.checkForUpdates();
+      if (next) setDesktopUpdateState(next);
+    } else {
+      await fetch('/api/app-update/status?refresh=1').catch(() => null);
     }
+    await refreshUpdatesStatus();
   }
 
   async function createHermesBackup() {
@@ -1634,128 +2023,129 @@ function App() {
     }
   }
 
-  function updateFirstUseStep(id: string, status: FirstUseGuideStepStatus, detail?: string) {
-    setFirstUseGuide((current) => ({
-      ...current,
-      steps: current.steps.map((step) => step.id === id ? { ...step, status, detail: detail ?? step.detail } : step),
-    }));
-  }
-
-  async function runFirstUseGuide({ manual = true } = {}) {
-    setShowFirstUseGuide(true);
-    setHermesError('');
-    setFirstUseGuide({
-      status: 'running',
-      title: manual ? '正在重新运行初次使用引导' : '正在完成初次使用引导',
-      detail: 'Frakio Work 会初始化 Hermes Home 并启动内置 Runtime。本地 Profile 需要由你手动同步。',
-      error: '',
-      steps: createFirstUseGuideSteps(),
-    });
-    try {
-      updateFirstUseStep('detect', 'running', '读取 ~/.hermes 和 Frakio Work Runtime 状态');
-      const bootstrapRes = await fetch('/api/hermes-bootstrap/status');
-      const bootstrapData = await bootstrapRes.json();
-      if (!bootstrapRes.ok) throw new Error(bootstrapData.error || 'Hermes 检测失败。');
-      setHermesBootstrap(bootstrapData);
-      updateFirstUseStep('detect', 'ready', `${bootstrapData.installPath || '~/.hermes'} · ${bootstrapData.profiles?.length || 0} 个 Profile`);
-      if (bootstrapData.status === 'missing' || !bootstrapData.profiles?.length) {
-        updateFirstUseStep('runtime', 'skipped', '未发现可连接的 Hermes Home');
-        updateFirstUseStep('import', 'skipped', '等待完成 Hermes Agent 配置');
-        setFirstUseGuide((current) => ({
-          ...current,
-          status: 'needs-install',
-          title: '未发现可用的 Hermes 配置',
-          detail: '可以先准备 Hermes Agent，再回到这里重新运行引导。',
-        }));
-        return;
-      }
-
-      updateFirstUseStep('runtime', 'running', '启动聊天桥接、外部兼容 API 和 Profile Gateway');
-      const runtimeRes = await fetch('/api/hermes-runtime/start', { method: 'POST' });
-      const runtimeData = await runtimeRes.json();
-      if (!runtimeRes.ok) throw new Error(runtimeData.error || 'Hermes Runtime 启动失败。');
-      if (runtimeData.runtime) setHermesRuntime(runtimeData.runtime);
-      const autoStartStatus = runtimeData.autoStart?.status || runtimeData.runtime?.autoStart?.status || '';
-      const optionalWarnings = runtimeData.autoStart?.warnings || runtimeData.runtime?.autoStart?.warnings || [];
-      const runtimeDetail = autoStartStatus === 'partial'
-        ? '工作台已就绪；部分 Profile Gateway 需要稍后手动启动'
-        : optionalWarnings.length
-          ? '工作台已就绪；外部兼容 API 未启动，不影响对话'
-          : '工作台已就绪';
-      updateFirstUseStep('runtime', autoStartStatus === 'failed' ? 'failed' : 'ready', runtimeDetail);
-
-      updateFirstUseStep('import', 'skipped', '未自动同步；可在设置中点击“同步本地 Hermes 设置”');
-      await refreshHermesStatus();
-      await refreshHermesRuntime();
-      await refreshOrg();
-      updateFirstUseStep('finish', 'ready', '空白工作台已准备完成');
-      writeFirstUseGuideCompleted();
-      void fetch('/api/telemetry/onboarding-completed', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ importResult: 'skipped' }),
-      });
-      setFirstUseGuide((current) => ({
-        ...current,
-        status: 'ready',
-        title: 'Frakio Work 已准备完成',
-        detail: '工作台保持空白。本地 Hermes Profile 只会在你手动同步后显示。',
-      }));
-    } catch (error) {
-      const message = error instanceof Error ? error.message : '初次使用引导失败。';
-      setHermesError(message);
-      setFirstUseGuide((current) => ({
-        ...current,
-        status: 'failed',
-        title: '引导没有完成',
-        detail: '保留当前状态，修复后可以重新运行。',
-        error: message,
-        steps: current.steps.map((step) => step.status === 'running' ? { ...step, status: 'failed' } : step),
-      }));
+  function launchProblem(source: LaunchIssue['source'], message: string): LaunchIssue {
+    if (source === 'local-service') {
+      return {
+        source,
+        title: '本地服务未能启动',
+        message,
+        settingsTarget: 'localConnection',
+        actionLabel: '打开本地连接设置',
+      };
     }
+    return {
+      source,
+      title: source === 'pi' ? 'Pi 内核未能准备完成' : 'Hermes Agent 未能安装完成',
+      message,
+      settingsTarget: 'hermesAgent',
+      actionLabel: source === 'pi' ? '打开 Pi 设置' : '打开 Hermes Agent 设置',
+    };
   }
 
-  async function installHermesFromGuide() {
-    setFirstUseGuide({
-      status: 'running',
-      title: '正在准备 Hermes Agent',
-      detail: 'Frakio Work 会执行官方安装流程，并在完成后重新检测本机 Hermes。',
-      error: '',
-      steps: createHermesInstallGuideSteps().map((step, index) => index === 0 ? { ...step, status: 'running', detail: '检查 git、python3 和 uv' } : step),
+  function finishLaunchFlow() {
+    if (launchOriginRef.current === 'manual') {
+      setLaunchPhase('done');
+      return;
+    }
+    scheduleLaunchWelcome();
+  }
+
+  function applyHermesInstallSnapshot(job: LaunchInstallJob) {
+    setLaunchInstallJob(job);
+    if (job.status === 'failed') {
+      launchInstallStartingRef.current = false;
+      launchInstallEventsRef.current?.close();
+      launchInstallEventsRef.current = null;
+      const message = String(job.error || job.steps.find((step) => step.status === 'failed')?.detail || '安装过程遇到问题。');
+      setHermesError(message);
+      setLaunchIssue(launchProblem('hermes', message));
+      setLaunchPhase('error');
+      return;
+    }
+    if (job.status !== 'ready' || launchInstallCompletedJobRef.current === job.id) return;
+    launchInstallCompletedJobRef.current = job.id;
+    launchInstallStartingRef.current = false;
+    launchInstallEventsRef.current?.close();
+    launchInstallEventsRef.current = null;
+    if (job.bootstrap) setHermesBootstrap(job.bootstrap as HermesBootstrapStatus);
+    if (job.runtime) setHermesRuntime(job.runtime as HermesRuntimeStatus);
+    const timer = window.setTimeout(() => finishLaunchFlow(), 420);
+    launchTimersRef.current.push(timer);
+  }
+
+  function watchHermesInstallJob(job: LaunchInstallJob) {
+    launchInstallEventsRef.current?.close();
+    const events = new EventSource(`/api/hermes-bootstrap/install/${encodeURIComponent(job.id)}/events`);
+    launchInstallEventsRef.current = events;
+    events.addEventListener('install.snapshot', (event) => {
+      const payload = JSON.parse((event as MessageEvent).data || '{}');
+      if (payload.job) applyHermesInstallSnapshot(payload.job as LaunchInstallJob);
     });
+    events.onerror = () => {
+      void fetch(`/api/hermes-bootstrap/install/${encodeURIComponent(job.id)}`)
+        .then((res) => res.json())
+        .then((payload) => {
+          if (payload.job) applyHermesInstallSnapshot(payload.job as LaunchInstallJob);
+        })
+        .catch(() => {
+          // EventSource reconnects automatically; a transient disconnect is not an install failure.
+        });
+    };
+  }
+
+  async function startHermesInstall() {
+    if (launchInstallStartingRef.current) return;
+    launchInstallStartingRef.current = true;
+    setLaunchIssue(null);
+    setLaunchPhase('installing');
+    launchInstallCompletedJobRef.current = '';
     try {
       const res = await fetch('/api/hermes-bootstrap/install', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: 'official', confirmed: true }),
+        body: JSON.stringify({ source: 'launch' }),
       });
       const data = await res.json();
-      if (!res.ok) {
-        const installError = new Error(data.error || 'Hermes Agent 准备失败。') as Error & { phase?: string; logs?: string[] };
-        installError.phase = data.phase;
-        installError.logs = data.logs;
-        throw installError;
-      }
-      if (data.bootstrap) setHermesBootstrap(data.bootstrap);
-      setFirstUseGuide((current) => ({
-        ...current,
-        steps: current.steps.map((step) => ({ ...step, status: 'ready', detail: installStepSuccessDetail(step.id, data) })),
-        detail: installLogSummary(data.logs) || 'Hermes Agent 已安装，正在重新检测。',
-      }));
-      await runFirstUseGuide({ manual: true });
+      if (!res.ok || !data.job) throw new Error(data.error || '无法启动 Hermes Agent 安装任务。');
+      const job = data.job as LaunchInstallJob;
+      applyHermesInstallSnapshot(job);
+      if (job.status === 'running') watchHermesInstallJob(job);
     } catch (error) {
-      const installError = error as Error & { phase?: string; logs?: string[] };
-      const message = error instanceof Error ? error.message : 'Hermes Agent 准备失败。';
-      const detail = installLogSummary(installError.logs) || '保留当前状态，可以重新运行。';
+      launchInstallStartingRef.current = false;
+      const message = error instanceof Error ? error.message : '无法启动 Hermes Agent 安装任务。';
       setHermesError(message);
-      setFirstUseGuide((current) => ({
-        ...current,
-        status: 'failed',
-        title: 'Hermes Agent 准备失败',
-        detail,
-        error: message,
-        steps: markInstallFailure(current.steps, message, installError.phase),
-      }));
+      setLaunchIssue(launchProblem('hermes', message));
+      setLaunchPhase('error');
+    }
+  }
+
+  async function runFirstUseGuide({ manual = true } = {}) {
+    launchOriginRef.current = manual ? 'manual' : 'startup';
+    launchStartedAtRef.current = Date.now();
+    setLaunchPhase('booting');
+    setLaunchIssue(null);
+    setLaunchInstallJob(null);
+    setHermesError('');
+    try {
+      const bootstrapRes = await fetch('/api/hermes-bootstrap/status');
+      const bootstrapData = await bootstrapRes.json();
+      if (!bootstrapRes.ok) throw new Error(bootstrapData.error || 'Hermes 检测失败。');
+      setHermesBootstrap(bootstrapData);
+      if (bootstrapData.status === 'missing') {
+        await startHermesInstall();
+        return;
+      }
+      const runtimeRes = await fetch('/api/hermes-runtime/start', { method: 'POST' });
+      const runtimeData = await runtimeRes.json();
+      if (!runtimeRes.ok) throw new Error(runtimeData.error || 'Hermes Runtime 启动失败。');
+      if (runtimeData.runtime) setHermesRuntime(runtimeData.runtime);
+      await Promise.all([refreshHermesStatus(), refreshHermesRuntime(), refreshOrg()]);
+      finishLaunchFlow();
+    } catch (error) {
+      const message = error instanceof Error ? error.message : 'Hermes Agent 检测失败。';
+      setHermesError(message);
+      setLaunchIssue(launchProblem('hermes', message));
+      setLaunchPhase('error');
     }
   }
 
@@ -1793,13 +2183,14 @@ function App() {
     window.setTimeout(() => setSpaceSwitchDirection('none'), 190);
   }
 
-  function defaultSpaceDraft() {
-    return { name: '', iconKind: 'dot' as SpaceIconKind, iconValue: '', theme: buildSpaceThemeFromPoint(0.18, 0.72, '#536006', 'soft' as const) };
+  function defaultSpaceDraft(): SpaceDraft {
+    return { name: '', iconKind: 'dot', iconValue: '', theme: { ...buildSpaceThemeFromPoint(0.18, 0.72, '#536006', 'soft' as const), colorMode: 'native' } };
   }
 
   function resetSpaceDraft() {
     setSpaceDraft(defaultSpaceDraft());
     setSpaceColorPoint({ x: 0.18, y: 0.72 });
+    setSpaceThemeAdvancedOpen(false);
   }
 
   function openSpaceCreate() {
@@ -1807,6 +2198,7 @@ function App() {
     resetSpaceDraft();
     setSpaceMenuOpen(false);
     setRailContextMenu(null);
+    closeMacSidebarOverlay(true);
     setSpaceCreateOpen(true);
   }
 
@@ -1827,9 +2219,11 @@ function App() {
       theme,
     });
     setSpaceColorPoint({ x: primary.x, y: primary.y });
+    setSpaceThemeAdvancedOpen(false);
     setSpaceEditTargetId(space.id);
     setSpaceMenuOpen(false);
     setRailContextMenu(null);
+    closeMacSidebarOverlay(true);
     setSpaceCreateOpen(true);
   }
 
@@ -1935,7 +2329,7 @@ function App() {
         : normalized.lightTheme!;
       const primary = primaryGradientColor(palette);
       setSpaceColorPoint({ x: primary.x, y: primary.y });
-      return { ...current, theme: { ...palette, appearance, lightTheme: normalized.lightTheme, darkTheme: normalized.darkTheme } };
+      return { ...current, theme: { ...palette, colorMode: normalized.colorMode, appearance, lightTheme: normalized.lightTheme, darkTheme: normalized.darkTheme, renderVersion: normalized.renderVersion } };
     });
   }
 
@@ -2114,10 +2508,15 @@ function App() {
       const collapsed = Boolean(next.sidebarCollapsed);
       setSidebarCollapsed(collapsed);
     }
-    if (typeof next.sidebarWidth === 'number') setSidebarWidth(clampNumber(next.sidebarWidth, sidebarWidthBounds.min, sidebarWidthBounds.max));
-    if (typeof next.contextWidth === 'number') setContextWidth(clampNumber(next.contextWidth, contextWidthBounds.min, contextWidthBounds.max));
+    const nextSidebarWidth = isMacDesktop ? next.macSidebarWidth : next.sidebarWidth;
+    if (typeof nextSidebarWidth === 'number') setSidebarWidth(normalizePaneWidth(nextSidebarWidth, activeSidebarWidthBounds.min, activeSidebarWidthBounds.max));
+    if (typeof next.contextWidth === 'number') setContextWidth(normalizePaneWidth(next.contextWidth, contextWidthBounds.min, contextWidthBounds.max));
     if ('pinnedNav' in next && next.pinnedNav) setPinnedNav(next.pinnedNav);
     setUiSettings((current) => ({ ...current, ...(next as WorkbenchUiSettings) }));
+    if ('appearance' in next && window.frakioDesktop?.setAppearance) {
+      const state = await window.frakioDesktop.setAppearance(next.appearance || 'system');
+      setDesktopAppearanceDark(Boolean(state?.dark));
+    }
     await fetch('/api/state/ui', {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -2136,9 +2535,23 @@ function App() {
   }
 
   function toggleDesktopSidebar() {
+    if (macSidebarUsesOverlay) {
+      if (macSidebarOverlayOpen) closeMacSidebarOverlay();
+      else openMacSidebarOverlay();
+      return;
+    }
     const nextCollapsed = !effectiveSidebarCollapsed;
-    setSidebarManuallyExpanded(autoSidebarCollapsed && !nextCollapsed);
     void persistUi({ sidebarCollapsed: nextCollapsed });
+  }
+
+  function toggleRightRailTab(tab: 'collaboration' | 'resources') {
+    if (!rightRailKind) return;
+    if (rightRailOpen && rightRailTab === tab) {
+      void persistUi({ libraryCollapsed: true });
+      return;
+    }
+    setRightRailTab(tab);
+    if (!rightRailOpen) void persistUi({ libraryCollapsed: false });
   }
 
   function toggleWorkspaceCollapsed(workspaceId: string) {
@@ -2147,45 +2560,6 @@ function App() {
       ? currentIds.filter((id) => id !== workspaceId)
       : [...currentIds, workspaceId];
     void persistUi({ collapsedWorkspaceIds: nextIds });
-  }
-
-  async function revealThreadMessages(nextThread: Thread, previousMessageIds: Set<string>) {
-    const targets = nextThread.messages.filter((message) => (
-      message.agentId !== 'user'
-      && !previousMessageIds.has(message.id)
-      && isVisibleChatMessage(message)
-      && message.content.trim()
-    ));
-    const targetIds = targets.map((message) => message.id);
-    if (uiSettings.streamingResponses === false || targets.length === 0) {
-      setActiveThread(nextThread);
-      return targetIds;
-    }
-    setAnimatedMessageContent((current) => ({
-      ...current,
-      ...Object.fromEntries(targetIds.map((messageId) => [messageId, ''])),
-    }));
-    setStreamingMessageIds((current) => ({
-      ...current,
-      ...Object.fromEntries(targetIds.map((messageId) => [messageId, true])),
-    }));
-    setActiveThread(nextThread);
-    for (const message of targets) {
-      const content = message.content;
-      const chunkSize = content.length > 1200 ? 12 : content.length > 520 ? 7 : 4;
-      for (let index = 0; index < content.length; index += chunkSize) {
-        await new Promise((resolve) => window.setTimeout(resolve, 18));
-        const nextContent = content.slice(0, Math.min(content.length, index + chunkSize));
-        setAnimatedMessageContent((current) => ({ ...current, [message.id]: nextContent }));
-      }
-      setStreamingMessageIds((current) => {
-        const next = { ...current };
-        delete next[message.id];
-        return next;
-      });
-      setAnimatedMessageContent((current) => ({ ...current, [message.id]: content }));
-    }
-    return targetIds;
   }
 
   function closeProfileInspector(force = false) {
@@ -2201,7 +2575,6 @@ function App() {
     profileInspectorRequestRef.current = requestId;
     setProfileInspector({ target, draft: '', original: '', loading: true, saving: false, error: '', errorStage: '', saved: false });
     const query = new URLSearchParams({ kind: target.kind });
-    if (target.moduleName) query.set('name', target.moduleName);
     try {
       const res = await fetch(`/api/hermes-profiles/${encodeURIComponent(target.profileName)}/file?${query.toString()}`);
       const payload = await res.json();
@@ -2222,7 +2595,7 @@ function App() {
       const res = await fetch(`/api/hermes-profiles/${encodeURIComponent(target.profileName)}/file`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ kind: target.kind, name: target.moduleName, content: profileInspector.draft }),
+        body: JSON.stringify({ kind: target.kind, content: profileInspector.draft }),
       });
       const payload = await res.json().catch(() => ({}));
       if (!res.ok) throw new Error(payload.error || '保存失败。');
@@ -2269,11 +2642,37 @@ function App() {
 
   async function selectProjectFolder() {
     const picker = window.frakioDesktop?.selectFolder;
-    if (!picker) return null;
-    const result = await picker();
-    const selectedPath = String(result?.path || result?.filePaths?.[0] || '').trim();
-    if (result?.canceled || !selectedPath) return null;
-    return selectedPath;
+    if (picker) {
+      const result = await picker();
+      const selectedPath = String(result?.path || result?.filePaths?.[0] || '').trim();
+      if (result?.canceled || !selectedPath) return null;
+      return selectedPath;
+    }
+    return new Promise<string | null>((resolve) => {
+      directoryPickerResolveRef.current = resolve;
+      setDirectoryPicker({ open: true, current: '', parent: '', entries: [], loading: true, error: '' });
+      void loadServerDirectory('');
+    });
+  }
+
+  async function loadServerDirectory(targetPath: string) {
+    setDirectoryPicker((current) => ({ ...current, open: true, loading: true, error: '' }));
+    try {
+      const query = targetPath ? `?path=${encodeURIComponent(targetPath)}` : '';
+      const response = await fetch(`/api/filesystem/directories${query}`);
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || '无法读取文件夹。');
+      setDirectoryPicker({ open: true, current: payload.current, parent: payload.parent || '', entries: payload.entries || [], loading: false, error: '' });
+    } catch (error) {
+      setDirectoryPicker((current) => ({ ...current, loading: false, error: error instanceof Error ? error.message : '无法读取文件夹。' }));
+    }
+  }
+
+  function closeServerDirectoryPicker(selectedPath: string | null = null) {
+    const resolve = directoryPickerResolveRef.current;
+    directoryPickerResolveRef.current = null;
+    setDirectoryPicker((current) => ({ ...current, open: false }));
+    resolve?.(selectedPath);
   }
 
   function projectNameFromPath(targetPath: string) {
@@ -2456,9 +2855,103 @@ function App() {
     setRenameDialogTarget(null);
   }
 
+  async function generateThreadTitle(threadId: string, apply: boolean) {
+    const res = await fetch(`/api/threads/${threadId}/title-generation`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apply }),
+    });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok || !data.title) throw new Error(data.error || '自动生成标题失败。');
+    if (apply) {
+      await refreshLeftRail();
+      if (activeThread?.id === threadId && data.thread) setActiveThread(data.thread);
+    }
+    return String(data.title);
+  }
+
   async function copyText(value: string) {
     if (!value) return;
     await navigator.clipboard?.writeText(value);
+  }
+
+  async function copyAgentMessage(message: ChatEvent) {
+    try {
+      await copyText(message.content);
+      setMessageActionError(null);
+      setCopiedMessageId(message.id);
+      if (copiedMessageTimerRef.current !== null) window.clearTimeout(copiedMessageTimerRef.current);
+      copiedMessageTimerRef.current = window.setTimeout(() => {
+        setCopiedMessageId((current) => current === message.id ? '' : current);
+        copiedMessageTimerRef.current = null;
+      }, 1400);
+    } catch {
+      setMessageActionError({ messageId: message.id, message: '复制失败，请重试。' });
+    }
+  }
+
+  async function updateMessageFeedback(message: ChatEvent, value: 'up' | 'down') {
+    if (!activeThread || feedbackMessageId) return;
+    const threadId = activeThread.id;
+    const previousValue = message.feedback ?? null;
+    const nextValue = previousValue === value ? null : value;
+    setFeedbackMessageId(message.id);
+    setMessageActionError(null);
+    setActiveThread((current) => current?.id === threadId ? {
+      ...current,
+      messages: current.messages.map((item) => item.id === message.id ? { ...item, feedback: nextValue } : item),
+    } : current);
+    try {
+      const response = await fetch(`/api/threads/${encodeURIComponent(threadId)}/messages/${encodeURIComponent(message.id)}/feedback`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ value: nextValue }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.thread) throw new Error(data.error || '反馈保存失败。');
+      setActiveThread((current) => current?.id === threadId ? data.thread : current);
+    } catch (error) {
+      setActiveThread((current) => current?.id === threadId ? {
+        ...current,
+        messages: current.messages.map((item) => item.id === message.id ? { ...item, feedback: previousValue } : item),
+      } : current);
+      setMessageActionError({ messageId: message.id, message: error instanceof Error ? error.message : '反馈保存失败。' });
+    } finally {
+      setFeedbackMessageId('');
+    }
+  }
+
+  async function branchFromMessage(message: ChatEvent) {
+    if (!activeThread || branchingMessageId) return;
+    const sourceThreadId = activeThread.id;
+    setBranchingMessageId(message.id);
+    setMessageActionError(null);
+    try {
+      const response = await fetch(`/api/threads/${encodeURIComponent(sourceThreadId)}/branches`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messageId: message.id }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || !data.thread) throw new Error(data.error || '创建分支失败。');
+      if (data.snapshot) window.dispatchEvent(new CustomEvent('frakio:collaboration-snapshot', { detail: data.snapshot }));
+      await refreshLeftRail();
+      setInput('');
+      setThreadFollowState(true);
+      setActiveSpaceId(data.thread.spaceId || activeSpaceId);
+      setActiveThread(data.thread);
+      setActiveView('thread');
+      requestAnimationFrame(() => {
+        scrollThreadToLatest('auto');
+        requestAnimationFrame(() => {
+          document.querySelector<HTMLTextAreaElement>('.composer-shell .mention-textarea-wrap textarea')?.focus();
+        });
+      });
+    } catch (error) {
+      setMessageActionError({ messageId: message.id, message: error instanceof Error ? error.message : '创建分支失败。' });
+    } finally {
+      setBranchingMessageId('');
+    }
   }
 
   async function showInFinder(targetPath: string) {
@@ -2479,6 +2972,7 @@ function App() {
       height: rect.height,
     });
     const anchor = event.currentTarget instanceof HTMLElement ? event.currentTarget : null;
+    railActionFocusRef.current = anchor?.matches('button') ? anchor : anchor?.querySelector('button') || null;
     const sidebar = anchor?.closest('.sidebar') as HTMLElement | null;
     setRailContextMenu({
       ...target,
@@ -2489,15 +2983,14 @@ function App() {
     } as RailContextMenuTarget);
   }
 
-  function openRailDeleteConfirmFromMenu(target: Omit<Exclude<RailConfirm, null>, 'action' | 'x' | 'y'>) {
-    const anchorRect = railContextMenu?.anchorRect;
+  function openRailDeleteConfirmFromMenu(target: Exclude<RailConfirm, null>) {
     setRailContextMenu(null);
-    setRailConfirm({
-      ...target,
-      action: 'delete',
-      x: (anchorRect?.right ?? railContextMenu?.x ?? 8) + 8,
-      y: (anchorRect?.top ?? railContextMenu?.y ?? 8) - 8,
-    });
+    setRailConfirm(target);
+  }
+
+  function cancelRailConfirm() {
+    setRailConfirm(null);
+    window.requestAnimationFrame(() => railActionFocusRef.current?.focus());
   }
 
   async function archiveWorkspace(workspaceId: string) {
@@ -2534,8 +3027,7 @@ function App() {
     }
   }
 
-  function confirmRailAction(target: RailConfirm) {
-    if (!target) return;
+  function confirmRailAction(target: Exclude<RailConfirm, null>) {
     if (target.kind === 'thread') void deleteThread(target.id);
     else void deleteWorkspace(target.id);
   }
@@ -2581,10 +3073,20 @@ function App() {
     await submitConvertToProject(payload);
   }
 
-  async function runHermesAgentThread(threadId: string, text: string, selectedAgentsForRun: string[], startedAt: number, target: ChatRunTarget | null, runAttachments: Attachment[] = [], onAccepted?: () => void, relay?: { sourceAgentId: string; sourceAgentName: string; mentionDepth: number; parentMessageId: string; turnId: string }): Promise<Thread | null> {
-    resetRunUi(threadId, { isRunning: true, startedAt, target, completedSummary: null });
+  async function runHermesAgentThread(
+    threadId: string,
+    text: string,
+    selectedAgentsForRun: string[],
+    startedAt: number,
+    target: ChatRunTarget | null,
+    runAttachments: Attachment[] = [],
+    onAccepted?: () => void,
+    options: { suppressUserMessage?: boolean; planExecutionId?: string } = {},
+  ): Promise<Thread | null> {
+    resetRunUi(threadId, { isRunning: true, startedAt, target });
     const userDraftMessage: ChatEvent = { id: `local-user-${startedAt}`, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments };
     let completedThread: Thread | null = null;
+    let planDraftRun = false;
     const appendMissingRunMessages = (thread: Thread, runId: string, assistantDraft = '') => {
       let nextMessages = [...thread.messages];
       const attachmentIds = runAttachments.map((attachment) => attachment.id).sort().join(',');
@@ -2593,7 +3095,7 @@ function App() {
         && message.content.trim() === text.trim()
         && (message.attachments || []).map((attachment) => attachment.id).sort().join(',') === attachmentIds
       ));
-      if (!relay && !hasUserMessage) nextMessages = [...nextMessages, userDraftMessage];
+      if (!options.suppressUserMessage && !hasUserMessage) nextMessages = [...nextMessages, userDraftMessage];
       const finalDraft = assistantDraft.trim();
       const hasAssistantResult = nextMessages.some((message) => (
         message.agentId !== 'user'
@@ -2601,7 +3103,7 @@ function App() {
         && (message.externalRunId === runId || (finalDraft && message.content.trim() === finalDraft))
         && message.content.trim()
       ));
-      if (!hasAssistantResult && finalDraft) {
+      if (!hasAssistantResult && finalDraft && !planDraftRun) {
         const fallbackAgent = target?.agent || agents.find((agent) => selectedAgentsForRun.includes(agent.id)) || agents.find((agent) => agent.id === thread.defaultAgentId) || agents[0];
         nextMessages = [
           ...nextMessages,
@@ -2620,12 +3122,21 @@ function App() {
     const createRes = await fetch(`/api/threads/${threadId}/runs`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, attachmentIds: runAttachments.map((attachment) => attachment.id), selectedAgents: selectedAgentsForRun, targetAgentId: target?.kind === 'agent' ? target.agent.id : '', turnId: relay?.turnId || `turn-${startedAt}`, ...(relay ? { ...relay } : {}) }),
+      body: JSON.stringify({
+        message: text,
+        attachmentIds: runAttachments.map((attachment) => attachment.id),
+        selectedAgents: selectedAgentsForRun,
+        targetAgentId: target?.kind === 'agent' ? target.agent.id : '',
+        turnId: `turn-${startedAt}`,
+        ...(options.suppressUserMessage ? { suppressUserMessage: true } : {}),
+        ...(options.planExecutionId ? { planExecutionId: options.planExecutionId } : {}),
+      }),
     });
     const created = await createRes.json().catch(() => ({}));
     if (!createRes.ok) {
       throw new Error(formatHermesRuntimeError(created.error || 'Hermes Bridge run 创建失败。', target?.agent ? resolveHermesProfileNameForAgent(target.agent, localProfilesForComposer) : activeComposerProfileName, created.details));
     }
+    planDraftRun = created.kind === 'plan-drafting';
     onAccepted?.();
     if (created.kind === 'steer') {
       completedThread = created.thread as Thread;
@@ -2636,13 +3147,23 @@ function App() {
     const run = { runId: created.runId, sessionId: created.sessionId, threadId };
     updateRunUi(threadId, { activeRun: run });
     await new Promise<void>((resolve, reject) => {
-      const params = new URLSearchParams({ sessionId: run.sessionId });
-      const events = new EventSource(`/api/threads/${threadId}/runs/${run.runId}/events?${params.toString()}`);
+      const events = new EventSource(`/api/threads/${threadId}/turns/${created.turnId || `turn-${startedAt}`}/events`);
       let settled = false;
+      let terminalReceived = false;
+      let finalizationTimer: number | null = null;
+      let handoffTimer: number | null = null;
       let streamedDraft = '';
+      let activeStreamRunId = run.runId;
+      let pendingHandoff: Thread | null = null;
+      const bufferedTurnEvents: any[] = [];
+      let drainingBufferedTurnEvents = false;
       const finish = (error?: Error) => {
         if (settled) return;
         settled = true;
+        if (finalizationTimer !== null) window.clearTimeout(finalizationTimer);
+        if (handoffTimer !== null) window.clearTimeout(handoffTimer);
+        finalizationTimer = null;
+        handoffTimer = null;
         events.close();
         updateRunUi(threadId, {
           approval: null,
@@ -2656,32 +3177,97 @@ function App() {
         if (error) reject(error);
         else resolve();
       };
-      events.onerror = () => {
-        const error = new Error('Hermes Agent 事件流中断，run 可能仍在后台继续。');
-        finish(error);
+      const finishAfterReveal = (commit: () => void, error?: Error) => {
+        terminalReceived = true;
+        events.close();
+        const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        const delay = uiSettings.streamingResponses !== false && !reducedMotion && streamedDraft.trim()
+          ? STREAM_REVEAL_MAX_LAG_MS
+          : 0;
+        if (delay === 0) {
+          commit();
+          finish(error);
+          return;
+        }
+        finalizationTimer = window.setTimeout(() => {
+          commit();
+          finish(error);
+        }, delay);
       };
-      events.onmessage = (event) => {
-        const data = JSON.parse(event.data || '{}');
+      events.onerror = () => {
+        if (terminalReceived) return;
+        // EventSource reconnects with Last-Event-ID. The API owns the run, so a
+        // temporary browser or network disconnect must not cancel the Turn.
+      };
+      const processTurnEvent = (data: any) => {
+        if (terminalReceived) return;
+        if (data.event === 'run.started') {
+          activeStreamRunId = String(data.runId || activeStreamRunId);
+          streamedDraft = '';
+          const routedAgent = agents.find((agent) => agent.id === data.agentId);
+          updateRunUi(threadId, {
+            activeRun: {
+              runId: activeStreamRunId,
+              sessionId: String(data.sessionId || ''),
+              threadId,
+            },
+            target: routedAgent ? { kind: 'agent', agent: routedAgent } : null,
+            draft: '',
+            activityGroups: [],
+            hideStatus: false,
+            presentationPhase: 'thinking',
+          });
+          return;
+        }
         if (data.event === 'message.delta') {
           const delta = String(data.delta || '');
+          if (data.runId && data.runId !== activeStreamRunId) {
+            activeStreamRunId = String(data.runId);
+            streamedDraft = '';
+            updateRunUi(threadId, { draft: '', activityGroups: [], hideStatus: false });
+          }
           streamedDraft += delta;
-          updateRunUi(threadId, (current) => ({ ...current, draft: current.draft + delta }));
+          updateRunUi(threadId, (current) => ({
+            ...current,
+            draft: current.draft + delta,
+            presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event, { delta }),
+          }));
           return;
         }
         if (data.event === 'tool.running') {
-          updateRunUi(threadId, (current) => ({ ...current, activityGroups: mergeRunActivityEvent(current.activityGroups, data) }));
+          updateRunUi(threadId, (current) => ({
+            ...current,
+            activityGroups: mergeRunActivityEvent(current.activityGroups, data),
+            presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event),
+          }));
           return;
         }
         if (data.event === 'tool.completed') {
-          updateRunUi(threadId, (current) => ({ ...current, activityGroups: mergeRunActivityEvent(current.activityGroups, data) }));
+          updateRunUi(threadId, (current) => ({
+            ...current,
+            activityGroups: mergeRunActivityEvent(current.activityGroups, data),
+            presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event),
+          }));
           return;
         }
         if (data.event === 'approval.request') {
           updateRunUi(threadId, {
+            presentationPhase: 'waiting-input',
             clarification: null,
             clarificationError: '',
             clarificationSubmitting: false,
-            approval: { id: data.approvalId || data.approval_id || '', title: data.title || '需要确认', command: data.command || '', cwd: data.cwd || '', tool: data.tool || '' },
+            approval: {
+              id: data.approvalId || data.approval_id || '',
+              title: data.title || '需要确认',
+              command: data.command || '',
+              cwd: data.cwd || '',
+              tool: data.tool || '',
+              choices: Array.isArray(data.choices)
+                ? data.choices.filter((choice: unknown): choice is HermesApprovalChoice => ['once', 'session', 'always', 'deny'].includes(String(choice)))
+                : undefined,
+              allowPermanent: typeof data.allowPermanent === 'boolean' ? data.allowPermanent : undefined,
+              smartDenied: Boolean(data.smartDenied),
+            },
             approvalError: '',
             approvalSubmitting: false,
           });
@@ -2689,6 +3275,7 @@ function App() {
         }
         if (data.event === 'clarify.request') {
           updateRunUi(threadId, {
+            presentationPhase: 'waiting-input',
             approval: null,
             approvalError: '',
             approvalSubmitting: false,
@@ -2704,11 +3291,23 @@ function App() {
           return;
         }
         if (data.event === 'clarify.responded') {
-          updateRunUi(threadId, { clarification: null, clarificationError: '', clarificationSubmitting: false });
+          updateRunUi(threadId, (current) => ({
+            ...current,
+            presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event, { hasActivity: current.activityGroups.length > 0 }),
+            clarification: null,
+            clarificationError: '',
+            clarificationSubmitting: false,
+          }));
           return;
         }
         if (data.event === 'approval.responded') {
-          updateRunUi(threadId, { approval: null, approvalError: '', approvalSubmitting: false });
+          updateRunUi(threadId, (current) => ({
+            ...current,
+            presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event, { hasActivity: current.activityGroups.length > 0 }),
+            approval: null,
+            approvalError: '',
+            approvalSubmitting: false,
+          }));
           return;
         }
         if (data.event === 'run.completed') {
@@ -2716,29 +3315,36 @@ function App() {
             ...group,
             status: group.status === 'running' ? 'completed' : group.status,
             items: group.items.map((item) => item.status === 'running' ? { ...item, status: 'completed' } : item),
-          })) }));
+          })), presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event) }));
           if (data.thread) {
             const threadFromServer = data.thread as Thread;
+            const completedRunId = String(data.runId || activeStreamRunId);
             const hasAssistantResult = threadFromServer.messages.some((message) => (
               message.agentId !== 'user'
               && message.agentId !== 'system'
-              && (message.externalRunId === run.runId || message.content.trim() === String(data.output || '').trim())
+              && (message.externalRunId === completedRunId || message.content.trim() === String(data.output || '').trim())
               && message.content.trim()
             ));
-            const nextThread = appendMissingRunMessages(threadFromServer, run.runId, hasAssistantResult ? '' : streamedDraft);
+            const nextThread = appendMissingRunMessages(threadFromServer, completedRunId, hasAssistantResult ? '' : streamedDraft);
             completedThread = nextThread;
-            setActiveThread((current) => current?.id === nextThread.id ? nextThread : current);
-            const lastMessage = nextThread.messages.filter(isVisibleChatMessage).at(-1);
-            updateRunUi(threadId, {
-              completedSummary: {
-              threadId: nextThread.id,
-              beforeMessageId: lastMessage?.agentId === 'user' ? null : lastMessage?.id || null,
-              elapsedSeconds: Math.max(1, Math.round((Date.now() - startedAt) / 1000)),
-              },
-              ...(hasAssistantResult || streamedDraft.trim() ? { draft: '' } : {}),
-            });
+            scheduleHandoff(nextThread);
           }
-          finish();
+          return;
+        }
+        if (data.event === 'turn.completed') {
+          const finalThread = (data.thread as Thread | undefined) || completedThread;
+          if (finalThread) completedThread = finalThread;
+          finishAfterReveal(() => {
+            if (finalThread) setActiveThread((current) => current?.id === finalThread.id ? finalThread : current);
+            updateRunUi(threadId, {
+              draft: '',
+              isRunning: false,
+              startedAt: null,
+              target: null,
+              stopping: false,
+              activeRun: null,
+            });
+          });
           return;
         }
         if (data.event === 'run.failed' || data.event === 'run.cancelled') {
@@ -2747,14 +3353,69 @@ function App() {
             ...group,
             status: group.status === 'running' ? (data.event === 'run.failed' ? 'failed' : 'cancelled') : group.status,
             items: group.items.map((item) => item.status === 'running' ? { ...item, status: data.event === 'run.failed' ? 'failed' : 'cancelled' } : item),
-          })), error: data.event === 'run.failed' ? formatted : '' }));
+          })), presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event), error: data.event === 'run.failed' ? formatted : '' }));
           if (data.thread) {
-            const nextThread = appendMissingRunMessages(data.thread as Thread, run.runId, streamedDraft);
-            setActiveThread((current) => current?.id === nextThread.id ? nextThread : current);
-            if (streamedDraft.trim()) updateRunUi(threadId, { draft: '' });
+            const nextThread = appendMissingRunMessages(data.thread as Thread, String(data.runId || activeStreamRunId), streamedDraft);
+            completedThread = nextThread;
+            scheduleHandoff(nextThread);
           }
-          finish(data.event === 'run.failed' ? new Error(formatted || 'Hermes Agent run failed') : undefined);
+          return;
         }
+        if (data.event === 'mention.failed') {
+          if (data.thread) {
+            const nextThread = data.thread as Thread;
+            completedThread = nextThread;
+            setActiveThread((current) => current?.id === nextThread.id ? nextThread : current);
+          }
+          return;
+        }
+      };
+      const handoffDelay = () => {
+        const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
+        return uiSettings.streamingResponses !== false && !reducedMotion && streamedDraft.trim()
+          ? STREAM_REVEAL_MAX_LAG_MS
+          : 0;
+      };
+      const flushBufferedTurnEvents = () => {
+        if (pendingHandoff || drainingBufferedTurnEvents) return;
+        drainingBufferedTurnEvents = true;
+        while (bufferedTurnEvents.length && !pendingHandoff && !terminalReceived) {
+          processTurnEvent(bufferedTurnEvents.shift());
+        }
+        drainingBufferedTurnEvents = false;
+      };
+      const publishHandoff = () => {
+        const nextThread = pendingHandoff;
+        pendingHandoff = null;
+        handoffTimer = null;
+        if (!nextThread) return;
+        setActiveThread((current) => current?.id === nextThread.id ? nextThread : current);
+        updateRunUi(threadId, {
+          draft: '',
+          hideStatus: true,
+          isRunning: true,
+        });
+        streamedDraft = '';
+        flushBufferedTurnEvents();
+      };
+      const scheduleHandoff = (nextThread: Thread) => {
+        pendingHandoff = nextThread;
+        if (handoffTimer !== null) window.clearTimeout(handoffTimer);
+        const delay = handoffDelay();
+        if (delay === 0) {
+          publishHandoff();
+          return;
+        }
+        handoffTimer = window.setTimeout(publishHandoff, delay);
+      };
+      events.onmessage = (event) => {
+        if (terminalReceived) return;
+        const data = JSON.parse(event.data || '{}');
+        if (pendingHandoff) {
+          bufferedTurnEvents.push(data);
+          return;
+        }
+        processTurnEvent(data);
       };
     });
     return completedThread;
@@ -2859,12 +3520,12 @@ function App() {
         ? await fetch(`/api/workspaces/${selectedNewChatWorkspaceId}/threads`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: titleSeed.slice(0, 40), agentModelOverrides: draftModelOverrides, agentRunOverrides: draftRunOverrides, executionMode: newChatExecutionMode, coordinatorAgentId: newChatAgent.id, requestId }),
+          body: JSON.stringify({ title: titleSeed.slice(0, 40), agentModelOverrides: draftModelOverrides, agentRunOverrides: draftRunOverrides, executionMode: newChatExecutionMode, collaborationMode: newChatPlanEnabled ? 'plan' : 'default', coordinatorAgentId: newChatAgent.id, requestId }),
         })
         : await fetch('/api/conversations', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ primaryAgentId: newChatAgent.id, title: titleSeed.slice(0, 40), agentModelOverrides: draftModelOverrides, agentRunOverrides: draftRunOverrides, spaceId: activeSpaceId, executionMode: newChatExecutionMode, coordinatorAgentId: newChatAgent.id, requestId }),
+          body: JSON.stringify({ primaryAgentId: newChatAgent.id, title: titleSeed.slice(0, 40), agentModelOverrides: draftModelOverrides, agentRunOverrides: draftRunOverrides, spaceId: activeSpaceId, executionMode: newChatExecutionMode, collaborationMode: newChatPlanEnabled ? 'plan' : 'default', coordinatorAgentId: newChatAgent.id, requestId }),
         });
       const created = await createResponse.json().catch(() => ({}));
       if (!createResponse.ok) {
@@ -2885,9 +3546,10 @@ function App() {
       setNewChatInput('');
       setNewChatModelOverride('');
       setNewChatRunOverride({});
+      setNewChatPlanEnabled(false);
       setActiveView('thread');
       setActiveThread(optimisticThread);
-      resetRunUi(thread.id, { isRunning: true, startedAt, target, completedSummary: null });
+      resetRunUi(thread.id, { isRunning: true, startedAt, target });
       movedToThread = true;
       setNewChatStarting(false);
       const runAgents = thread.selectedAgents?.length ? thread.selectedAgents : [newChatAgent.id];
@@ -2939,6 +3601,7 @@ function App() {
     setProjectPickerOpen(false);
     setNewChatPermissionMode(uiSettings.defaultPermissionMode || 'manual');
     setNewChatExecutionMode('chat');
+    setNewChatPlanEnabled(false);
     setCollaborationModeError(null);
     void discardAttachmentDrafts();
   }
@@ -2949,7 +3612,7 @@ function App() {
     setActiveNav(sectionId);
   }
 
-  function openSettingsSection(section: SettingsSection = 'hermes') {
+  function openSettingsSection(section: SettingsSection = 'workbench') {
     if (!closeProfileInspector()) return;
     setUserMenuOpen(false);
     setSettingsSection(section);
@@ -2972,14 +3635,12 @@ function App() {
     if (!closeProfileInspector()) return;
     if (workspace.spaceId && workspace.spaceId !== activeSpaceId) await switchSpace(workspace.spaceId);
     setActiveNav('council');
-    setActiveView('thread');
     await loadThreads(workspace.id, workspace.activeThreadId);
   }
 
   async function openConversation(threadId: string) {
     if (!closeProfileInspector()) return;
     setActiveNav('council');
-    setActiveView('thread');
     await openThread(threadId);
   }
 
@@ -3039,6 +3700,176 @@ function App() {
       setCollaborationModeError({ message: failure?.message || '协作运行时未准备好。', code: failure?.code, details: failure?.details });
     } finally {
       setModeSwitching(false);
+    }
+  }
+
+  async function setThreadPlanMode(enabled: boolean) {
+    if (!activeThread || planAction) return;
+    setPlanAction(enabled ? 'enable' : 'cancel');
+    setPlanActionError('');
+    try {
+      const endpoint = !enabled && activeThread.activePlanId
+        ? `/api/threads/${activeThread.id}/plans/${activeThread.activePlanId}/cancel`
+        : `/api/threads/${activeThread.id}/collaboration-mode`;
+      const res = await fetch(endpoint, {
+        method: enabled ? 'PATCH' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(enabled ? { mode: 'plan', authorAgentId: activeComposerAgent?.id || '' } : { source: 'mode_indicator' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '计划模式切换失败。');
+      if (data.thread) setActiveThread(data.thread as Thread);
+      setPlanFeedbackOpen(false);
+      setPlanFeedbackDraft('');
+      await refreshLeftRail();
+    } catch (error) {
+      setPlanActionError(error instanceof Error ? error.message : '计划模式切换失败。');
+    } finally {
+      setPlanAction('');
+    }
+  }
+
+  async function answerPlanQuestion(batch: PlanQuestionBatch, answers: Record<string, { selectedLabel?: string; note?: string }>) {
+    if (!activeThread || !activePlan || planAction) return;
+    setPlanAction('answer');
+    setPlanActionError('');
+    try {
+      const res = await fetch(`/api/threads/${activeThread.id}/plans/${activePlan.id}/questions/${batch.id}/answer`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ answers }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '回答提交失败。');
+      setActiveThread((current) => current ? {
+        ...current,
+        planSessions: [...(current.planSessions || []).filter((plan) => plan.id !== data.plan.id), data.plan],
+      } : current);
+    } catch (error) {
+      setPlanActionError(error instanceof Error ? error.message : '回答提交失败。');
+    } finally {
+      setPlanAction('');
+    }
+  }
+
+  async function cancelPlanQuestion(batch: PlanQuestionBatch) {
+    if (!activeThread || !activePlan || planAction) return;
+    setPlanAction('cancel-question');
+    setPlanActionError('');
+    try {
+      const res = await fetch(`/api/threads/${activeThread.id}/plans/${activePlan.id}/questions/${batch.id}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'question_tray' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '问题取消失败。');
+      setActiveThread((current) => current ? {
+        ...current,
+        planSessions: [...(current.planSessions || []).filter((plan) => plan.id !== data.plan.id), data.plan],
+      } : current);
+    } catch (error) {
+      setPlanActionError(error instanceof Error ? error.message : '问题取消失败。');
+    } finally {
+      setPlanAction('');
+    }
+  }
+
+  async function submitPlanFeedback() {
+    if (!activeThread || !activePlan || !planFeedbackDraft.trim() || planAction) return;
+    const feedback = planFeedbackDraft.trim();
+    setPlanAction('feedback');
+    setPlanActionError('');
+    try {
+      const res = await fetch(`/api/threads/${activeThread.id}/plans/${activePlan.id}/feedback`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ feedback }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '计划反馈提交失败。');
+      const nextThread = data.thread as Thread;
+      setActiveThread(nextThread);
+      setPlanFeedbackDraft('');
+      setPlanFeedbackOpen(false);
+      const author = agents.find((agent) => agent.id === activePlan.authorAgentId) || activeComposerAgent;
+      const startedAt = Date.now();
+      await runHermesAgentThread(
+        activeThread.id,
+        feedback,
+        nextThread.selectedAgents || selectedAgentIds,
+        startedAt,
+        author ? { kind: 'agent', agent: author } : null,
+        [],
+        undefined,
+        { suppressUserMessage: true },
+      );
+    } catch (error) {
+      setPlanActionError(error instanceof Error ? error.message : '计划反馈提交失败。');
+    } finally {
+      setPlanAction('');
+    }
+  }
+
+  async function executePlan(planId: string) {
+    if (!activeThread || planAction) return;
+    setPlanAction('execute');
+    setPlanActionError('');
+    try {
+      const res = await fetch(`/api/threads/${activeThread.id}/plans/${planId}/execute`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({}),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '计划执行启动失败。');
+      setActiveThread(data.thread as Thread);
+      if (data.kind === 'chat-run') {
+        const author = agents.find((agent) => agent.id === data.targetAgentId) || activeComposerAgent;
+        const startedAt = Date.now();
+        await runHermesAgentThread(
+          activeThread.id,
+          '',
+          activeThread.selectedAgents || selectedAgentIds,
+          startedAt,
+          author ? { kind: 'agent', agent: author } : null,
+          [],
+          undefined,
+          { suppressUserMessage: true, planExecutionId: planId },
+        );
+      } else if (data.snapshot) {
+        window.dispatchEvent(new CustomEvent('frakio:collaboration-snapshot', { detail: data.snapshot }));
+      }
+      await refreshLeftRail();
+    } catch (error) {
+      setPlanActionError(error instanceof Error ? error.message : '计划执行启动失败。');
+      const latest = await fetch(`/api/threads/${activeThread.id}`).then((response) => response.ok ? response.json() : null).catch(() => null);
+      if (latest?.thread) setActiveThread(latest.thread as Thread);
+    } finally {
+      setPlanAction('');
+    }
+  }
+
+  async function cancelPlan(planId: string) {
+    if (!activeThread || planAction) return;
+    setPlanAction('cancel');
+    setPlanActionError('');
+    try {
+      const res = await fetch(`/api/threads/${activeThread.id}/plans/${planId}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ source: 'plan_card' }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '计划取消失败。');
+      setActiveThread(data.thread as Thread);
+      setPlanFeedbackOpen(false);
+      setPlanFeedbackDraft('');
+      await refreshLeftRail();
+    } catch (error) {
+      setPlanActionError(error instanceof Error ? error.message : '计划取消失败。');
+    } finally {
+      setPlanAction('');
     }
   }
 
@@ -3212,8 +4043,7 @@ function App() {
     setInput('');
     setThreadFollowState(true);
     const target = resolveRunTarget(text, agents, activeComposerAgent);
-    resetRunUi(threadId, { isRunning: true, startedAt, target, completedSummary: null });
-    const turnMentionMaxDepth = uiSettings.agentMentionMaxDepth === 'unlimited' ? 'unlimited' : Math.max(0, Math.floor(Number(uiSettings.agentMentionMaxDepth ?? 2)));
+    resetRunUi(threadId, { isRunning: true, startedAt, target });
     const optimisticThread = {
       ...activeThread,
       messages: [...activeThread.messages, { id: `local-user-${startedAt}`, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments }],
@@ -3222,66 +4052,11 @@ function App() {
     let runAccepted = false;
     try {
       try {
-        const turnId = `turn-${startedAt}`;
-        let routedAgentIds = [...selectedAgentIds];
-        let routedThread = await runHermesAgentThread(threadId, text, routedAgentIds, startedAt, target, runAttachments, () => {
+        const routedThread = await runHermesAgentThread(threadId, text, [...selectedAgentIds], startedAt, target, runAttachments, () => {
           runAccepted = true;
           clearAttachmentDrafts();
         });
-        if ((activeThread.executionMode || 'chat') === 'work') {
-          if (routedThread) setActiveThread(routedThread);
-        } else {
-        const initialMentionedAgents = resolveMentionedRunAgents(text, agents, routedAgentIds);
-        let currentWave = routedThread ? [routedThread.messages.filter((message) => message.agentId !== 'user' && message.agentId !== 'system').at(-1)].filter(Boolean) as ChatEvent[] : [];
-        let totalRoutedRuns = currentWave.length;
-        const rootAgentId = currentWave[0]?.agentId || (target?.kind === 'agent' ? target.agent.id : '');
-
-        for (const mentionedAgent of initialMentionedAgents) {
-          if (mentionedAgent.id === rootAgentId || totalRoutedRuns >= 64) continue;
-          routedAgentIds = Array.from(new Set([...routedAgentIds, mentionedAgent.id]));
-          updateRunUi(threadId, { target: { kind: 'agent', agent: mentionedAgent } });
-          const nextThread = await runHermesAgentThread(threadId, text, routedAgentIds, startedAt, { kind: 'agent', agent: mentionedAgent }, [], undefined, {
-            sourceAgentId: 'user', sourceAgentName: '你', mentionDepth: 0, parentMessageId: optimisticThread.messages.at(-1)?.id || '', turnId,
-          });
-          const reply = nextThread?.messages.filter((message) => message.agentId === mentionedAgent.id).at(-1);
-          if (nextThread) routedThread = nextThread;
-          if (reply) currentWave.push(reply);
-          totalRoutedRuns += 1;
-        }
-
-        const routedEdges = new Set<string>();
-        let mentionDepth = 1;
-        while (routedThread && currentWave.length && totalRoutedRuns < 64 && (turnMentionMaxDepth === 'unlimited' || mentionDepth <= turnMentionMaxDepth)) {
-          const nextTargets = new Map<string, { agent: Agent; source: ChatEvent }>();
-          for (const source of currentWave) {
-            const targets = resolveMentionedRunAgents(source.content, agents, routedAgentIds, source.agentId);
-            for (const mentionedAgent of targets) {
-              const edge = `${source.agentId}->${mentionedAgent.id}`;
-              if (routedEdges.has(edge)) continue;
-              routedEdges.add(edge);
-              nextTargets.set(mentionedAgent.id, { agent: mentionedAgent, source });
-            }
-          }
-          if (!nextTargets.size) break;
-          const nextWave: ChatEvent[] = [];
-          for (const { agent: mentionedAgent, source } of nextTargets.values()) {
-            if (totalRoutedRuns >= 64) break;
-            routedAgentIds = Array.from(new Set([...routedAgentIds, mentionedAgent.id]));
-            updateRunUi(threadId, { target: { kind: 'agent', agent: mentionedAgent } });
-            const routedText = stripAgentMentionTokens(source.content, mentionedAgent) || source.content;
-            const relayText = `群聊系统：${source.agentName} 在对话中提及了你（${mentionedAgent.name}），请基于当前上下文直接回复。\n\n原始消息：${routedText}`;
-            const nextThread = await runHermesAgentThread(threadId, relayText, routedAgentIds, startedAt, { kind: 'agent', agent: mentionedAgent }, [], undefined, {
-              sourceAgentId: source.agentId, sourceAgentName: source.agentName, mentionDepth, parentMessageId: source.id, turnId,
-            });
-            const reply = nextThread?.messages.filter((message) => message.agentId === mentionedAgent.id).at(-1);
-            if (nextThread) routedThread = nextThread;
-            if (reply) nextWave.push(reply);
-            totalRoutedRuns += 1;
-          }
-          currentWave = nextWave;
-          mentionDepth += 1;
-        }
-        }
+        if (routedThread) setActiveThread(routedThread);
       } catch (error) {
         if (!runAccepted) setInput((current) => current || text);
         updateRunUi(threadId, { error: error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。' });
@@ -3537,28 +4312,100 @@ function App() {
     void window.frakioDesktop?.windowControl?.(action);
   }
 
-  const cleanShell = launchPhase !== 'done' || showFirstUseGuide;
+  async function startDesktopUpdateDownload() {
+    setDesktopUpdatePopoverOpen(false);
+    const next = await window.frakioDesktop?.downloadUpdate?.();
+    if (next) setDesktopUpdateState(next);
+  }
+
+  async function cancelDesktopUpdateDownload() {
+    const next = await window.frakioDesktop?.cancelUpdateDownload?.();
+    if (next) setDesktopUpdateState(next);
+    setDesktopUpdatePopoverOpen(false);
+  }
+
+  async function openDownloadedDesktopUpdate() {
+    const next = await window.frakioDesktop?.openDownloadedUpdate?.();
+    if (next) setDesktopUpdateState(next);
+  }
+
+  function changeDesktopUpdatePopover(nextOpen: boolean) {
+    if (nextOpen && (desktopUpdateState?.phase === 'available' || desktopUpdateState?.phase === 'error')) {
+      void startDesktopUpdateDownload();
+      return;
+    }
+    setDesktopUpdatePopoverOpen(nextOpen);
+  }
+
+  const cleanShell = launchPhase !== 'done';
+  const desktopLeftActions = (
+    <div className="desktop-window-controls">
+      <button
+        type="button"
+        className="desktop-window-control"
+        onClick={toggleDesktopSidebar}
+        aria-label={sidebarVisuallyOpen ? '收起侧边栏' : '展开侧边栏'}
+        title={sidebarVisuallyOpen ? '收起侧边栏' : '展开侧边栏'}
+      >
+        {sidebarVisuallyOpen ? <PanelLeftClose size={14} /> : <PanelLeftOpen size={14} />}
+      </button>
+      <button type="button" className="desktop-window-control" onClick={openNewChatLauncher} aria-label="新对话" title="新对话">
+        <Pencil size={14} />
+      </button>
+    </div>
+  );
 
   return (
     <>
+    <div
+      className="workspace-material-backdrop"
+      data-appearance={workspaceMaterialDark ? 'dark' : 'light'}
+      data-platform={isMacDesktop ? 'darwin' : isWindowsDesktop ? 'win32' : 'web'}
+      data-space-color-mode={workspaceMaterialTheme.colorMode === 'native' ? 'native' : 'custom'}
+      style={workspaceMaterialStyle}
+      aria-hidden="true"
+    />
+    {isMacDesktop && (
+      <header
+        className={`mac-window-toolbar mac-global-window-toolbar ${isSettingsNav ? 'is-settings' : ''} ${cleanShell ? 'is-launching' : ''}`}
+        data-appearance={effectiveAppDark ? 'dark' : 'light'}
+      >
+        <div className="mac-window-drag-region" aria-hidden="true" />
+        {!cleanShell && !isSettingsNav && (
+          <>
+            {desktopLeftActions}
+            {rightRailKind && (
+              <div className="mac-window-rail-actions">
+                <IconTooltipButton
+                  active={rightRailOpen && rightRailTab === 'collaboration'}
+                  ariaLabel="协作"
+                  className="desktop-window-control mac-window-rail-button"
+                  onClick={() => toggleRightRailTab('collaboration')}
+                  tooltip="协作"
+                >
+                  <Network size={15} />
+                </IconTooltipButton>
+                <IconTooltipButton
+                  active={rightRailOpen && rightRailTab === 'resources'}
+                  ariaLabel="资源"
+                  className="desktop-window-control mac-window-rail-button"
+                  onClick={() => toggleRightRailTab('resources')}
+                  tooltip="资源"
+                >
+                  <FolderOpen size={15} />
+                </IconTooltipButton>
+              </div>
+            )}
+          </>
+        )}
+      </header>
+    )}
     {!cleanShell && (
-    <div className={`app ${isDesktopShell ? 'desktop-shell' : ''} ${isWindowsDesktop ? 'windows-shell' : ''} ${['org', 'settings', 'models', 'channels', 'plugins', 'kanban', 'jobs', 'monitoring'].includes(activeNav) || activeView === 'new-chat' || spaceCreateOpen ? 'management-mode' : ''} ${isSettingsNav ? 'settings-mode' : ''} ${spaceCreateOpen ? 'workspace-create-mode' : ''} ${rightRailKind ? 'has-right-rail' : ''} ${rightRailOpen ? 'right-rail-open' : ''} ${activeView === 'new-chat' && !spaceCreateOpen ? 'new-chat-mode' : ''} ${libraryCollapsed ? 'library-collapsed' : ''} ${autoSidebarCollapsed && !spaceCreateOpen ? 'sidebar-auto-collapsed' : ''} ${(isDesktopShell || isSettingsNav) && effectiveSidebarCollapsed && !spaceCreateOpen ? 'sidebar-collapsed' : ''} ${uiSettings.density === 'compact' ? 'compact-density' : ''}`} style={appStyle}>
+    <div data-appearance={effectiveAppDark ? 'dark' : 'light'} data-space-color-mode={activeSpaceTheme.colorMode || 'custom'} className={`app ${isWorkbenchShell ? 'workbench-shell desktop-shell mac-desktop-shell' : ''} ${isDesktopShell ? 'native-desktop-shell' : 'managed-web-shell'} ${isWindowsDesktop ? 'windows-shell' : ''} ${isMacConversationShell ? 'workbench-conversation-shell mac-conversation-shell' : ''} ${['org', 'settings', 'models', 'channels', 'plugins', 'kanban', 'jobs', 'monitoring'].includes(activeNav) || activeView === 'new-chat' || spaceEditorReplacesPage ? 'management-mode' : ''} ${isSettingsNav ? 'settings-mode' : ''} ${spaceEditorReplacesPage ? 'workspace-create-mode' : ''} ${macSpaceEditorOpen ? 'mac-space-editor-open' : ''} ${rightRailKind ? 'has-right-rail' : ''} ${rightRailOpen ? 'right-rail-open' : ''} ${activeView === 'new-chat' && !spaceEditorReplacesPage ? 'new-chat-mode' : ''} ${libraryCollapsed ? 'library-collapsed' : ''} ${autoSidebarCollapsed && !spaceEditorReplacesPage ? 'sidebar-auto-collapsed' : ''} {(isWorkbenchShell || isSettingsNav) && effectiveSidebarCollapsed && !spaceEditorReplacesPage ? 'sidebar-collapsed' : ''} ${macSidebarOverlayVisible ? 'mac-sidebar-overlay-visible' : ''} ${macSidebarOverlayOpen ? 'mac-sidebar-overlay-open' : ''} ${macSidebarOverlayClosing ? 'mac-sidebar-overlay-closing' : ''} ${uiSettings.density === 'compact' ? 'compact-density' : ''}`} style={workspaceMaterialStyle}>
       {isDesktopShell && !isSettingsNav && (
         <>
-          <div className="desktop-window-controls">
-            <button
-              className="desktop-window-control"
-              onClick={toggleDesktopSidebar}
-              aria-label={effectiveSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-              title={effectiveSidebarCollapsed ? '展开侧边栏' : '收起侧边栏'}
-            >
-              {effectiveSidebarCollapsed ? <PanelLeftOpen size={14} /> : <PanelLeftClose size={14} />}
-            </button>
-            <button className="desktop-window-control" onClick={openNewChatLauncher} aria-label="新对话" title="新对话">
-              <Pencil size={14} />
-            </button>
-          </div>
-          {rightRailKind && (
+          {!isMacConversationShell && desktopLeftActions}
+          {rightRailKind && !isMacConversationShell && (
             <IconTooltipButton
               className={rightRailOpen ? 'desktop-window-control desktop-right-rail-toggle active' : 'desktop-window-control desktop-right-rail-toggle'}
               onClick={() => void persistUi({ libraryCollapsed: rightRailOpen })}
@@ -3590,10 +4437,11 @@ function App() {
           onReturnToConversation={returnFromSettings}
         />
       ) : (
+        <>
         <aside
-          className={spaceCreateOpen ? 'sidebar workspace-create-rail' : 'sidebar'}
-          data-rail-tone={spaceCreateOpen && hexLuminance(spaceDraft.theme.sidebarBg) > 0.72 ? 'light' : 'dark'}
-          style={spaceCreateOpen ? {
+          className={spaceEditorReplacesPage ? 'sidebar workspace-create-rail' : 'sidebar'}
+          data-rail-tone={spaceEditorReplacesPage && hexLuminance(spaceDraft.theme.sidebarBg) > 0.72 ? 'light' : 'dark'}
+          style={spaceEditorReplacesPage ? {
             '--draft-accent': spaceDraft.theme.accentColor,
             '--draft-sidebar-bg': spaceDraft.theme.sidebarBg,
             '--draft-secondary-a': normalizeGradientColors(spaceDraft.theme)[1]?.color || spaceDraft.theme.sidebarBg,
@@ -3607,7 +4455,7 @@ function App() {
             ...textureSurfaceVars(spaceDraft.theme, 'rail'),
           } as React.CSSProperties : undefined}
         >
-          {spaceCreateOpen ? (
+          {spaceEditorReplacesPage ? (
             <>
               <div className="workspace-create-rail-head">
                 <div className="workspace-create-window-dots" aria-hidden="true"><i /><i /><i /></div>
@@ -3705,35 +4553,42 @@ function App() {
                   const workspaceThreads = workspace.threads || [];
                   const hasThreads = workspaceThreads.length > 0;
                   const collapsed = (uiSettings.collapsedWorkspaceIds || []).includes(workspace.id);
+                  const active = activeView !== 'new-chat' && workspace.id === activeThread?.workspaceId && activeThread?.mode === 'workspace';
                   return (
-                    <div className={activeView !== 'new-chat' && workspace.id === activeThread?.workspaceId && activeThread?.mode === 'workspace' ? 'rail-item project active' : 'rail-item project'} key={workspace.id} onContextMenu={(event) => openRailContextMenu(event, { kind: 'workspace', workspace })}>
-                      {hasThreads && (
-                        <button
-                          className="project-collapse-toggle"
-                          onClick={(event) => { event.stopPropagation(); toggleWorkspaceCollapsed(workspace.id); }}
-                          aria-label={collapsed ? `展开项目 ${workspace.name}` : `收起项目 ${workspace.name}`}
-                          aria-expanded={!collapsed}
-                          title={collapsed ? '展开项目' : '收起项目'}
-                        >
-                          {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
-                        </button>
-                      )}
-                      {!hasThreads && <Folder className="project-folder-icon" size={14} aria-hidden="true" />}
-                      <button className="rail-main project-main" onClick={() => void openWorkspace(workspace)} aria-label={`项目 ${workspace.name}`}>
-                        <strong>{workspace.name}</strong>
-                      </button>
-                      <button
-                        className="rail-more-button"
-                        onClick={(event) => openRailContextMenu(event, { kind: 'workspace', workspace })}
-                        aria-label={`更多项目操作：${workspace.name}`}
-                        title="更多"
+                    <div className="rail-item project" key={workspace.id}>
+                      <div
+                        className={active ? 'rail-project-row active' : 'rail-project-row'}
+                        data-rail-hover-row
+                        onContextMenu={(event) => openRailContextMenu(event, { kind: 'workspace', workspace })}
                       >
-                        <MoreHorizontal size={15} />
-                      </button>
+                        {hasThreads && (
+                          <button
+                            className="project-collapse-toggle"
+                            onClick={(event) => { event.stopPropagation(); toggleWorkspaceCollapsed(workspace.id); }}
+                            aria-label={collapsed ? `展开项目 ${workspace.name}` : `收起项目 ${workspace.name}`}
+                            aria-expanded={!collapsed}
+                            title={collapsed ? '展开项目' : '收起项目'}
+                          >
+                            {collapsed ? <ChevronRight size={14} /> : <ChevronDown size={14} />}
+                          </button>
+                        )}
+                        {!hasThreads && <Folder className="project-folder-icon" size={14} aria-hidden="true" />}
+                        <button className="rail-main project-main" onClick={() => void openWorkspace(workspace)} aria-label={`项目 ${workspace.name}`}>
+                          <RailScrollingTitle title={workspace.name} className="rail-project-title" />
+                        </button>
+                        <button
+                          className="rail-more-button"
+                          onClick={(event) => openRailContextMenu(event, { kind: 'workspace', workspace })}
+                          aria-label={`更多项目操作：${workspace.name}`}
+                          title="更多"
+                        >
+                          <MoreHorizontal size={15} />
+                        </button>
+                      </div>
                       {hasThreads && !collapsed && (
                         <div className="project-thread-list">
                           {workspaceThreads.map((thread) => (
-                            <div className={activeView !== 'new-chat' && thread.id === activeThread?.id ? 'rail-subitem active' : 'rail-subitem'} key={thread.id} onContextMenu={(event) => openRailContextMenu(event, { kind: 'thread', thread })}>
+                            <div className={activeView !== 'new-chat' && thread.id === activeThread?.id ? 'rail-subitem active' : 'rail-subitem'} data-rail-hover-row key={thread.id} onContextMenu={(event) => openRailContextMenu(event, { kind: 'thread', thread })}>
                               <ThreadRailContent thread={thread} agents={agents} onOpen={() => void openConversation(thread.id)} onMore={(event) => openRailContextMenu(event, { kind: 'thread', thread })} />
                             </div>
                           ))}
@@ -3749,7 +4604,7 @@ function App() {
               <div className="rail-section-head"><span>对话</span><button className="mini-add" onClick={openNewChatLauncher} aria-label="新建单聊"><Plus size={14} /></button></div>
               <div className="rail-list">
                 {visibleConversations.length ? visibleConversations.map((thread) => (
-                  <div className={activeView !== 'new-chat' && thread.id === activeThread?.id ? 'rail-item active' : 'rail-item'} key={thread.id} onContextMenu={(event) => openRailContextMenu(event, { kind: 'thread', thread })}>
+                  <div className={activeView !== 'new-chat' && thread.id === activeThread?.id ? 'rail-item active' : 'rail-item'} data-rail-hover-row key={thread.id} onContextMenu={(event) => openRailContextMenu(event, { kind: 'thread', thread })}>
                     <ThreadRailContent thread={thread} agents={agents} onOpen={() => void openConversation(thread.id)} onMore={(event) => openRailContextMenu(event, { kind: 'thread', thread })} />
                   </div>
                 )) : <div className="empty-rail">这个工作区还没有单 Agent 对话。</div>}
@@ -3772,33 +4627,185 @@ function App() {
                 </button>
               ))}
               <div className="space-add-wrap">
-                <button className="space-pill add" onClick={() => setSpaceMenuOpen((open) => !open)} aria-label="新建工作区" title="新建工作区"><Plus size={15} /></button>
-                {spaceMenuOpen && (
-                  <div className="space-add-menu">
-                    <button onClick={openSpaceCreate}>New Workspace</button>
-                  </div>
-                )}
+                <AppMenu open={spaceMenuOpen} onOpenChange={setSpaceMenuOpen}>
+                  <AppMenuTrigger asChild>
+                    <button className="space-pill add" aria-label="新建工作区" title="新建工作区"><Plus size={15} /></button>
+                  </AppMenuTrigger>
+                  <AppMenuContent side="top" align="center" className="space-add-menu-v2">
+                    <AppMenuItem onSelect={openSpaceCreate}><Plus /><span>新建工作区</span></AppMenuItem>
+                  </AppMenuContent>
+                </AppMenu>
               </div>
             </div>
           </div>
           <div className="sidebar-footer">
-            <div className="user-menu-anchor" ref={userMenuRef}>
-              <button className={userMenuOpen ? 'user-card active' : 'user-card'} onClick={() => setUserMenuOpen((open) => !open)} aria-expanded={userMenuOpen} aria-label="打开用户菜单">
-                <span className="user-avatar">{userProfile.avatarUrl ? <img src={userProfile.avatarUrl} alt="" /> : (userProfile.nickname || 'MG').slice(0, 2).toUpperCase()}</span>
-                <span><strong>{userProfile.nickname || 'Frakio User'}</strong><em>Local Web UI</em></span>
-              </button>
-              {userMenuOpen && (
-                <div className="user-menu-popover">
-                  <button onClick={() => openSettingsSection('profile')}><UserCircle size={16} /><span>个人资料</span></button>
-                  <button onClick={() => openSettingsSection('hermes')}><Settings size={16} /><span>设置</span></button>
-                </div>
+            <div className="user-menu-anchor">
+              <AppMenu open={userMenuOpen} onOpenChange={setUserMenuOpen}>
+                <AppMenuTrigger asChild>
+                  <button className={userMenuOpen ? 'user-card active' : 'user-card'} aria-expanded={userMenuOpen} aria-label="打开用户菜单">
+                    <span className="user-avatar">{userProfile.avatarUrl ? <img src={userProfile.avatarUrl} alt="" /> : (userProfile.nickname || 'MG').slice(0, 2).toUpperCase()}</span>
+                    <span><strong>{userProfile.nickname || 'Frakio User'}</strong><em>Local Web UI</em></span>
+                  </button>
+                </AppMenuTrigger>
+                <AppMenuContent side="top" align="start" className="user-menu-popover-v2">
+                  <AppMenuItem onSelect={() => openSettingsSection('profile')}><UserCircle /><span>个人资料</span></AppMenuItem>
+                  <AppMenuItem onSelect={() => openSettingsSection('workbench')}><Settings /><span>设置</span></AppMenuItem>
+                </AppMenuContent>
+              </AppMenu>
+              {desktopUpdateBadgeVisible && desktopUpdateState && (
+                <DesktopUpdateBadge
+                  state={desktopUpdateState}
+                  open={desktopUpdatePopoverOpen}
+                  onOpenChange={changeDesktopUpdatePopover}
+                  onCancel={() => void cancelDesktopUpdateDownload()}
+                  onInstall={() => void openDownloadedDesktopUpdate()}
+                />
               )}
             </div>
           </div>
           </>
           )}
         </aside>
+        </>
       )}
+      {macSpaceEditorOpen && (
+        <section
+          className="mac-space-editor-popover"
+          ref={macSpaceEditorRef}
+          aria-label={spaceEditTargetId ? '编辑工作区' : '新建工作区'}
+          style={{
+            '--draft-accent': spaceDraft.theme.accentColor,
+            '--draft-sidebar-bg': spaceDraft.theme.sidebarBg,
+            '--draft-theme-bg': themeGradientBackground(spaceDraft.theme),
+            '--draft-opacity': String(spaceDraft.theme.opacity),
+          } as React.CSSProperties}
+        >
+          <header className="mac-space-editor-head">
+            <div>
+              <strong>{spaceEditTargetId ? '编辑工作区' : '新建工作区'}</strong>
+              <small>名称、图标与窗口背景</small>
+            </div>
+            <button type="button" onClick={closeSpaceEditor} aria-label="关闭工作区编辑器" title="关闭"><X size={15} /></button>
+          </header>
+
+          <div className="mac-space-editor-scroll">
+            <section className="mac-space-editor-section">
+              <span className="mac-space-editor-label">应用外观</span>
+              <div className="appearance-segmented mac-space-appearance" role="group" aria-label="应用外观">
+                {(['system', 'light', 'dark'] as const).map((appearance) => (
+                  <button type="button" className={(uiSettings.appearance || 'system') === appearance ? 'selected' : ''} key={appearance} onClick={() => void persistUi({ appearance })}>
+                    {appearance === 'system' ? <><Monitor size={14} />系统</> : appearance === 'light' ? <><Sun size={14} />浅色</> : <><Moon size={14} />深色</>}
+                  </button>
+                ))}
+              </div>
+            </section>
+
+            <section className="mac-space-editor-section mac-space-identity">
+              <span className="mac-space-editor-label">工作区</span>
+              <label className="workspace-name-field">
+                <button type="button" onClick={() => setSpaceDraft((current) => ({ ...current, iconKind: current.iconKind === 'dot' ? 'emoji' : current.iconKind === 'emoji' ? 'icon' : 'dot', iconValue: current.iconKind === 'dot' ? '✨' : current.iconKind === 'emoji' ? 'folder' : '' }))} aria-label="切换工作区图标">{renderDraftIcon(14)}</button>
+                <input autoFocus value={spaceDraft.name} onChange={(event) => setSpaceDraft((current) => ({ ...current, name: event.target.value }))} placeholder="工作区名称" />
+              </label>
+              <div className="workspace-icon-picker">
+                <div className="workspace-picker-tabs">
+                  <button className={spaceDraft.iconKind === 'dot' ? 'selected' : ''} onClick={() => setSpaceDraft((current) => ({ ...current, iconKind: 'dot', iconValue: '' }))}>圆点</button>
+                  <button className={spaceDraft.iconKind === 'emoji' ? 'selected' : ''} onClick={() => setSpaceDraft((current) => ({ ...current, iconKind: 'emoji', iconValue: current.iconValue || '✨' }))}>Emoji</button>
+                  <button className={spaceDraft.iconKind === 'icon' ? 'selected' : ''} onClick={() => setSpaceDraft((current) => ({ ...current, iconKind: 'icon', iconValue: 'folder' }))}>图标</button>
+                </div>
+                <div className={spaceDraft.iconKind === 'dot' ? 'dot-choice-grid' : spaceDraft.iconKind === 'emoji' ? 'emoji-grid' : 'emoji-grid icon-grid'}>
+                  {spaceDraft.iconKind === 'dot' ? (
+                    <button className="selected" onClick={() => setSpaceDraft((current) => ({ ...current, iconKind: 'dot', iconValue: '' }))}><span className="field-dot" /></button>
+                  ) : (spaceDraft.iconKind === 'emoji' ? spaceEmojiOptions : spaceIconOptions).map((item) => (
+                    <button className={spaceDraft.iconValue === item ? 'selected' : ''} key={item} onClick={() => setSpaceDraft((current) => ({ ...current, iconValue: item }))} title={spaceDraft.iconKind === 'icon' ? spaceIconLabels[item] : item}>
+                      {spaceDraft.iconKind === 'emoji' ? item : item === 'briefcase' ? <Briefcase size={17} /> : item === 'sparkles' ? <Sparkles size={17} /> : item === 'library' ? <Library size={17} /> : <Folder size={17} />}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </section>
+
+            <section className="mac-space-editor-section">
+              <span className="mac-space-editor-label">背景板</span>
+              <div className="mac-space-color-mode" role="group" aria-label="工作区背景模式">
+                <button type="button" className={(spaceDraft.theme.colorMode || 'custom') === 'native' ? 'selected' : ''} onClick={() => setSpaceDraft((current) => ({ ...current, theme: { ...current.theme, colorMode: 'native' } }))}>
+                  <Monitor size={14} /><span><strong>系统材质</strong><small>完整显示 macOS 透光</small></span>
+                </button>
+                <button type="button" className={(spaceDraft.theme.colorMode || 'custom') === 'custom' ? 'selected' : ''} onClick={() => setSpaceDraft((current) => ({ ...current, theme: { ...current.theme, colorMode: 'custom' } }))}>
+                  <Sparkles size={14} /><span><strong>自定义颜色</strong><small>为工作区增加身份色</small></span>
+                </button>
+              </div>
+            </section>
+
+            {(spaceDraft.theme.colorMode || 'custom') === 'custom' && (
+              <section className="mac-space-editor-section mac-space-theme-controls">
+                <div
+                  className="theme-dot-matrix"
+                  onPointerDown={handleThemePanelPointer}
+                  onPointerMove={(event) => { if (event.buttons === 1) handleThemePanelPointer(event); }}
+                  aria-label="选择工作区颜色"
+                  role="application"
+                >
+                  {normalizeGradientColors(spaceDraft.theme).map((color) => (
+                    <button
+                      className={color.isPrimary ? 'theme-picker-cursor primary' : 'theme-picker-cursor'}
+                      key={color.id}
+                      onPointerDown={(event) => handleThemeDotPointer(event, color.id)}
+                      onPointerMove={(event) => handleThemeDotMove(event, color.id)}
+                      onPointerUp={finishThemeDotPointer}
+                      onPointerCancel={finishThemeDotPointer}
+                      onClick={(event) => { event.stopPropagation(); promoteDraftThemeColor(color.id); }}
+                      style={{ left: `${color.x * 100}%`, top: `${color.y * 100}%`, background: color.color }}
+                      aria-label={color.isPrimary ? '主色' : '设为主色'}
+                      type="button"
+                    />
+                  ))}
+                  <span className="theme-picker-controls" onPointerDown={(event) => event.stopPropagation()}>
+                    <button type="button" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }} onClick={(event) => { event.stopPropagation(); removeDraftThemeColor(); }} disabled={normalizeGradientColors(spaceDraft.theme).length <= 1} aria-label="减少颜色"><Minus size={13} /></button>
+                    <button type="button" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }} onClick={(event) => { event.stopPropagation(); addDraftThemeColor(); }} disabled={normalizeGradientColors(spaceDraft.theme).length >= 3} aria-label="增加颜色"><Plus size={13} /></button>
+                    <button type="button" onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }} onClick={(event) => { event.stopPropagation(); randomizeDraftThemeColors(); }} aria-label="随机颜色"><Sparkles size={13} /></button>
+                  </span>
+                </div>
+                <div className="theme-color-row">
+                  <button className="theme-step-btn" onClick={() => changeThemePresetPage(-1)} aria-label="上一页颜色" disabled={themePresetPage === 0}><ChevronDown size={16} /></button>
+                  <div className="theme-color-pages">
+                    {themePresetPage === 0 && (
+                      <button className={selectedThemePresetId === 'frakio-default' ? 'selected theme-default-preset' : 'theme-default-preset'} style={{ '--preset-1': defaultProductSpaceTheme.accentColor, '--preset-2': defaultProductSpaceTheme.sidebarBg, '--preset-3': '#ffffff', background: defaultProductSpaceTheme.sidebarBg } as React.CSSProperties} onClick={applyDefaultThemePreset} aria-label="选择默认主题" />
+                    )}
+                    {themePresetPages[themePresetPage].map((preset) => (
+                      <button className={`${selectedThemePresetId === preset.id ? 'selected ' : ''}${preset.colors.length > 1 ? 'multi' : 'solid'}`} key={preset.id} style={{ '--preset-1': preset.colors[0], '--preset-2': preset.colors[1] || preset.colors[0], '--preset-3': preset.colors[2] || preset.colors[0], background: preset.colors[0] } as React.CSSProperties} onClick={() => applyThemePreset(preset)} aria-label={`选择 Zen 颜色 ${preset.id}`} />
+                    ))}
+                  </div>
+                  <button className="theme-step-btn next" onClick={() => changeThemePresetPage(1)} aria-label="下一页颜色" disabled={themePresetPage === themePresetPages.length - 1}><ChevronDown size={16} /></button>
+                </div>
+                <div className="theme-controls-row">
+                  <label className="theme-wave-slider" style={{ '--wave-progress': `${opacityProgress(spaceDraft.theme.opacity) * 100}%`, '--wave-thumb-height': `${40 + opacityProgress(spaceDraft.theme.opacity) * 15}px`, '--wave-thumb-width': `${10 + opacityProgress(spaceDraft.theme.opacity) * 15}px` } as React.CSSProperties}>
+                    <span className="theme-wave-track">
+                      <svg viewBox="0 -8 455 70" aria-hidden="true"><path d={wavePathForOpacity(spaceDraft.theme.opacity)} /></svg>
+                      <input type="range" min="0.3" max="0.9" step="0.001" value={spaceDraft.theme.opacity} onChange={(event) => setSpaceDraft((current) => ({ ...current, theme: { ...current.theme, opacity: Number(event.target.value) } }))} aria-label="颜色透明度" />
+                    </span>
+                  </label>
+                  <div className="theme-noise-dial" onPointerDown={handleTexturePointerDown} onPointerMove={handleTexturePointerMove} onPointerUp={finishTexturePointer} onPointerCancel={finishTexturePointer} style={{ '--texture': String(spaceDraft.theme.texture ?? 0) } as React.CSSProperties} role="slider" aria-label="纹理" aria-valuemin={0} aria-valuemax={16} aria-valuenow={Math.round((spaceDraft.theme.texture ?? 0) * 16)}>
+                    <div className="theme-texture-ring" aria-hidden="true">
+                      {textureStepDots(spaceDraft.theme.texture).map((dot) => <i className={dot.active ? 'active' : ''} key={dot.id} style={{ left: `${dot.left}%`, top: `${dot.top}%` }} />)}
+                      <b style={textureHandleStyle(spaceDraft.theme.texture)} />
+                    </div>
+                  </div>
+                </div>
+                <div className="theme-mode-toggle">
+                  <button className={spaceDraft.theme.mode === 'soft' ? 'selected' : ''} onClick={() => setDraftThemeMode('soft')}>柔和</button>
+                  <button className={spaceDraft.theme.mode === 'crisp' ? 'selected' : ''} onClick={() => setDraftThemeMode('crisp')}>清晰</button>
+                </div>
+              </section>
+            )}
+          </div>
+
+          <footer className="mac-space-editor-actions">
+            <button type="button" className="secondary-btn" onClick={closeSpaceEditor}>取消</button>
+            <button type="button" className="send-btn" disabled={!spaceDraft.name.trim()} onClick={() => void submitSpaceDraft()}>{spaceEditTargetId ? '保存' : '创建'}</button>
+          </footer>
+        </section>
+      )}
+      {macSidebarOverlayOpen && <button className="mac-sidebar-overlay-backdrop" type="button" aria-label="收起侧边栏" onClick={() => closeMacSidebarOverlay()} />}
       {railContextMenu && (
         <RailContextMenu
           target={railContextMenu}
@@ -3817,23 +4824,55 @@ function App() {
           onDeleteThread={(thread) => openRailDeleteConfirmFromMenu({ kind: 'thread', id: thread.id, title: thread.title })}
         />
       )}
-      {railConfirm && <RailConfirmPopover target={railConfirm} onCancel={() => setRailConfirm(null)} onConfirm={() => confirmRailAction(railConfirm)} />}
+      {railConfirm && <RailConfirmDialog target={railConfirm} onCancel={cancelRailConfirm} onConfirm={() => confirmRailAction(railConfirm)} />}
       {renameDialogTarget && (
         <RenameDialog
           target={renameDialogTarget}
           onClose={() => setRenameDialogTarget(null)}
           onSave={submitRenameDialog}
+          onGenerateTitle={renameDialogTarget.kind === 'thread'
+            ? () => generateThreadTitle(renameDialogTarget.id, false)
+            : undefined}
         />
       )}
-      <ResizeHandle
-        side="left"
-        disabled={isDesktopShell && effectiveSidebarCollapsed}
-        onResize={setSidebarWidth}
-        onCommit={(width) => void persistUi({ sidebarWidth: width })}
-      />
+      {!isMacConversationShell && (
+        <ResizeHandle
+          side="left"
+          currentWidth={sidebarWidth}
+          minWidth={activeSidebarWidthBounds.min}
+          maxWidth={activeSidebarWidthBounds.max}
+          disabled={isDesktopShell && effectiveSidebarCollapsed}
+          onResize={setSidebarWidth}
+          onCommit={(width) => void persistUi(isMacDesktop
+            ? { macSidebarWidth: width, macSidebarWidthVersion: SIDEBAR_WIDTH_VERSION }
+            : { sidebarWidth: width })}
+        />
+      )}
 
       <main className="main">
-        {activeView !== 'new-chat' && !isSettingsNav && !spaceCreateOpen && <header className="topbar">
+        {isMacConversationShell && !effectiveSidebarCollapsed && !macSidebarUsesOverlay && !macSpaceEditorOpen && (
+          <ResizeHandle
+            side="left"
+            edgeAligned
+            currentWidth={sidebarWidth}
+            minWidth={activeSidebarWidthBounds.min}
+            maxWidth={macSidebarResizeMax}
+            onResize={setSidebarWidth}
+            onCommit={(width) => void persistUi({ macSidebarWidth: width, macSidebarWidthVersion: SIDEBAR_WIDTH_VERSION })}
+          />
+        )}
+        {isMacConversationShell && rightRailOpen && !macSpaceEditorOpen && (
+          <ResizeHandle
+            side="right"
+            edgeAligned
+            currentWidth={contextWidth}
+            minWidth={contextWidthBounds.min}
+            maxWidth={macContextResizeMax}
+            onResize={setContextWidth}
+            onCommit={(width) => void persistUi({ contextWidth: width })}
+          />
+        )}
+        {activeView !== 'new-chat' && !isSettingsNav && !spaceEditorReplacesPage && !isMacConversationShell && <header className="topbar">
           <div className="topbar-title">
             <span className="topbar-title-icon"><FileText size={17} /></span>
             <h1>{isManagementSection ? activeSection?.label : activeThread?.title || activeSection?.label || '新对话'}</h1>
@@ -3851,6 +4890,8 @@ function App() {
                 onConvertToProject={() => openProjectModal('create', 'convert')}
                 onVaultChange={updateThreadVault}
                 onOpenAgents={() => setAgentPickerOpen(true)}
+                onRenameThread={() => setRenameDialogTarget({ kind: 'thread', id: activeThread.id, title: activeThread.title })}
+                onRegenerateTitle={() => generateThreadTitle(activeThread.id, true).then(() => undefined)}
               />
               {!isDesktopShell && rightRailKind && (
                 <button
@@ -3866,7 +4907,7 @@ function App() {
           )}
         </header>}
 
-        {spaceCreateOpen ? (
+        {spaceEditorReplacesPage ? (
           <section
             className="workspace-create-stage"
             style={{
@@ -3884,6 +4925,16 @@ function App() {
             } as React.CSSProperties}
           >
             <div className="workspace-theme-panel">
+              <div className="workspace-theme-simple">
+                <span style={{ background: primaryGradientColor(spaceDraft.theme).color }} />
+                <div><strong>工作区颜色</strong><small>用于区分工作区，并以半透明方式融入 macOS 背景。</small></div>
+                <button type="button" onClick={() => setSpaceThemeAdvancedOpen((open) => !open)}>{spaceThemeAdvancedOpen ? '收起高级外观' : '高级工作区外观'}</button>
+              </div>
+              {spaceThemeAdvancedOpen && <div className="workspace-theme-advanced">
+              <div className="workspace-palette-toggle" aria-label="编辑工作区明暗配色">
+                <button type="button" className={(spaceDraft.theme.appearance || 'light') === 'light' ? 'selected' : ''} onClick={() => setDraftThemeAppearance('light')}><Sun size={14} />浅色配色</button>
+                <button type="button" className={(spaceDraft.theme.appearance || 'light') === 'dark' ? 'selected' : ''} onClick={() => setDraftThemeAppearance('dark')}><Moon size={14} />深色配色</button>
+              </div>
               <div
                 className="theme-dot-matrix"
                 onPointerDown={handleThemePanelPointer}
@@ -3891,11 +4942,6 @@ function App() {
                 aria-label="选择工作区颜色"
                 role="application"
               >
-                <span className="theme-picker-toolbar" onPointerDown={(event) => event.stopPropagation()}>
-                  <button type="button" className={(spaceDraft.theme.appearance || 'light') === 'auto' ? 'selected' : ''} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }} onClick={(event) => { event.stopPropagation(); setDraftThemeAppearance('auto'); }} aria-label="自动主题"><Sparkles size={14} /></button>
-                  <button type="button" className={(spaceDraft.theme.appearance || 'light') === 'light' ? 'selected' : ''} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }} onClick={(event) => { event.stopPropagation(); setDraftThemeAppearance('light'); }} aria-label="白天主题"><Sun size={14} /></button>
-                  <button type="button" className={(spaceDraft.theme.appearance || 'light') === 'dark' ? 'selected' : ''} onPointerDown={(event) => { event.preventDefault(); event.stopPropagation(); }} onClick={(event) => { event.stopPropagation(); setDraftThemeAppearance('dark'); }} aria-label="夜晚主题"><Moon size={14} /></button>
-                </span>
                 {normalizeGradientColors(spaceDraft.theme).map((color) => (
                   <button
                     className={color.isPrimary ? 'theme-picker-cursor primary' : 'theme-picker-cursor'}
@@ -3969,6 +5015,7 @@ function App() {
                 <button className={spaceDraft.theme.mode === 'soft' ? 'selected' : ''} onClick={() => setDraftThemeMode('soft')}>柔和</button>
                 <button className={spaceDraft.theme.mode === 'crisp' ? 'selected' : ''} onClick={() => setDraftThemeMode('crisp')}>清晰</button>
               </div>
+              </div>}
             </div>
           </section>
         ) : activeView === 'new-chat' ? (
@@ -3976,25 +5023,27 @@ function App() {
             <div className="new-chat-center">
               <h1>{uiSettings.newChatPrompt || '我们接下来做点什么？'}</h1>
               {newChatAgent && (
-                <div className="new-chat-agent-wrap">
-                  <button className="new-chat-agent-chip" onClick={() => setNewChatAgentPickerOpen((open) => !open)} aria-expanded={newChatAgentPickerOpen}>
-                    <span className="agent-mention-symbol">@</span>
-                    <AgentAvatar agent={newChatAgent} size="sm" />
-                    <span><strong>{newChatAgent.name}</strong><small>{newChatAgent.role}</small></span>
-                    <ChevronDown size={14} />
-                  </button>
-                  {newChatAgentPickerOpen && (
-                    <div className="new-chat-agent-menu">
+                <AppMenu open={newChatAgentPickerOpen} onOpenChange={setNewChatAgentPickerOpen} modal={false}>
+                  <div className="new-chat-agent-wrap">
+                    <AppMenuTrigger asChild>
+                      <button className="new-chat-agent-chip">
+                        <span className="agent-mention-symbol">@</span>
+                        <AgentAvatar agent={newChatAgent} size="sm" />
+                        <span><strong>{newChatAgent.name}</strong><small>{newChatAgent.role}</small></span>
+                        <ChevronDown size={14} />
+                      </button>
+                    </AppMenuTrigger>
+                    <AppMenuContent className="new-chat-agent-menu-v2" side="bottom" align="center" aria-label="选择 Agent">
                       {agents.map((agent) => (
-                        <button className={agent.id === newChatAgent.id ? 'selected' : ''} key={agent.id} onClick={() => { setNewChatAgentId(agent.id); setNewChatModelOverride(''); setNewChatRunOverride({}); setNewChatAgentPickerOpen(false); }}>
+                        <AppMenuItem className={agent.id === newChatAgent.id ? 'selected new-chat-agent-option' : 'new-chat-agent-option'} key={agent.id} onSelect={() => { setNewChatAgentId(agent.id); setNewChatModelOverride(''); setNewChatRunOverride({}); }}>
                           <AgentAvatar agent={agent} size="sm" />
                           <span><strong>{agent.name}</strong><small>{agent.role}</small></span>
                           <em>{agentDefaultModelLabel(agent, models)}</em>
-                        </button>
+                        </AppMenuItem>
                       ))}
-                    </div>
-                  )}
-                </div>
+                    </AppMenuContent>
+                  </div>
+                </AppMenu>
               )}
               {!newChatAgent && (
                 <button className="secondary-btn new-chat-create-agent" type="button" onClick={() => setNewAgentOpen(true)}>
@@ -4021,10 +5070,16 @@ function App() {
                 />
                 <div className="composer-toolbar">
                   <div className="composer-left-tools">
-                    <button className="icon-btn composer-tool upload" onClick={() => fileInputRef.current?.click()} aria-label="上传附件" title="上传附件"><Plus size={19} /></button>
+                    <ComposerAddMenu
+                      planEnabled={newChatPlanEnabled}
+                      planBusy={newChatStarting}
+                      onAddFile={() => fileInputRef.current?.click()}
+                      onEnablePlan={() => setNewChatPlanEnabled(true)}
+                    />
                     <input ref={fileInputRef} className="file-input" type="file" multiple accept={attachmentAcceptValue} onChange={(event) => handleAttachmentChange(event.target.files)} />
                     <PermissionModeControl value={newChatPermissionMode} onChange={setNewChatPermissionMode} />
-                    <ExecutionModeControl value={newChatExecutionMode} disabled={newChatStarting} onChange={(mode) => { setNewChatExecutionMode(mode); setCollaborationModeError(null); }} />
+                    <ExecutionModeControl value={newChatExecutionMode} disabled={newChatStarting || newChatPlanEnabled} onChange={(mode) => { setNewChatExecutionMode(mode); setCollaborationModeError(null); }} />
+                    {newChatPlanEnabled && <PlanModeIndicator busy={newChatStarting} onClose={() => setNewChatPlanEnabled(false)} />}
                   </div>
                   <div className="composer-right-tools">
                     <ProviderModelPicker
@@ -4056,27 +5111,29 @@ function App() {
               {collaborationModeError && newChatExecutionMode === 'work' && (
                 <CollaborationRuntimeErrorCard error={collaborationModeError} loading={newChatStarting} onRetry={() => void startNewChat()} />
               )}
-              <div className="new-chat-project">
-                <button className="new-chat-project-row" onClick={() => setProjectPickerOpen((open) => !open)} aria-expanded={projectPickerOpen}>
-                  <FolderOpen size={16} />
-                  <span>{selectedNewChatWorkspaceId ? visibleWorkspaces.find((workspace) => workspace.id === selectedNewChatWorkspaceId)?.name || 'Choose project' : 'Choose project'}</span>
-                  <ChevronDown size={14} />
-                </button>
-                {projectPickerOpen && (
-                  <div className="project-picker-menu">
-                    <button className={!selectedNewChatWorkspaceId ? 'selected' : ''} onClick={() => { setSelectedNewChatWorkspaceId(null); setProjectPickerOpen(false); }}>
+              <AppMenu open={projectPickerOpen} onOpenChange={setProjectPickerOpen} modal={false}>
+                <div className="new-chat-project">
+                  <AppMenuTrigger asChild>
+                    <button className="new-chat-project-row">
+                      <FolderOpen size={16} />
+                      <span>{selectedNewChatWorkspaceId ? visibleWorkspaces.find((workspace) => workspace.id === selectedNewChatWorkspaceId)?.name || 'Choose project' : 'Choose project'}</span>
+                      <ChevronDown size={14} />
+                    </button>
+                  </AppMenuTrigger>
+                  <AppMenuContent className="project-picker-menu-v2" side="bottom" align="center" aria-label="选择项目">
+                    <AppMenuItem className={!selectedNewChatWorkspaceId ? 'selected project-picker-option' : 'project-picker-option'} onSelect={() => setSelectedNewChatWorkspaceId(null)}>
                       <MessageSquare size={15} />
                       <span><strong>临时对话</strong><small>不绑定项目目录</small></span>
-                    </button>
+                    </AppMenuItem>
                     {visibleWorkspaces.map((workspace) => (
-                      <button className={selectedNewChatWorkspaceId === workspace.id ? 'selected' : ''} key={workspace.id} onClick={() => { setSelectedNewChatWorkspaceId(workspace.id); setProjectPickerOpen(false); }}>
+                      <AppMenuItem className={selectedNewChatWorkspaceId === workspace.id ? 'selected project-picker-option' : 'project-picker-option'} key={workspace.id} onSelect={() => setSelectedNewChatWorkspaceId(workspace.id)}>
                         <FolderOpen size={15} />
                         <span><strong>{workspace.name}</strong><small>{workspace.id === activeWorkspace?.id ? '当前项目 · ' : ''}{workspace.rootPath}</small></span>
-                      </button>
+                      </AppMenuItem>
                     ))}
-                  </div>
-                )}
-              </div>
+                  </AppMenuContent>
+                </div>
+              </AppMenu>
             </div>
           </section>
         ) : activeNav === 'settings' ? (
@@ -4094,9 +5151,11 @@ function App() {
             updatesBusy={updatesBusy}
             updatesError={updatesError}
             updatesResult={updatesResult}
-            onCheckUpdates={() => runUpdateAction('check')}
-            onUpdateHermesAgent={() => runUpdateAction('hermes-agent')}
-            onUpdateFrakioWork={() => runUpdateAction('frakio-work')}
+            desktopUpdateState={desktopUpdateState}
+            onCheckDesktopUpdate={checkDesktopUpdate}
+            onDownloadDesktopUpdate={startDesktopUpdateDownload}
+            onCancelDesktopUpdate={cancelDesktopUpdateDownload}
+            onOpenDesktopUpdate={openDownloadedDesktopUpdate}
             onCheckHermesRuntime={checkHermesRuntimeUpdate}
             onInstallHermesRuntime={installHermesRuntime}
             onActivateHermesRuntime={activateHermesRuntime}
@@ -4119,7 +5178,7 @@ function App() {
             deleteVault={deleteVault}
             onImportHermes={importHermesProfiles}
             onRunFirstUseGuide={() => runFirstUseGuide({ manual: true })}
-            firstUseGuideRunning={firstUseGuide.status === 'running'}
+            firstUseGuideRunning={launchPhase !== 'done' && launchOriginRef.current === 'manual'}
             onStartHermesRuntime={startHermesRuntime}
             onRefreshHermesRuntime={refreshHermesRuntime}
             onStartProfileGateway={startHermesProfileGateway}
@@ -4190,17 +5249,47 @@ function App() {
         ) : (
           <>
             <section className="council">
+              {isMacConversationShell && (
+                <header className="conversation-panel-header">
+                  {activeThread?.title?.trim() && activeThread.title.trim() !== '新对话' && (
+                    <ThreadActionsMenu
+                      thread={activeThread}
+                      workspace={activeWorkspace}
+                      vaults={vaults}
+                      activeVault={activeVault}
+                      activeAgent={activeComposerAgent}
+                      triggerVariant="title"
+                      triggerTitle={activeThread.title}
+                      onFollowModeChange={updateThreadFollowMode}
+                      onCreateProjectThread={createThread}
+                      onConvertToProject={() => openProjectModal('create', 'convert')}
+                      onVaultChange={updateThreadVault}
+                      onOpenAgents={() => setAgentPickerOpen(true)}
+                      onRenameThread={() => setRenameDialogTarget({ kind: 'thread', id: activeThread.id, title: activeThread.title })}
+                      onRegenerateTitle={() => generateThreadTitle(activeThread.id, true).then(() => undefined)}
+                    />
+                  )}
+                </header>
+              )}
               <div className="thread" ref={threadScrollRef}>
                 <div className="thread-content" ref={threadContentRef}>
                 {visibleMessages.map((message) => {
                   const transcript = activeThread?.runTranscripts?.find((item) => item.messageId === message.id || (message.externalRunId && item.runId === message.externalRunId));
+                  const messagePlan = message.planId ? activeThread?.planSessions?.find((plan) => plan.id === message.planId) : null;
+                  const messagePlanDraft = messagePlan?.drafts.find((draft) => draft.revision === message.planRevision);
+                  const messageRunId = message.externalRunId || messagePlanDraft?.submittedByRunId || '';
+                  const showMessageActions = message.agentId !== 'user'
+                    && message.agentId !== 'system'
+                    && !message.id.startsWith('local-')
+                    && Boolean(message.content.trim())
+                    && transcript?.status !== 'running'
+                    && !(messageRunId && messageRunId === activeHermesRun?.runId);
                   return <div
                     className="message-anchor"
                     data-message-id={message.id}
                     key={message.id}
                     ref={(node) => { messageRefs.current[message.id] = node; }}
                   >
-                    {activeCompletedRunSummary?.beforeMessageId === message.id && <CompletedRunStatus summary={activeCompletedRunSummary} />}
                     <article className={message.agentId === 'user' ? 'message user has-user-identity' : 'message'}>
                       {message.agentId !== 'user' && <MessageAvatar message={message} agents={agents} />}
                       <div className="message-body">
@@ -4208,10 +5297,40 @@ function App() {
                         {message.attachments && message.attachments.length > 0 && <MessageAttachments attachments={message.attachments} />}
                         {message.agentId === 'user' ? (
                           message.content ? <p className="message-text">{message.content}</p> : null
+                        ) : message.contentType === 'plan' && messagePlan && messagePlanDraft ? (
+                          <PlanCard
+                            plan={messagePlan}
+                            draft={messagePlanDraft}
+                            agents={agents}
+                            latest={messagePlan.currentRevision === messagePlanDraft.revision}
+                            readOnly={Boolean(messagePlan.readOnly)}
+                            busy={Boolean(planAction)}
+                            feedbackOpen={planFeedbackOpen && messagePlan.id === activePlan?.id}
+                            feedback={planFeedbackDraft}
+                            error={planActionError}
+                            onFeedbackChange={setPlanFeedbackDraft}
+                            onOpenFeedback={() => { setPlanFeedbackOpen(true); setPlanActionError(''); }}
+                            onCloseFeedback={() => { setPlanFeedbackOpen(false); setPlanFeedbackDraft(''); }}
+                            onSubmitFeedback={() => void submitPlanFeedback()}
+                            onExecute={() => void executePlan(messagePlan.id)}
+                            onCancel={() => void cancelPlan(messagePlan.id)}
+                          />
                         ) : (
                           transcript?.groups.length
-                            ? <RunTranscriptContent content={animatedMessageContent[message.id] ?? message.content} groups={transcript.groups} streaming={Boolean(streamingMessageIds[message.id])} runFinished={transcript.status !== 'running'} />
-                            : <MarkdownMessage content={animatedMessageContent[message.id] ?? message.content} streaming={Boolean(streamingMessageIds[message.id])} />
+                            ? <RunTranscriptContent content={message.content} groups={transcript.groups} runFinished={transcript.status !== 'running'} threadId={activeThread?.id} workspaceId={activeThread?.workspaceId} />
+                            : <MarkdownMessage content={message.content} threadId={activeThread?.id} workspaceId={activeThread?.workspaceId} />
+                        )}
+                        {showMessageActions && (
+                          <MessageActions
+                            message={message}
+                            copied={copiedMessageId === message.id}
+                            feedbackBusy={feedbackMessageId === message.id}
+                            branching={branchingMessageId === message.id}
+                            error={messageActionError?.messageId === message.id ? messageActionError.message : ''}
+                            onCopy={() => void copyAgentMessage(message)}
+                            onFeedback={(value) => void updateMessageFeedback(message, value)}
+                            onBranch={() => void branchFromMessage(message)}
+                          />
                         )}
                       </div>
                       {message.agentId === 'user' && <MessageAvatar message={message} agents={agents} userProfile={userProfile} />}
@@ -4220,16 +5339,19 @@ function App() {
                 })}
                 <ChatCollaborationEvents thread={activeThread} />
                 {!isRunning && <PersistedInterruptedRuns thread={activeThread} agents={agents} />}
-                {activeCompletedRunSummary && !activeCompletedRunSummary.beforeMessageId && !isRunning && <CompletedRunStatus summary={activeCompletedRunSummary} />}
-                {isRunning && (
-                  <ChatRunStatus
+                {isRunning && !activeRunUi?.hideStatus && (
+                    <ChatRunStatus
                     target={runTarget || (activeComposerAgent ? { kind: 'agent', agent: activeComposerAgent } : null)}
                     startedAt={runStartedAt}
                     tick={runTick}
                     draft={runDraft}
                     activityGroups={runActivityGroups}
+                    presentationPhase={runPresentationPhase}
                     error={runError}
-                  />
+                    streamingResponses={uiSettings.streamingResponses !== false}
+                    threadId={activeThread?.id}
+                      workspaceId={activeThread?.workspaceId}
+                    />
                 )}
                 <div ref={threadBottomRef} />
                 </div>
@@ -4243,12 +5365,18 @@ function App() {
                     aria-label="回到最新消息"
                     onClick={() => scrollThreadToLatest('smooth')}
                   >
-                    <ArrowDownToLine size={14} aria-hidden="true" />
-                    <span>回到最新</span>
-                    {isRunning && <span className="thread-jump-latest-dot" aria-hidden="true" />}
+                    <ArrowDownToLine size={16} aria-hidden="true" />
                   </button>
                 )}
-                {runClarification || runApproval ? (
+                {pendingPlanQuestion ? (
+                  <PlanQuestionPanel
+                    batch={pendingPlanQuestion}
+                    submitting={Boolean(planAction)}
+                    error={planActionError}
+                    onSubmit={(answers) => void answerPlanQuestion(pendingPlanQuestion, answers)}
+                    onCancel={() => void cancelPlanQuestion(pendingPlanQuestion)}
+                  />
+                ) : runClarification || runApproval ? (
                   <RunDecisionPanel
                     clarification={runClarification}
                     approval={runApproval}
@@ -4256,6 +5384,7 @@ function App() {
                     error={runClarification ? clarificationError : approvalError}
                     onAnswer={(answer) => void respondToActiveClarification('answer', answer)}
                     onSkip={() => void respondToActiveClarification('skip')}
+                    onInterrupt={() => void stopActiveRun()}
                     onApprove={(choice) => void approveActiveRun(choice)}
                   />
                 ) : (
@@ -4268,7 +5397,9 @@ function App() {
                   >
                   <AttachmentTray attachments={attachments} notice={attachmentNotice} onRemove={removeAttachment} onRetry={retryAttachment} />
                   {attachmentDragActive && <div className="attachment-drop-overlay"><ArrowDownToLine size={22} /><strong>松开即可添加附件</strong></div>}
-                  {(activeThread?.executionMode || 'chat') === 'work' && <div className="work-mode-hint"><Briefcase size={14} /><span>{activeThread?.collaboration?.workflows?.some((workflow) => workflow.currentRootTaskId && workflow.status !== 'completed') ? '补充内容会交给协调 Agent 调整当前方案' : '发送任务后，协调 Agent 会拆解并发布执行方案'}</span></div>}
+                  {activePlan
+                    ? <div className="work-mode-hint plan-mode-hint"><Lightbulb size={14} /><span>先调查并整理计划，批准前不会修改项目或启动任务</span></div>
+                    : (activeThread?.executionMode || 'chat') === 'work' && <div className="work-mode-hint"><Briefcase size={14} /><span>{activeThread?.collaboration?.workflows?.some((workflow) => workflow.currentRootTaskId && workflow.status !== 'completed') ? '补充内容会交给协调 Agent 调整当前方案' : '发送任务后，协调 Agent 会拆解并发布执行方案'}</span></div>}
                   <MentionTextarea
                     value={input}
                     onChange={setInput}
@@ -4280,10 +5411,16 @@ function App() {
                   />
 	                  <div className="composer-toolbar">
 	                    <div className="composer-left-tools">
-	                      <button className="icon-btn composer-tool upload" onClick={() => fileInputRef.current?.click()} aria-label="上传附件" title="上传附件"><Plus size={19} /></button>
+	                      <ComposerAddMenu
+	                        planEnabled={Boolean(activePlan)}
+	                        planBusy={Boolean(planAction) || isRunning}
+	                        onAddFile={() => fileInputRef.current?.click()}
+	                        onEnablePlan={() => void setThreadPlanMode(true)}
+	                      />
 	                      <input ref={fileInputRef} className="file-input" type="file" multiple accept={attachmentAcceptValue} onChange={(event) => handleAttachmentChange(event.target.files)} />
 	                      <PermissionModeControl value={permissionMode} onChange={(mode) => void updateThreadPermissionMode(mode)} />
-	                      <ExecutionModeControl value={activeThread?.executionMode || 'chat'} disabled={isRunning} switching={modeSwitching} onChange={(mode) => void updateThreadExecutionMode(mode)} />
+	                      <ExecutionModeControl value={activeThread?.executionMode || 'chat'} disabled={isRunning || Boolean(activePlan)} switching={modeSwitching} onChange={(mode) => void updateThreadExecutionMode(mode)} />
+	                      {activePlan && <PlanModeIndicator busy={Boolean(planAction)} onClose={() => void setThreadPlanMode(false)} />}
 	                    </div>
 	                    <div className="composer-right-tools">
 	                      <ProviderModelPicker
@@ -4312,6 +5449,7 @@ function App() {
 	                      />
 	                    </div>
 	                  </div>
+	                  {planActionError && !pendingPlanQuestion && <div className="plan-inline-error" role="alert">{planActionError}</div>}
 	                </div>
                 )}
               </div>
@@ -4322,12 +5460,17 @@ function App() {
 
       {rightRailKind && (
         <>
-          <ResizeHandle
-            side="right"
-            disabled={!rightRailOpen}
-            onResize={setContextWidth}
-            onCommit={(width) => void persistUi({ contextWidth: width })}
-          />
+          {!isMacConversationShell && (
+            <ResizeHandle
+              side="right"
+              currentWidth={contextWidth}
+              minWidth={contextWidthBounds.min}
+              maxWidth={contextWidthBounds.max}
+              disabled={!rightRailOpen}
+              onResize={setContextWidth}
+              onCommit={(width) => void persistUi({ contextWidth: width })}
+            />
+          )}
           <aside className="context" aria-hidden={!rightRailOpen}>
             <CollaborationContextPanel
             contextPacket={activeThread?.contextPacket || null}
@@ -4345,6 +5488,8 @@ function App() {
             collaborationModeError={collaborationModeError}
             collaborationModeLoading={modeSwitching}
             onRetryCollaboration={() => void updateThreadExecutionMode('work')}
+            panelTab={rightRailTab}
+            onPanelTabChange={setRightRailTab}
             />
           </aside>
         </>
@@ -4466,6 +5611,32 @@ function App() {
           </div>
         </div>
       )}
+      {directoryPicker.open && (
+        <div className="modal-backdrop" onClick={() => closeServerDirectoryPicker(null)}>
+          <div className="modal server-directory-picker" onClick={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <div><h2>选择运行主机上的文件夹</h2><p>{directoryPicker.current || '正在读取主目录…'}</p></div>
+              <button className="icon-btn" onClick={() => closeServerDirectoryPicker(null)} aria-label="关闭"><X size={18} /></button>
+            </div>
+            <div className="server-directory-list">
+              {directoryPicker.parent ? (
+                <button onClick={() => void loadServerDirectory(directoryPicker.parent)}><FolderOpen size={16} /><span>返回上一级</span></button>
+              ) : null}
+              {directoryPicker.entries.map((entry) => (
+                <button key={entry.path} onDoubleClick={() => closeServerDirectoryPicker(entry.path)} onClick={() => void loadServerDirectory(entry.path)}>
+                  <FolderOpen size={16} /><span>{entry.name}</span>
+                </button>
+              ))}
+              {!directoryPicker.loading && !directoryPicker.entries.length ? <p>这个文件夹中没有子文件夹。</p> : null}
+              {directoryPicker.error ? <div className="form-error">{directoryPicker.error}</div> : null}
+            </div>
+            <div className="modal-actions">
+              <button className="secondary-btn" onClick={() => closeServerDirectoryPicker(null)}>取消</button>
+              <button className="send-btn" disabled={!directoryPicker.current || directoryPicker.loading} onClick={() => closeServerDirectoryPicker(directoryPicker.current)}>选择此文件夹</button>
+            </div>
+          </div>
+        </div>
+      )}
       {newAgentOpen && (
         <AgentEditorModal
           title="新建 Agent"
@@ -4509,15 +5680,7 @@ function App() {
       )}
     </div>
     )}
-    {showFirstUseGuide && (
-      <FirstUseGuideOverlay
-        guide={firstUseGuide}
-        onClose={() => setShowFirstUseGuide(false)}
-        onRetry={() => void runFirstUseGuide({ manual: true })}
-        onInstall={() => void installHermesFromGuide()}
-      />
-    )}
-    {showTelemetryNotice && !showFirstUseGuide && launchPhase === 'done' && (
+    {showTelemetryNotice && launchPhase === 'done' && (
       <TelemetryNotice
         onAllow={() => void answerTelemetryConsent(true)}
         onDecline={() => void answerTelemetryConsent(false)}
@@ -4526,9 +5689,17 @@ function App() {
     {launchPhase !== 'done' && (
       <LaunchLoadingScreen
         phase={launchPhase}
-        agentName={defaultLaunchAgent?.name || ''}
         userAvatarUrl={launchWelcomeAvatarUrl}
-        autoStart={hermesRuntime?.autoStart || null}
+        installJob={launchInstallJob}
+        issue={launchIssue}
+        appearance={workspaceMaterialDark ? 'dark' : 'light'}
+        colorMode={workspaceMaterialTheme.colorMode === 'native' ? 'native' : 'custom'}
+        style={workspaceMaterialStyle}
+        hold={Boolean(launchQaMode)}
+        onOpenSettings={(issue) => {
+          setLaunchPhase('done');
+          openSettingsSection(issue.settingsTarget);
+        }}
       />
     )}
     </>
@@ -4727,19 +5898,27 @@ function HermesProfileConfigEditor({ profileName, compact = false }: { profileNa
             <label className="settings-option-row" key={`${field.section}.${field.key}`}>
               <span><strong>{field.label}</strong><small>{field.section}.{field.key}</small></span>
               {field.type === 'toggle' ? (
-                <input type="checkbox" checked={Boolean(fieldValue(field.section, field.key))} onChange={(event) => updateField(field.section, field.key, event.target.checked)} />
-              ) : field.type === 'select' ? (
-                <select value={String(fieldValue(field.section, field.key) || field.options?.[0] || '')} onChange={(event) => updateField(field.section, field.key, event.target.value)}>
-                  {(field.options || []).map((option) => <option key={option} value={option}>{field.section === 'approvals' && field.key === 'mode' ? permissionLabel(option) : option}</option>)}
-                </select>
-              ) : (
-                <input
-                  type={field.type === 'number' ? 'number' : 'text'}
-                  step={field.key.includes('ratio') || field.key.includes('threshold') ? '0.1' : '1'}
-                  value={inputValue(fieldValue(field.section, field.key))}
-                  placeholder={field.placeholder}
-                  onChange={(event) => updateField(field.section, field.key, field.type === 'number' ? Number(event.target.value) : field.type === 'csv' ? csvValue(event.target.value) : event.target.value)}
+                <SettingsSwitch
+                  ariaLabel={field.label}
+                  checked={Boolean(fieldValue(field.section, field.key))}
+                  onChange={(checked) => updateField(field.section, field.key, checked)}
                 />
+              ) : field.type === 'select' ? (
+                <SettingsField>
+                  <select value={String(fieldValue(field.section, field.key) || field.options?.[0] || '')} onChange={(event) => updateField(field.section, field.key, event.target.value)}>
+                    {(field.options || []).map((option) => <option key={option} value={option}>{field.section === 'approvals' && field.key === 'mode' ? permissionLabel(option) : option}</option>)}
+                  </select>
+                </SettingsField>
+              ) : (
+                <SettingsField>
+                  <input
+                    type={field.type === 'number' ? 'number' : 'text'}
+                    step={field.key.includes('ratio') || field.key.includes('threshold') ? '0.1' : '1'}
+                    value={inputValue(fieldValue(field.section, field.key))}
+                    placeholder={field.placeholder}
+                    onChange={(event) => updateField(field.section, field.key, field.type === 'number' ? Number(event.target.value) : field.type === 'csv' ? csvValue(event.target.value) : event.target.value)}
+                  />
+                </SettingsField>
               )}
             </label>
           ))}
@@ -5437,7 +6616,6 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
   const [selectedTask, setSelectedTask] = useState<KanbanTask | null>(null);
   const [taskDetail, setTaskDetail] = useState<any>(null);
   const [taskComment, setTaskComment] = useState('');
-  const boardMenuRef = useRef<HTMLDivElement | null>(null);
 
   async function loadBoards() {
     try {
@@ -5486,15 +6664,6 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
       .catch((err) => setError(err.message || '任务详情读取失败'));
   }, [selectedTask?.id, board]);
 
-  useEffect(() => {
-    if (!boardMenuOpen) return undefined;
-    function handlePointerDown(event: PointerEvent) {
-      if (boardMenuRef.current && !boardMenuRef.current.contains(event.target as Node)) setBoardMenuOpen(false);
-    }
-    window.addEventListener('pointerdown', handlePointerDown);
-    return () => window.removeEventListener('pointerdown', handlePointerDown);
-  }, [boardMenuOpen]);
-
   async function createBoard() {
     if (!boardForm.slug.trim()) return;
     await requestJson('/api/hermes/kanban/boards', { method: 'POST', body: JSON.stringify(boardForm) });
@@ -5542,12 +6711,14 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
           <h2>{boardTitle}</h2>
         </div>
         <div className="kanban-top-actions">
-          <div className="board-switcher" ref={boardMenuRef}>
-            <button className="notion-btn" onClick={() => setBoardMenuOpen((open) => !open)} aria-expanded={boardMenuOpen}>
-              <Boxes size={15} /> 看板 <ChevronDown size={14} />
-            </button>
-            {boardMenuOpen && (
-              <div className="board-popover">
+          <AppPopover open={boardMenuOpen} onOpenChange={setBoardMenuOpen}>
+            <div className="board-switcher">
+              <AppPopoverTrigger asChild>
+                <button className="notion-btn">
+                  <Boxes size={15} /> 看板 <ChevronDown size={14} />
+                </button>
+              </AppPopoverTrigger>
+              <AppPopoverContent className="board-popover-v2" side="bottom" align="end" aria-label="选择看板">
                 <div className="board-popover-head">
                   <strong>所有看板</strong>
                   <span>{boards.length} 个</span>
@@ -5563,9 +6734,9 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
                     );
                   })}
                 </div>
-              </div>
-            )}
-          </div>
+              </AppPopoverContent>
+            </div>
+          </AppPopover>
           <button className="send-btn kanban-new-board" onClick={() => setBoardComposerOpen((open) => !open)} aria-label="新建看板" title="新建看板"><Plus size={15} /> 新建看板</button>
           {board !== 'default' && <button className="secondary-btn" onClick={() => void archiveCurrentBoard()}><Archive size={14} />归档看板</button>}
         </div>
@@ -5620,107 +6791,81 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
   );
 }
 
-function ThreadActionsMenu({ thread, workspace, vaults, activeVault, activeAgent, onFollowModeChange, onCreateProjectThread, onConvertToProject, onVaultChange, onOpenAgents }: {
+function ThreadActionsMenu({ thread, workspace, vaults, activeVault, activeAgent, triggerVariant = 'icon', triggerTitle = '', onFollowModeChange, onCreateProjectThread, onConvertToProject, onVaultChange, onOpenAgents, onRenameThread, onRegenerateTitle }: {
   thread: Thread;
   workspace: Workspace | null;
   vaults: Vault[];
   activeVault: Vault | null;
   activeAgent: Agent | null;
+  triggerVariant?: 'icon' | 'title';
+  triggerTitle?: string;
   onFollowModeChange: (mode: FollowMode) => Promise<void>;
   onCreateProjectThread: () => Promise<void>;
   onConvertToProject: () => void;
   onVaultChange: (vaultId: string | null) => Promise<void>;
   onOpenAgents: () => void;
+  onRenameThread: () => void;
+  onRegenerateTitle: () => Promise<void>;
 }) {
   const [open, setOpen] = useState(false);
-  const [popoverPosition, setPopoverPosition] = useState({ top: 0, right: 12, maxHeight: 320 });
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const popoverRef = useRef<HTMLDivElement | null>(null);
+  const [titleBusy, setTitleBusy] = useState(false);
+  const [titleError, setTitleError] = useState('');
   const threadIdRef = useRef(thread.id);
   const popoverId = `thread-actions-popover-${thread.id}`;
   const followLabel = thread.followMode === 'conversation' ? '对话跟随' : '默认跟随';
   const workspaceLabel = thread.mode === 'workspace' ? workspace?.name || '项目对话' : '临时对话';
   const agentLabel = activeAgent?.name || '未选择 Agent';
 
-  const updatePopoverPosition = useCallback(() => {
-    const trigger = triggerRef.current;
-    if (!trigger) return;
-    const rect = trigger.getBoundingClientRect();
-    const viewportPadding = 12;
-    const width = Math.min(286, Math.max(0, window.innerWidth - viewportPadding * 2));
-    const maximumRight = Math.max(viewportPadding, window.innerWidth - width - viewportPadding);
-    const right = Math.min(Math.max(viewportPadding, window.innerWidth - rect.right), maximumRight);
-    const top = rect.bottom + 6;
-    setPopoverPosition({
-      top,
-      right,
-      maxHeight: Math.max(120, window.innerHeight - top - viewportPadding),
-    });
-  }, []);
-
-  const closeMenu = useCallback((restoreFocus = true) => {
+  const closeMenu = useCallback((_restoreFocus = true) => {
     setOpen(false);
-    if (restoreFocus) window.requestAnimationFrame(() => triggerRef.current?.focus());
   }, []);
-
-  useLayoutEffect(() => {
-    if (!open) return undefined;
-    updatePopoverPosition();
-    const popover = popoverRef.current;
-    if (popover && typeof popover.showPopover === 'function' && !popover.matches(':popover-open')) popover.showPopover();
-    const resizeObserver = new ResizeObserver(updatePopoverPosition);
-    if (triggerRef.current) resizeObserver.observe(triggerRef.current);
-    window.addEventListener('resize', updatePopoverPosition);
-    window.visualViewport?.addEventListener('resize', updatePopoverPosition);
-    return () => {
-      resizeObserver.disconnect();
-      window.removeEventListener('resize', updatePopoverPosition);
-      window.visualViewport?.removeEventListener('resize', updatePopoverPosition);
-    };
-  }, [open, updatePopoverPosition]);
-
-  useEffect(() => {
-    if (!open) return undefined;
-    popoverRef.current?.focus();
-    const handlePointerDown = (event: PointerEvent) => {
-      const target = event.target as Node;
-      if (triggerRef.current?.contains(target) || popoverRef.current?.contains(target)) return;
-      closeMenu();
-    };
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      event.preventDefault();
-      closeMenu();
-    };
-    window.addEventListener('pointerdown', handlePointerDown);
-    window.addEventListener('keydown', handleKeyDown);
-    return () => {
-      window.removeEventListener('pointerdown', handlePointerDown);
-      window.removeEventListener('keydown', handleKeyDown);
-    };
-  }, [closeMenu, open]);
 
   useEffect(() => {
     if (threadIdRef.current === thread.id) return;
     threadIdRef.current = thread.id;
     setOpen(false);
+    setTitleBusy(false);
+    setTitleError('');
   }, [thread.id]);
 
+  async function regenerateTitle() {
+    if (titleBusy) return;
+    setTitleBusy(true);
+    setTitleError('');
+    try {
+      await onRegenerateTitle();
+      setOpen(false);
+    } catch (error) {
+      setTitleError(error instanceof Error ? error.message : '自动生成标题失败。');
+    } finally {
+      setTitleBusy(false);
+    }
+  }
+
   return (
-    <div className="thread-actions-menu">
-      <button ref={triggerRef} className="top-icon-btn thread-actions-trigger" onClick={() => setOpen((value) => !value)} aria-expanded={open} aria-controls={open ? popoverId : undefined} aria-haspopup="dialog" aria-label="对话设置" title="对话设置">
-        <MoreHorizontal size={18} />
-      </button>
-      {open && createPortal(
-        <div ref={popoverRef} id={popoverId} className="thread-actions-popover" role="dialog" aria-label="对话设置" tabIndex={-1} popover="manual" style={popoverPosition}>
+    <AppPopover open={open} onOpenChange={setOpen}>
+      <div className={triggerVariant === 'title' ? 'thread-actions-menu conversation-title-menu' : 'thread-actions-menu'}>
+        <AppPopoverTrigger asChild>
+          <button className={triggerVariant === 'title' ? 'conversation-title-trigger' : 'top-icon-btn thread-actions-trigger'} aria-expanded={open} aria-controls={open ? popoverId : undefined} aria-haspopup="dialog" aria-label={triggerVariant === 'title' ? `对话设置：${triggerTitle}` : '对话设置'} title="对话设置">
+            {triggerVariant === 'title' ? <><h1>{triggerTitle}</h1><ChevronDown size={14} aria-hidden="true" /></> : <MoreHorizontal size={18} />}
+          </button>
+        </AppPopoverTrigger>
+      </div>
+      <AppPopoverContent id={popoverId} className="thread-actions-popover-v2" role="dialog" aria-label="对话设置" side="bottom" align={triggerVariant === 'title' ? 'center' : 'end'}>
           <div className="thread-actions-summary">
             <strong>{followLabel} · {agentLabel}</strong>
             <span>{workspaceLabel}{activeVault ? ` · ${activeVault.name}` : ''}</span>
           </div>
+          <div className="thread-menu-section thread-title-actions">
+            <span>标题</span>
+            <button onClick={() => { closeMenu(false); onRenameThread(); }}><span>重命名</span></button>
+            <button disabled={titleBusy} onClick={() => void regenerateTitle()}><span>{titleBusy ? '正在生成…' : '重新生成标题'}</span></button>
+            {titleError && <small className="thread-title-error" role="alert">{titleError}</small>}
+          </div>
           <div className="thread-menu-section">
             <span>跟随</span>
-            <button className={(thread.followMode || 'default') === 'default' ? 'selected' : ''} onClick={() => { closeMenu(false); void onFollowModeChange('default'); }}>默认跟随</button>
-            <button className={thread.followMode === 'conversation' ? 'selected' : ''} onClick={() => { closeMenu(false); void onFollowModeChange('conversation'); }}>对话跟随</button>
+            <button className={(thread.followMode || 'default') === 'default' ? 'selected' : ''} onClick={() => { closeMenu(false); void onFollowModeChange('default'); }}><span>默认跟随</span>{(thread.followMode || 'default') === 'default' && <Check size={14} aria-hidden="true" />}</button>
+            <button className={thread.followMode === 'conversation' ? 'selected' : ''} onClick={() => { closeMenu(false); void onFollowModeChange('conversation'); }}><span>对话跟随</span>{thread.followMode === 'conversation' && <Check size={14} aria-hidden="true" />}</button>
           </div>
           <div className="thread-menu-section">
             <span>项目</span>
@@ -5738,10 +6883,8 @@ function ThreadActionsMenu({ thread, workspace, vaults, activeVault, activeAgent
             </select>
           </label>
           <button className="thread-menu-wide" onClick={() => { closeMenu(false); onOpenAgents(); }}><UserPlus size={15} />团队成员</button>
-        </div>,
-        document.body,
-      )}
-    </div>
+      </AppPopoverContent>
+    </AppPopover>
   );
 }
 
@@ -5827,48 +6970,99 @@ function IconTooltipButton({
   badge,
   children,
   className = '',
+  hoverDelayMs = 0,
   onClick,
+  placement = 'bottom',
   tooltip,
+  ...buttonProps
 }: {
   active?: boolean;
   ariaLabel: string;
   badge?: number;
   children: React.ReactNode;
   className?: string;
-  onClick: () => void;
+  hoverDelayMs?: number;
+  placement?: 'top' | 'bottom';
   tooltip: string;
-}) {
+} & Omit<React.ButtonHTMLAttributes<HTMLButtonElement>, 'aria-label' | 'className' | 'title'>) {
   const buttonRef = useRef<HTMLButtonElement | null>(null);
-  const [tooltipPosition, setTooltipPosition] = useState<{ left: number; top: number } | null>(null);
+  const tooltipRef = useRef<HTMLDivElement | null>(null);
+  const hoverTimerRef = useRef<number | null>(null);
+  const tooltipId = useId();
+  const [tooltipPosition, setTooltipPosition] = useState<{ left: number; top: number; placement: 'top' | 'bottom' } | null>(null);
   const shown = Boolean(tooltipPosition);
 
   const updateTooltipPosition = useCallback(() => {
     const rect = buttonRef.current?.getBoundingClientRect();
     if (!rect) return;
-    setTooltipPosition({ left: rect.left + rect.width / 2, top: rect.bottom + 8 });
+    const resolvedPlacement = placement === 'top' && rect.top < 44 ? 'bottom' : placement;
+    setTooltipPosition({
+      left: Math.min(window.innerWidth - 12, Math.max(12, rect.left + rect.width / 2)),
+      top: resolvedPlacement === 'top' ? rect.top - 8 : rect.bottom + 8,
+      placement: resolvedPlacement,
+    });
+  }, [placement]);
+
+  const clearHoverTimer = useCallback(() => {
+    if (hoverTimerRef.current === null) return;
+    window.clearTimeout(hoverTimerRef.current);
+    hoverTimerRef.current = null;
   }, []);
+
+  const hideTooltip = useCallback(() => {
+    clearHoverTimer();
+    setTooltipPosition(null);
+  }, [clearHoverTimer]);
+
+  const showTooltipAfterDelay = useCallback(() => {
+    clearHoverTimer();
+    if (hoverDelayMs <= 0) {
+      updateTooltipPosition();
+      return;
+    }
+    hoverTimerRef.current = window.setTimeout(() => {
+      hoverTimerRef.current = null;
+      updateTooltipPosition();
+    }, hoverDelayMs);
+  }, [clearHoverTimer, hoverDelayMs, updateTooltipPosition]);
 
   useEffect(() => {
     if (!shown) return undefined;
-    window.addEventListener('resize', updateTooltipPosition);
-    window.addEventListener('scroll', updateTooltipPosition, true);
+    window.addEventListener('resize', hideTooltip);
+    window.addEventListener('scroll', hideTooltip, true);
     return () => {
-      window.removeEventListener('resize', updateTooltipPosition);
-      window.removeEventListener('scroll', updateTooltipPosition, true);
+      window.removeEventListener('resize', hideTooltip);
+      window.removeEventListener('scroll', hideTooltip, true);
     };
-  }, [shown, updateTooltipPosition]);
+  }, [hideTooltip, shown]);
+
+  useEffect(() => () => clearHoverTimer(), [clearHoverTimer]);
+
+  useLayoutEffect(() => {
+    const node = tooltipRef.current;
+    if (!node || !tooltipPosition) return;
+    const halfWidth = node.offsetWidth / 2;
+    const nextLeft = Math.min(window.innerWidth - 12 - halfWidth, Math.max(12 + halfWidth, tooltipPosition.left));
+    if (Math.abs(nextLeft - tooltipPosition.left) < 0.5) return;
+    setTooltipPosition((current) => current ? { ...current, left: nextLeft } : current);
+  }, [tooltip, tooltipPosition]);
 
   return (
     <>
       <button
+        {...buttonProps}
         ref={buttonRef}
         className={`${className}${active ? ' active' : ''}`}
-        onBlur={() => setTooltipPosition(null)}
-        onClick={onClick}
+        onBlur={hideTooltip}
+        onClick={(event) => {
+          hideTooltip();
+          onClick?.(event);
+        }}
         onFocus={updateTooltipPosition}
-        onMouseEnter={updateTooltipPosition}
-        onMouseLeave={() => setTooltipPosition(null)}
+        onMouseEnter={showTooltipAfterDelay}
+        onMouseLeave={hideTooltip}
         aria-label={ariaLabel}
+        aria-describedby={tooltipPosition ? tooltipId : undefined}
         type="button"
       >
         {children}
@@ -5876,7 +7070,9 @@ function IconTooltipButton({
       </button>
       {tooltipPosition && createPortal(
         <div
-          className="icon-tooltip"
+          ref={tooltipRef}
+          id={tooltipId}
+          className={`icon-tooltip placement-${tooltipPosition.placement}`}
           role="tooltip"
           style={{ left: tooltipPosition.left, top: tooltipPosition.top }}
         >
@@ -5912,9 +7108,11 @@ function CollaborationContextPanel(props: ContextPanelProps & {
   collaborationModeError: { message: string; code?: string; details?: Record<string, any> } | null;
   collaborationModeLoading: boolean;
   onRetryCollaboration: () => void;
+  panelTab: 'collaboration' | 'resources';
+  onPanelTabChange: (tab: 'collaboration' | 'resources') => void;
 }) {
   const { thread, agents } = props;
-  const [panelTab, setPanelTab] = useState<'collaboration' | 'resources'>('collaboration');
+  const panelTab = props.panelTab;
   const [view, setView] = useState<'relations' | 'activity'>('relations');
   const [snapshot, setSnapshot] = useState<CollaborationSnapshot | null>(null);
   const [selectedTaskId, setSelectedTaskId] = useState('');
@@ -5956,13 +7154,12 @@ function CollaborationContextPanel(props: ContextPanelProps & {
     setWorkflowControlBusy('');
     setWorkflowControlError('');
     setWorkerOutputMode(thread?.workerOutputMode === 'all' ? 'all' : 'summary');
-    setPanelTab((thread?.executionMode || 'chat') === 'work' ? 'collaboration' : 'resources');
     cursorRef.current = 0;
     void loadSnapshot();
   }, [thread?.id, thread?.executionMode]);
 
   useEffect(() => {
-    if (props.collaborationModeLoading || props.collaborationModeError) setPanelTab('collaboration');
+    if (props.collaborationModeLoading || props.collaborationModeError) props.onPanelTabChange('collaboration');
   }, [props.collaborationModeLoading, props.collaborationModeError]);
 
   useEffect(() => {
@@ -6125,7 +7322,7 @@ function CollaborationContextPanel(props: ContextPanelProps & {
           ariaLabel="协作"
           badge={activeTaskCount}
           className="context-panel-tab"
-          onClick={() => setPanelTab('collaboration')}
+          onClick={() => props.onPanelTabChange('collaboration')}
           tooltip="协作"
         >
           <Network size={15} />
@@ -6134,7 +7331,7 @@ function CollaborationContextPanel(props: ContextPanelProps & {
           active={panelTab === 'resources'}
           ariaLabel="资源"
           className="context-panel-tab"
-          onClick={() => setPanelTab('resources')}
+          onClick={() => props.onPanelTabChange('resources')}
           tooltip="资源"
         >
           <FolderOpen size={15} />
@@ -6618,44 +7815,26 @@ function visibleWorkflowSteps(thread: Thread | null, live: { isRunning: boolean;
 
 function PermissionModeControl({ value, onChange }: { value: PermissionMode; onChange: (mode: PermissionMode) => void }) {
   const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
   const menuId = useId();
   const CurrentIcon = permissionIcon(value);
 
-  useEffect(() => {
-    if (!open) return;
-    const closeOnOutsideClick = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === 'Escape') setOpen(false);
-    };
-    document.addEventListener('mousedown', closeOnOutsideClick);
-    document.addEventListener('keydown', closeOnEscape);
-    return () => {
-      document.removeEventListener('mousedown', closeOnOutsideClick);
-      document.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [open]);
-
   return (
-    <div className="permission-menu-wrap" ref={rootRef}>
-      <button
-        className={`permission-select ${permissionTone(value)}`}
-        type="button"
-        title={permissionDescription(value)}
-        aria-label="操作权限"
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={open ? menuId : undefined}
-        onClick={() => setOpen((current) => !current)}
-      >
-        <CurrentIcon size={15} />
-        <span>{permissionLabel(value)}</span>
-        <ChevronDown size={13} />
-      </button>
-      {open && (
-        <div id={menuId} className="permission-menu" role="menu" aria-label="操作权限选项">
+    <AppMenu open={open} onOpenChange={setOpen} modal={false}>
+      <div className="permission-menu-wrap">
+        <AppMenuTrigger asChild>
+          <button
+            className={`permission-select ${permissionTone(value)}`}
+            type="button"
+            title={permissionDescription(value)}
+            aria-label="操作权限"
+            aria-controls={open ? menuId : undefined}
+          >
+            <CurrentIcon size={15} />
+            <span>{permissionLabel(value)}</span>
+            <ChevronDown size={13} />
+          </button>
+        </AppMenuTrigger>
+        <AppMenuContent id={menuId} className="permission-menu-v2" side="top" align="start" aria-label="操作权限选项">
           <div className="permission-menu-head">
             <strong>应如何批准 Hermes 操作？</strong>
             <a href="#settings" onClick={(event) => event.preventDefault()}>了解更多</a>
@@ -6664,36 +7843,27 @@ function PermissionModeControl({ value, onChange }: { value: PermissionMode; onC
             const Icon = permissionIcon(mode);
             const selected = mode === value;
             return (
-              <button
-                className={selected ? 'selected' : ''}
+              <AppMenuItem
+                className={`${selected ? 'selected ' : ''}permission-menu-option permission-${mode}`}
                 key={mode}
-                type="button"
                 role="menuitemradio"
                 aria-checked={selected}
-                onClick={() => {
-                  onChange(mode);
-                  setOpen(false);
-                }}
+                onSelect={() => onChange(mode)}
               >
                 <Icon size={20} />
                 <span><strong>{permissionLabel(mode)}</strong><small>{permissionDescription(mode)}</small></span>
                 {selected && <CheckCircle2 size={18} />}
-              </button>
+              </AppMenuItem>
             );
           })}
-        </div>
-      )}
-    </div>
+        </AppMenuContent>
+      </div>
+    </AppMenu>
   );
 }
 
 function ExecutionModeControl({ value, disabled, switching = false, onChange }: { value: 'chat' | 'work'; disabled?: boolean; switching?: boolean; onChange: (mode: 'chat' | 'work') => void }) {
   const [visualMode, setVisualMode] = useState<'chat' | 'work'>(value);
-  const [open, setOpen] = useState(false);
-  const rootRef = useRef<HTMLDivElement | null>(null);
-  const triggerRef = useRef<HTMLButtonElement | null>(null);
-  const optionRefs = useRef<Array<HTMLButtonElement | null>>([]);
-  const pendingFocusIndexRef = useRef<number | null>(null);
   const menuId = useId();
   const CurrentIcon = visualMode === 'work' ? Briefcase : MessageSquare;
 
@@ -6702,118 +7872,470 @@ function ExecutionModeControl({ value, disabled, switching = false, onChange }: 
     setVisualMode(value);
   }, [switching, value, visualMode]);
 
-  useEffect(() => {
-    if (switching) setOpen(false);
-  }, [switching]);
-
-  useLayoutEffect(() => {
-    if (!open || pendingFocusIndexRef.current == null) return;
-    optionRefs.current[pendingFocusIndexRef.current]?.focus();
-    pendingFocusIndexRef.current = null;
-  }, [open]);
-
-  useEffect(() => {
-    if (!open) return;
-    const closeOnOutsideClick = (event: MouseEvent) => {
-      if (!rootRef.current?.contains(event.target as Node)) setOpen(false);
-    };
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key !== 'Escape') return;
-      setOpen(false);
-      triggerRef.current?.focus();
-    };
-    document.addEventListener('mousedown', closeOnOutsideClick);
-    document.addEventListener('keydown', closeOnEscape);
-    return () => {
-      document.removeEventListener('mousedown', closeOnOutsideClick);
-      document.removeEventListener('keydown', closeOnEscape);
-    };
-  }, [open]);
-
   function selectMode(mode: 'chat' | 'work') {
     if (disabled || switching) return;
     if (visualMode !== mode) setVisualMode(mode);
     if (value !== mode) onChange(mode);
-    setOpen(false);
-    triggerRef.current?.focus();
-  }
-
-  function openMenu(focusIndex = visualMode === 'work' ? 1 : 0) {
-    if (disabled || switching) return;
-    pendingFocusIndexRef.current = focusIndex;
-    setOpen(true);
-  }
-
-  function handleTriggerKeyDown(event: React.KeyboardEvent<HTMLButtonElement>) {
-    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
-      event.preventDefault();
-      openMenu(event.key === 'ArrowDown' ? 0 : 1);
-    }
-  }
-
-  function handleOptionKeyDown(event: React.KeyboardEvent<HTMLButtonElement>, index: number) {
-    if (event.key === 'ArrowDown' || event.key === 'ArrowRight') {
-      event.preventDefault();
-      optionRefs.current[(index + 1) % 2]?.focus();
-    }
-    if (event.key === 'ArrowUp' || event.key === 'ArrowLeft') {
-      event.preventDefault();
-      optionRefs.current[(index + 1) % 2]?.focus();
-    }
-    if (event.key === 'Home') {
-      event.preventDefault();
-      optionRefs.current[0]?.focus();
-    }
-    if (event.key === 'End') {
-      event.preventDefault();
-      optionRefs.current[1]?.focus();
-    }
   }
 
   return (
-    <div className={`execution-mode-control is-${visualMode}${disabled ? ' is-disabled' : ''}`} ref={rootRef} data-mode={visualMode}>
-      <button
-        ref={triggerRef}
-        type="button"
-        className="execution-mode-trigger"
-        aria-label={`运行模式：${visualMode === 'work' ? 'Work' : 'Chat'}`}
-        aria-haspopup="menu"
-        aria-expanded={open}
-        aria-controls={open ? menuId : undefined}
-        aria-busy={switching || undefined}
-        disabled={disabled || switching}
-        onKeyDown={handleTriggerKeyDown}
-        onClick={() => setOpen((current) => !current)}
-        title={visualMode === 'work' ? 'Work：多 Agent 协作执行模式' : 'Chat：普通聊天模式'}
-      >
-        <CurrentIcon size={15} />
-        <span>{visualMode === 'work' ? 'Work' : 'Chat'}</span>
-        <ChevronDown size={13} />
-      </button>
-      {open && (
-        <div id={menuId} className="execution-mode-menu" role="menu" aria-label="选择对话运行模式">
-          {(['chat', 'work'] as const).map((mode, index) => {
+    <AppMenu modal={false}>
+      <div className={`execution-mode-control is-${visualMode}${disabled ? ' is-disabled' : ''}`} data-mode={visualMode}>
+        <AppMenuTrigger asChild>
+          <button
+            type="button"
+            className="execution-mode-trigger"
+            aria-label={`运行模式：${visualMode === 'work' ? 'Work' : 'Chat'}`}
+            aria-busy={switching || undefined}
+            disabled={disabled || switching}
+            title={visualMode === 'work' ? 'Work：多 Agent 协作执行模式' : 'Chat：普通聊天模式'}
+          >
+            <CurrentIcon size={15} />
+            <span>{visualMode === 'work' ? 'Work' : 'Chat'}</span>
+            <ChevronDown size={13} />
+          </button>
+        </AppMenuTrigger>
+        <AppMenuContent id={menuId} className="execution-mode-menu-v2" side="top" align="start" aria-label="选择对话运行模式">
+          {(['chat', 'work'] as const).map((mode) => {
             const Icon = mode === 'work' ? Briefcase : MessageSquare;
             const selected = visualMode === mode;
             return (
-              <button
-                ref={(node) => { optionRefs.current[index] = node; }}
-                type="button"
+              <AppMenuItem
+                className={selected ? 'selected execution-mode-option' : 'execution-mode-option'}
                 role="menuitemradio"
                 aria-checked={selected}
                 key={mode}
-                onKeyDown={(event) => handleOptionKeyDown(event, index)}
-                onClick={() => selectMode(mode)}
+                onSelect={() => selectMode(mode)}
               >
                 <Icon size={17} />
                 <span><strong>{mode === 'work' ? 'Work' : 'Chat'}</strong><small>{mode === 'work' ? '多 Agent 协作执行' : '普通对话'}</small></span>
                 {selected && <Check size={15} />}
-              </button>
+              </AppMenuItem>
             );
           })}
+        </AppMenuContent>
+      </div>
+    </AppMenu>
+  );
+}
+
+function ComposerAddMenu({ planEnabled, planBusy, onAddFile, onEnablePlan }: {
+  planEnabled: boolean;
+  planBusy?: boolean;
+  onAddFile: () => void;
+  onEnablePlan: () => void;
+}) {
+  return (
+    <AppMenu modal={false}>
+      <AppMenuTrigger asChild>
+        <button className="icon-btn composer-tool upload" type="button" aria-label="添加内容" title="添加内容"><Plus size={19} /></button>
+      </AppMenuTrigger>
+      <AppMenuContent className="composer-add-menu" side="top" align="start" aria-label="添加到对话">
+        <AppMenuItem className="composer-add-option" onSelect={onAddFile}>
+          <FileText size={14} />
+          <span>添加文件</span>
+        </AppMenuItem>
+        <AppMenuItem className={planEnabled ? 'composer-add-option selected' : 'composer-add-option'} disabled={planEnabled || planBusy} onSelect={onEnablePlan}>
+          <Lightbulb size={14} />
+          <span>{planEnabled ? '计划模式已开启' : '计划模式'}</span>
+          {planEnabled && <Check size={14} />}
+        </AppMenuItem>
+      </AppMenuContent>
+    </AppMenu>
+  );
+}
+
+function PlanModeIndicator({ busy, onClose }: { busy?: boolean; onClose: () => void }) {
+  return (
+    <span className="plan-mode-indicator">
+      <Lightbulb size={14} aria-hidden="true" />
+      <span>计划</span>
+      <button type="button" disabled={busy} onClick={onClose} aria-label="关闭计划模式" title="关闭计划模式">
+        {busy ? <LoaderCircle className="spin" size={13} /> : <X size={13} />}
+      </button>
+    </span>
+  );
+}
+
+function DecisionTray({
+  className = '',
+  label,
+  title,
+  titleId,
+  actions,
+  optionsLabel,
+  children,
+  footer,
+  error,
+  onKeyDown,
+  trayRef,
+}: {
+  className?: string;
+  label?: string;
+  title?: React.ReactNode;
+  titleId?: string;
+  actions?: React.ReactNode;
+  optionsLabel: string;
+  children: React.ReactNode;
+  footer?: React.ReactNode;
+  error?: string;
+  onKeyDown?: (event: React.KeyboardEvent<HTMLElement>) => void;
+  trayRef?: React.RefObject<HTMLElement | null>;
+}) {
+  return (
+    <section
+      className={`decision-tray ${className}`.trim()}
+      ref={trayRef}
+      onKeyDown={onKeyDown}
+      aria-label={title ? undefined : label}
+      aria-labelledby={title ? titleId : undefined}
+    >
+      {title && (
+        <header className="decision-tray-head">
+          <strong id={titleId}>{title}</strong>
+          {actions}
+        </header>
+      )}
+      <div className="decision-option-list" role="group" aria-label={optionsLabel}>
+        {children}
+      </div>
+      {(footer || error) && (
+        <footer className="decision-tray-footer">
+          {error ? <span className="decision-tray-error" role="alert">{error}</span> : <span />}
+          {footer}
+        </footer>
+      )}
+    </section>
+  );
+}
+
+function DecisionPager({ index, count, disabled, onPrevious, onNext, onClose }: {
+  index: number;
+  count: number;
+  disabled?: boolean;
+  onPrevious: () => void;
+  onNext: () => void;
+  onClose: () => void;
+}) {
+  return (
+    <div className="decision-pager" aria-label="问题导航">
+      <button type="button" disabled={disabled || index <= 0} onClick={onPrevious} aria-label="上一题"><ChevronLeft size={15} /></button>
+      <span>{index + 1} / {count}</span>
+      <button type="button" disabled={disabled || index >= count - 1} onClick={onNext} aria-label="下一题"><ChevronRight size={15} /></button>
+      <button type="button" disabled={disabled} onClick={onClose} aria-label="关闭当前问题"><X size={15} /></button>
+    </div>
+  );
+}
+
+function DecisionOptionRow({ number, label, description, recommended, active, selected, danger, disabled, role, onClick, onFocus }: {
+  number: number;
+  label: string;
+  description?: string;
+  recommended?: boolean;
+  active?: boolean;
+  selected?: boolean;
+  danger?: boolean;
+  disabled?: boolean;
+  role?: 'radio';
+  onClick: () => void;
+  onFocus?: () => void;
+}) {
+  return (
+    <button
+      type="button"
+      role={role}
+      aria-checked={role === 'radio' ? Boolean(selected) : undefined}
+      className={`decision-option-row${active ? ' active' : ''}${selected ? ' selected' : ''}${danger ? ' danger' : ''}`}
+      disabled={disabled}
+      tabIndex={active ? 0 : -1}
+      onClick={onClick}
+      onFocus={onFocus}
+    >
+      <span className="decision-option-number">{number}</span>
+      <span className="decision-option-copy">
+        <strong>{label}</strong>
+        {recommended && <em>推荐</em>}
+        {description && <small>{description}</small>}
+      </span>
+      <ChevronRight size={16} aria-hidden="true" />
+    </button>
+  );
+}
+
+function DecisionOtherRow({ open, value, disabled, placeholder, onOpen, onChange, onSubmit, onClose }: {
+  open: boolean;
+  value: string;
+  disabled?: boolean;
+  placeholder: string;
+  onOpen: () => void;
+  onChange: (value: string) => void;
+  onSubmit: () => void;
+  onClose: () => void;
+}) {
+  if (!open) {
+    return (
+      <button type="button" className="decision-other-trigger" disabled={disabled} onClick={onOpen}>
+        <span className="decision-other-icon"><Pencil size={14} /></span>
+        <span>其他</span>
+      </button>
+    );
+  }
+  return (
+    <div className="decision-other-input">
+      <span className="decision-other-icon"><Pencil size={14} /></span>
+      <input
+        autoFocus
+        value={value}
+        disabled={disabled}
+        placeholder={placeholder}
+        aria-label={placeholder}
+        onChange={(event) => onChange(event.target.value)}
+        onKeyDown={(event) => {
+          if (event.key === 'Escape') {
+            event.preventDefault();
+            onClose();
+          } else if (event.key === 'Enter' && value.trim()) {
+            event.preventDefault();
+            onSubmit();
+          }
+        }}
+      />
+      <button type="button" disabled={disabled || !value.trim()} onClick={onSubmit} aria-label="提交其他回答"><ChevronRight size={16} /></button>
+    </div>
+  );
+}
+
+function PlanQuestionPanel({ batch, submitting, error, onSubmit, onCancel }: {
+  batch: PlanQuestionBatch;
+  submitting: boolean;
+  error?: string;
+  onSubmit: (answers: Record<string, { selectedLabel?: string; note?: string }>) => void;
+  onCancel: () => void;
+}) {
+  const [index, setIndex] = useState(0);
+  const [answers, setAnswers] = useState<Record<string, { selectedLabel?: string; note?: string }>>(batch.answers || {});
+  const [otherOpen, setOtherOpen] = useState(false);
+  const [otherDrafts, setOtherDrafts] = useState<Record<string, string>>({});
+  const [activeOptionIndex, setActiveOptionIndex] = useState(0);
+  const trayRef = useRef<HTMLElement | null>(null);
+  useEffect(() => {
+    setIndex(0);
+    setAnswers(batch.answers || {});
+    setOtherOpen(false);
+    setOtherDrafts({});
+    setActiveOptionIndex(0);
+  }, [batch.id]);
+  const question = batch.questions[index];
+  if (!question) return null;
+  const answer = answers[question.id] || {};
+  const otherDraft = otherDrafts[question.id] || answer.note || '';
+
+  useEffect(() => {
+    const selectedIndex = Math.max(0, question.options.findIndex((option) => option.label === answer.selectedLabel));
+    setActiveOptionIndex(selectedIndex);
+    setOtherOpen(Boolean(answer.note && !answer.selectedLabel));
+    const frame = window.requestAnimationFrame(() => {
+      trayRef.current?.querySelectorAll<HTMLButtonElement>('.decision-option-row')[selectedIndex]?.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [index, question.id, answer.selectedLabel, answer.note]);
+
+  const commitAndAdvance = (nextAnswer: { selectedLabel?: string; note?: string }) => {
+    if (submitting) return;
+    const nextAnswers = { ...answers, [question.id]: nextAnswer };
+    setAnswers(nextAnswers);
+    setOtherOpen(false);
+    if (index < batch.questions.length - 1) {
+      setIndex(index + 1);
+      return;
+    }
+    const firstUnanswered = batch.questions.findIndex((item) => {
+      const itemAnswer = nextAnswers[item.id];
+      return !itemAnswer?.selectedLabel && !itemAnswer?.note?.trim();
+    });
+    if (firstUnanswered >= 0) {
+      setIndex(firstUnanswered);
+      return;
+    }
+    onSubmit(nextAnswers);
+  };
+
+  const chooseOption = (optionIndex: number) => {
+    const option = question.options[optionIndex];
+    if (!option) return;
+    setActiveOptionIndex(optionIndex);
+    commitAndAdvance({ selectedLabel: option.label });
+  };
+
+  const skip = () => {
+    const option = question.options.find((item) => item.recommended) || question.options[0];
+    if (option) commitAndAdvance({ selectedLabel: option.label });
+  };
+
+  const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
+    if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      onCancel();
+      return;
+    }
+    if (/^[1-9]$/.test(event.key)) {
+      const optionIndex = Number(event.key) - 1;
+      if (optionIndex < question.options.length) {
+        event.preventDefault();
+        chooseOption(optionIndex);
+      }
+      return;
+    }
+    if (event.key === 'ArrowLeft' && index > 0) {
+      event.preventDefault();
+      setIndex(index - 1);
+      return;
+    }
+    if (event.key === 'ArrowRight' && index < batch.questions.length - 1) {
+      event.preventDefault();
+      setIndex(index + 1);
+      return;
+    }
+    if (event.key === 'ArrowDown' || event.key === 'ArrowUp') {
+      event.preventDefault();
+      const direction = event.key === 'ArrowDown' ? 1 : -1;
+      const nextIndex = (activeOptionIndex + direction + question.options.length) % question.options.length;
+      setActiveOptionIndex(nextIndex);
+      trayRef.current?.querySelectorAll<HTMLButtonElement>('.decision-option-row')[nextIndex]?.focus();
+    }
+  };
+
+  return (
+    <DecisionTray
+      className="plan-question-panel"
+      trayRef={trayRef}
+      title={question.question}
+      titleId={`plan-question-${batch.id}-${question.id}`}
+      optionsLabel={question.header || question.question}
+      onKeyDown={onKeyDown}
+      error={error}
+      actions={(
+        <DecisionPager
+          index={index}
+          count={batch.questions.length}
+          disabled={submitting}
+          onPrevious={() => setIndex((current) => Math.max(0, current - 1))}
+          onNext={() => setIndex((current) => Math.min(batch.questions.length - 1, current + 1))}
+          onClose={onCancel}
+        />
+      )}
+      footer={<button type="button" className="decision-skip" disabled={submitting} onClick={skip}>{submitting ? '提交中…' : '跳过'}</button>}
+    >
+      {question.options.map((option, optionIndex) => (
+        <DecisionOptionRow
+          key={option.label}
+          number={optionIndex + 1}
+          label={option.label}
+          description={option.description}
+          recommended={option.recommended}
+          active={activeOptionIndex === optionIndex}
+          selected={answer.selectedLabel === option.label}
+          disabled={submitting}
+          role="radio"
+          onClick={() => chooseOption(optionIndex)}
+          onFocus={() => setActiveOptionIndex(optionIndex)}
+        />
+      ))}
+      <DecisionOtherRow
+        open={otherOpen}
+        value={otherDraft}
+        disabled={submitting}
+        placeholder="输入其他回答"
+        onOpen={() => setOtherOpen(true)}
+        onChange={(value) => setOtherDrafts((current) => ({ ...current, [question.id]: value }))}
+        onSubmit={() => {
+          const note = otherDraft.trim();
+          if (note) commitAndAdvance({ note });
+        }}
+        onClose={() => setOtherOpen(false)}
+      />
+    </DecisionTray>
+  );
+}
+
+function PlanCard({ plan, draft, agents, latest, readOnly = false, busy, feedbackOpen, feedback, error, onFeedbackChange, onOpenFeedback, onCloseFeedback, onSubmitFeedback, onExecute, onCancel }: {
+  plan: PlanSession;
+  draft: PlanDraft;
+  agents: Agent[];
+  latest: boolean;
+  readOnly?: boolean;
+  busy: boolean;
+  feedbackOpen: boolean;
+  feedback: string;
+  error?: string;
+  onFeedbackChange: (value: string) => void;
+  onOpenFeedback: () => void;
+  onCloseFeedback: () => void;
+  onSubmitFeedback: () => void;
+  onExecute: () => void;
+  onCancel: () => void;
+}) {
+  const waitingApproval = !readOnly && latest && plan.status === 'waiting_approval';
+  const canExecute = !readOnly && latest && (plan.status === 'waiting_approval' || plan.status === 'failed');
+  const visibleError = error || (plan.status === 'failed' ? plan.error : '');
+  const statusLabel = readOnly ? '历史计划' : !latest ? '已被新版本替代' : ({
+    waiting_approval: '等待批准',
+    approved: '已批准',
+    executing: '执行中',
+    completed: '已完成',
+    cancelled: '已取消',
+    failed: '执行失败',
+    drafting: '修改中',
+    waiting_input: '等待回答',
+  } as Record<string, string>)[plan.status] || plan.status;
+  return (
+    <section className={`plan-card${latest ? ' is-latest' : ' is-superseded'}`}>
+      <header>
+        <span className="plan-card-icon"><Lightbulb size={17} /></span>
+        <div><small>{plan.targetExecutionMode === 'work' ? 'Work 计划' : 'Chat 计划'} · 第 {draft.revision} 版</small><h3>{draft.title}</h3></div>
+        <span className={`plan-card-status status-${plan.status}`}>{statusLabel}</span>
+      </header>
+      <p className="plan-card-summary">{draft.summary}</p>
+      <div className="plan-card-section">
+        <strong>执行步骤</strong>
+        <ol>
+          {draft.steps.map((step) => {
+            const assignee = step.assigneeAgentId ? agents.find((agent) => agent.id === step.assigneeAgentId) : null;
+            return (
+              <li key={step.key}>
+                <div><b>{step.title}</b>{assignee && <span className="plan-assignee"><AgentAvatar agent={assignee} size="sm" />{assignee.name}</span>}</div>
+                <p>{step.description}</p>
+                {step.files.length > 0 && <small>{step.files.join(' · ')}</small>}
+                {step.expectedResult && <em>结果：{step.expectedResult}</em>}
+                {step.dependsOnKeys.length > 0 && <em>依赖：{step.dependsOnKeys.join('、')}</em>}
+              </li>
+            );
+          })}
+        </ol>
+      </div>
+      {draft.tests.length > 0 && <div className="plan-card-section compact"><strong>验证方式</strong><ul>{draft.tests.map((test) => <li key={test}>{test}</li>)}</ul></div>}
+      {draft.assumptions.length > 0 && <div className="plan-card-section compact"><strong>假设</strong><ul>{draft.assumptions.map((assumption) => <li key={assumption}>{assumption}</li>)}</ul></div>}
+      {feedbackOpen && waitingApproval && (
+        <div className="plan-feedback">
+          <textarea autoFocus value={feedback} onChange={(event) => onFeedbackChange(event.target.value)} placeholder="说明需要调整的范围、顺序或取舍" rows={3} />
+          <div>
+            <button type="button" className="secondary-btn" disabled={busy} onClick={onCloseFeedback}>返回</button>
+            <button type="button" className="send-btn" disabled={busy || !feedback.trim()} onClick={onSubmitFeedback}>提交修改</button>
+          </div>
         </div>
       )}
-    </div>
+      {visibleError && latest && <div className="plan-inline-error" role="alert">{visibleError}</div>}
+      {canExecute && !feedbackOpen && (
+        <footer>
+          <button type="button" className="plan-cancel-btn" disabled={busy} onClick={onCancel}>取消</button>
+          {waitingApproval && <button type="button" className="secondary-btn" disabled={busy} onClick={onOpenFeedback}>修改计划</button>}
+          <button type="button" className="send-btn plan-execute-btn" disabled={busy} onClick={onExecute}>
+            {busy ? <LoaderCircle className="spin" size={14} /> : <Play size={14} />}{plan.status === 'failed' ? '重试执行' : '开始执行'}
+          </button>
+        </footer>
+      )}
+    </section>
   );
 }
 
@@ -7363,7 +8885,7 @@ function normalizeDonutShares(rows: DonutMetricRow[]): DonutMetricRow[] {
 }
 
 function buildDonutSegments(rows: DonutMetricRow[]) {
-  const visible = rows.length ? rows : [{ key: 'empty', color: '#dbe5df', share: 100, displayShare: 100 }] as DonutMetricRow[];
+  const visible = rows.length ? rows : [{ key: 'empty', color: 'var(--settings-chart-empty)', share: 100, displayShare: 100 }] as DonutMetricRow[];
   let offset = 25;
   return visible.map((row) => {
     const length = rows.length ? row.share : 100;
@@ -7417,12 +8939,12 @@ function UsageTrendRechart({ points, hourly }: { points: UsageTrendPoint[]; hour
               <linearGradient id="usageCacheCreationFill" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#f97316" stopOpacity={0.18} /><stop offset="95%" stopColor="#f97316" stopOpacity={0} /></linearGradient>
               <linearGradient id="usageCacheReadFill" x1="0" y1="0" x2="0" y2="1"><stop offset="5%" stopColor="#a855f7" stopOpacity={0.18} /><stop offset="95%" stopColor="#a855f7" stopOpacity={0} /></linearGradient>
             </defs>
-            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#d8e1dc" opacity={0.72} />
-            <XAxis dataKey="label" ticks={timelineTicks} axisLine={false} tickLine={false} interval={0} minTickGap={0} height={42} tick={{ fill: '#73807b', fontSize: 12 }} dy={10} />
-            <YAxis yAxisId="tokens" axisLine={false} tickLine={false} tick={{ fill: '#73807b', fontSize: 12 }} tickFormatter={(value) => `${Math.round(Number(value) / 1000)}k`} width={48} />
-            <YAxis yAxisId="cost" orientation="right" axisLine={false} tickLine={false} tick={{ fill: '#73807b', fontSize: 12 }} tickFormatter={(value) => `$${Number(value).toFixed(Number(value) >= 10 ? 0 : 2)}`} width={50} />
-            <Tooltip content={tooltip} cursor={{ stroke: '#0f766e', strokeWidth: 1, strokeDasharray: '4 4', opacity: 0.35 }} />
-            <Legend verticalAlign="bottom" height={32} iconType="circle" wrapperStyle={{ color: '#52615c', fontSize: 12, paddingTop: 10 }} />
+            <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="var(--settings-chart-grid)" opacity={0.72} />
+            <XAxis dataKey="label" ticks={timelineTicks} axisLine={false} tickLine={false} interval={0} minTickGap={0} height={42} tick={{ fill: 'var(--settings-chart-axis)', fontSize: 12 }} dy={10} />
+            <YAxis yAxisId="tokens" axisLine={false} tickLine={false} tick={{ fill: 'var(--settings-chart-axis)', fontSize: 12 }} tickFormatter={(value) => `${Math.round(Number(value) / 1000)}k`} width={48} />
+            <YAxis yAxisId="cost" orientation="right" axisLine={false} tickLine={false} tick={{ fill: 'var(--settings-chart-axis)', fontSize: 12 }} tickFormatter={(value) => `$${Number(value).toFixed(Number(value) >= 10 ? 0 : 2)}`} width={50} />
+            <Tooltip content={tooltip} cursor={{ stroke: 'var(--settings-chart-cursor)', strokeWidth: 1, strokeDasharray: '4 4', opacity: 0.35 }} />
+            <Legend verticalAlign="bottom" height={32} iconType="circle" wrapperStyle={{ color: 'var(--settings-chart-legend)', fontSize: 12, paddingTop: 10 }} />
             <Area yAxisId="tokens" type="monotone" dataKey="inputTokens" name="输入 Tokens" stroke="#3b82f6" fill="url(#usageInputFill)" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
             <Area yAxisId="tokens" type="monotone" dataKey="outputTokens" name="输出 Tokens" stroke="#22c55e" fill="url(#usageOutputFill)" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
             <Area yAxisId="tokens" type="monotone" dataKey="cacheCreationTokens" name="缓存创建" stroke="#f97316" fill="url(#usageCacheCreationFill)" strokeWidth={2} dot={false} activeDot={{ r: 4 }} />
@@ -7455,7 +8977,7 @@ function UsageMiniStat({ icon, label, value, accent = 'blue', muted = false }: {
   );
 }
 
-function WorkbenchDisplaySettings({ uiSettings, onUpdateUi }: { uiSettings: WorkbenchUiSettings; onUpdateUi: (next: Partial<WorkbenchUiSettings>) => void }) {
+function WorkbenchResponseSettings({ uiSettings, onUpdateUi }: { uiSettings: WorkbenchUiSettings; onUpdateUi: (next: Partial<WorkbenchUiSettings>) => void }) {
   const rows = [
     {
       label: '流式响应',
@@ -7464,25 +8986,72 @@ function WorkbenchDisplaySettings({ uiSettings, onUpdateUi }: { uiSettings: Work
       onChange: (checked: boolean) => onUpdateUi({ streamingResponses: checked }),
     },
     {
-      label: '紧凑模式',
-      hint: '压缩消息区和导航密度。',
-      checked: uiSettings.density === 'compact',
-      onChange: (checked: boolean) => onUpdateUi({ density: checked ? 'compact' : 'comfortable' }),
+      label: '丰富的工具描述',
+      hint: '让 Agent 为每个工具步骤生成简短动作名和执行意图。',
+      checked: uiSettings.richToolDescriptions !== false,
+      onChange: (checked: boolean) => onUpdateUi({ richToolDescriptions: checked }),
     },
   ];
   return (
     <>
-      <div className="settings-section-head"><h3>显示</h3></div>
-      <section className="studio-settings-panel workbench-display-panel">
-        <div className="settings-option-list">
-          {rows.map((row) => (
-            <label className="settings-option-row" key={row.label}>
-              <span><strong>{row.label}</strong><small>{row.hint}</small></span>
-              <input type="checkbox" checked={row.checked} onChange={(event) => row.onChange(event.target.checked)} />
-            </label>
-          ))}
-        </div>
-      </section>
+      <div className="settings-section-head"><h3>响应体验</h3></div>
+      <SettingsPanel className="workbench-display-panel" ariaLabel="响应体验">
+        {rows.map((row) => (
+          <SettingsToggleRow
+            key={row.label}
+            title={row.label}
+            description={row.hint}
+            checked={row.checked}
+            onChange={row.onChange}
+          />
+        ))}
+      </SettingsPanel>
+    </>
+  );
+}
+
+function AppearanceSettingsPage({ uiSettings, pinnedNav, onUpdateUi, onTogglePinned }: {
+  uiSettings: WorkbenchUiSettings;
+  pinnedNav: PinnedNav;
+  onUpdateUi: (next: Partial<WorkbenchUiSettings>) => void;
+  onTogglePinned: (id: string) => void;
+}) {
+  return (
+    <>
+      <div className="settings-head"><h2>外观</h2></div>
+      <div className="settings-section-head"><h3>主题</h3></div>
+      <SettingsPanel ariaLabel="主题设置">
+        <SettingsRow title="应用外观" description="系统模式会跟随 macOS 的浅色与深色设置。">
+          <div className="appearance-segmented" role="group" aria-label="应用外观">
+            {(['system', 'light', 'dark'] as const).map((appearance) => (
+              <button type="button" className={(uiSettings.appearance || 'system') === appearance ? 'selected' : ''} key={appearance} onClick={() => onUpdateUi({ appearance })}>
+                {appearance === 'system' ? <><Monitor size={14} />系统</> : appearance === 'light' ? <><Sun size={14} />浅色</> : <><Moon size={14} />深色</>}
+              </button>
+            ))}
+          </div>
+        </SettingsRow>
+      </SettingsPanel>
+      <div className="settings-section-head"><h3>界面布局</h3></div>
+      <SettingsPanel ariaLabel="界面布局">
+        <SettingsToggleRow
+          title="紧凑模式"
+          description="压缩消息区和导航密度。"
+          checked={uiSettings.density === 'compact'}
+          onChange={(checked) => onUpdateUi({ density: checked ? 'compact' : 'comfortable' })}
+        />
+      </SettingsPanel>
+      <div className="settings-section-head"><h3>左侧置顶</h3></div>
+      <SettingsPanel ariaLabel="左侧置顶">
+        {railNavItems.map((item) => (
+          <SettingsToggleRow
+            key={item.id}
+            title={item.label}
+            description="在主界面左侧导航中显示。"
+            checked={pinnedNav[item.id] !== false}
+            onChange={() => onTogglePinned(item.id)}
+          />
+        ))}
+      </SettingsPanel>
     </>
   );
 }
@@ -7490,22 +9059,23 @@ function WorkbenchDisplaySettings({ uiSettings, onUpdateUi }: { uiSettings: Work
 function TelemetrySettingsPanel({ uiSettings, status, onUpdateUi }: { uiSettings: WorkbenchUiSettings; status: TelemetryStatus | null; onUpdateUi: (next: Partial<WorkbenchUiSettings>) => void }) {
   return (
     <>
-      <div className="settings-section-head"><h3>隐私</h3></div>
-      <section className="studio-settings-panel telemetry-settings-panel">
-        <label className="settings-option-row">
-          <span>
-            <strong>匿名使用统计</strong>
-            <small>用于统计日活、月活、留存、功能结果和粗略地区分布。</small>
+      <div className="settings-section-head"><h3>使用统计</h3></div>
+      <SettingsPanel className="telemetry-settings-panel" ariaLabel="隐私设置">
+        <SettingsToggleRow
+          title="匿名使用统计"
+          description="用于统计日活、月活、留存、功能结果和粗略地区分布。"
+          checked={uiSettings.telemetryEnabled === true}
+          onChange={(checked) => onUpdateUi({ telemetryEnabled: checked, telemetryNoticeSeenAt: uiSettings.telemetryNoticeSeenAt || new Date().toISOString() })}
+        />
+        <SettingsInlineNote>
+          公网 IP 只由 Umami 换算为国家、省份和城市。不会发送对话、文件内容、项目名称、路径、密钥或账户资料。
+          <span className="telemetry-status-row">
+            <span>{status?.configured ? 'Umami 已配置' : 'Umami 未配置'}</span>
+            <span>待发送 {status?.queueSize || 0} 条</span>
+            <span>{status?.lastSentAt ? `最近发送 ${formatTime(status.lastSentAt)}` : '尚未发送'}</span>
           </span>
-          <input type="checkbox" checked={uiSettings.telemetryEnabled === true} onChange={(event) => onUpdateUi({ telemetryEnabled: event.target.checked, telemetryNoticeSeenAt: uiSettings.telemetryNoticeSeenAt || new Date().toISOString() })} />
-        </label>
-        <p>公网 IP 只由 Umami 换算为国家、省份和城市。不会发送对话、文件内容、项目名称、路径、密钥或账户资料。</p>
-        <div className="telemetry-status-row">
-          <span>{status?.configured ? 'Umami 已配置' : 'Umami 未配置'}</span>
-          <span>待发送 {status?.queueSize || 0} 条</span>
-          <span>{status?.lastSentAt ? `最近发送 ${formatTime(status.lastSentAt)}` : '尚未发送'}</span>
-        </div>
-      </section>
+        </SettingsInlineNote>
+      </SettingsPanel>
     </>
   );
 }
@@ -7522,6 +9092,65 @@ function TelemetryNotice({ onAllow, onDecline }: { onAllow: () => void; onDeclin
         <button className="send-btn" onClick={onAllow}>同意</button>
       </div>
     </aside>
+  );
+}
+
+function DesktopUpdateBadge({ state, open, onOpenChange, onCancel, onInstall }: {
+  state: DesktopUpdateState;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onCancel: () => void;
+  onInstall: () => void;
+}) {
+  const percent = Math.max(0, Math.min(100, Math.round(Number(state.progress?.percent || 0))));
+  const version = state.latestVersion ? `v${state.latestVersion.replace(/^v/i, '')}` : '新版';
+  const label = state.phase === 'available'
+    ? `下载 Frakio Work ${version}`
+    : state.phase === 'downloading'
+      ? `Frakio Work ${version} 正在下载，${percent}%`
+      : state.phase === 'downloaded'
+        ? `Frakio Work ${version} 已下载，点击安装`
+        : `Frakio Work ${version} 下载失败，点击重试`;
+  const Icon = state.phase === 'downloading'
+    ? LoaderCircle
+    : state.phase === 'downloaded'
+      ? Check
+      : state.phase === 'error'
+        ? RefreshCw
+        : ArrowDownToLine;
+  return (
+    <AppPopover open={open} onOpenChange={onOpenChange}>
+      <AppPopoverTrigger asChild>
+        <button
+          type="button"
+          className={`desktop-update-badge ${state.phase}`}
+          aria-label={label}
+          title={label}
+        >
+          <Icon size={13} aria-hidden="true" />
+        </button>
+      </AppPopoverTrigger>
+      <AppPopoverContent side="top" align="end" className="desktop-update-popover">
+        {state.phase === 'downloaded' ? (
+          <>
+            <div className="desktop-update-popover-copy">
+              <strong>Frakio Work {version} 已准备好</strong>
+              <small>打开安装包后，将新版拖入 Applications 替换当前版本。</small>
+            </div>
+            <button type="button" className="send-btn" onClick={onInstall}>退出并打开安装包</button>
+          </>
+        ) : (
+          <>
+            <div className="desktop-update-popover-copy">
+              <strong>正在下载 Frakio Work {version}</strong>
+              <small>{percent}%{state.progress.total > 0 ? ` · ${formatFileSize(state.progress.transferred)} / ${formatFileSize(state.progress.total)}` : ''}</small>
+            </div>
+            <div className="desktop-update-progress" aria-hidden="true"><span style={{ width: `${percent}%` }} /></div>
+            <button type="button" className="secondary-btn" onClick={onCancel}>取消下载</button>
+          </>
+        )}
+      </AppPopoverContent>
+    </AppPopover>
   );
 }
 
@@ -7559,11 +9188,22 @@ function UserProfilePanel({ userProfile, defaultAgent, onSaved }: { userProfile:
   const [summary, setSummary] = useState<UserProfileSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
-  const [activityMode, setActivityMode] = useState<'daily' | 'weekly' | 'total'>('daily');
+  const [activityMode, setActivityMode] = useState<ProfileActivityMode>('daily');
+  const [tokenTooltip, setTokenTooltip] = useState<{
+    cell: ProfileActivityCell;
+    left: number;
+    top: number;
+    placement: 'above' | 'below';
+  } | null>(null);
+  const tooltipId = useId();
+  const reduceMotion = useReducedMotion();
   const displayName = userProfile.nickname || 'Frakio User';
   const initials = (displayName || 'MG').slice(0, 2).toUpperCase();
   const stats = summary?.stats || { totalTokens: 0, peakDayTokens: 0, peakDay: '', requests: 0, conversations: 0, activeAgents: 0 };
-  const activity = buildProfileActivity(summary?.usage?.byDay || [], summary?.usage?.entries || [], activityMode);
+  const activity = useMemo(
+    () => buildProfileActivity(summary?.usage?.byDay || [], summary?.usage?.entries || [], activityMode),
+    [activityMode, summary],
+  );
   const topAgents = (summary?.agents || []).filter((agent) => agent.conversationCount > 0 || agent.messageCount > 0).slice(0, 5);
   const topSkills = (summary?.modules.skills.byName || []).slice(0, 5);
   const topPlugins = (summary?.modules.plugins.byName || []).slice(0, 5);
@@ -7591,10 +9231,28 @@ function UserProfilePanel({ userProfile, defaultAgent, onSaved }: { userProfile:
     void loadSummary();
   }, []);
 
+  useEffect(() => {
+    setTokenTooltip(null);
+  }, [activityMode]);
+
   function handleSaved(profile: UserProfile, agents?: Agent[]) {
     onSaved(profile, agents);
     setEditOpen(false);
     void loadSummary();
+  }
+
+  function showTokenTooltip(cell: ProfileActivityCell, target: HTMLButtonElement) {
+    const rect = target.getBoundingClientRect();
+    const tooltipWidth = Math.min(216, Math.max(148, window.innerWidth - 24));
+    const maxLeft = Math.max(12, window.innerWidth - tooltipWidth - 12);
+    const left = Math.min(maxLeft, Math.max(12, rect.left + (rect.width / 2) - (tooltipWidth / 2)));
+    const placement = cell.row <= 2 || rect.top <= 92 ? 'below' : 'above';
+    setTokenTooltip({
+      cell,
+      left,
+      top: placement === 'above' ? rect.top - 9 : rect.bottom + 9,
+      placement,
+    });
   }
 
   return (
@@ -7608,7 +9266,7 @@ function UserProfilePanel({ userProfile, defaultAgent, onSaved }: { userProfile:
         </button>
         <h2>{displayName}</h2>
         <p>Frakio Work 用户 · 默认 Agent：{defaultAgent?.name || '未设置'}</p>
-        {loading && <span className="profile-loading">正在刷新资料数据...</span>}
+        <span className="visually-hidden" role="status" aria-live="polite">{loading ? '正在刷新资料数据' : summary ? '资料数据已更新' : ''}</span>
       </section>
 
       <section className="profile-stat-strip" aria-label="个人统计">
@@ -7622,15 +9280,32 @@ function UserProfilePanel({ userProfile, defaultAgent, onSaved }: { userProfile:
       <section className="profile-activity-panel">
         <div className="profile-section-head">
           <h3>Token 活动</h3>
-          <div className="mini-segment">
-            <button className={activityMode === 'daily' ? 'selected' : ''} onClick={() => setActivityMode('daily')}>每日</button>
-            <button className={activityMode === 'weekly' ? 'selected' : ''} onClick={() => setActivityMode('weekly')}>每周</button>
-            <button className={activityMode === 'total' ? 'selected' : ''} onClick={() => setActivityMode('total')}>累计</button>
+          <div className="mini-segment" aria-label="Token 活动范围">
+            <button type="button" className={activityMode === 'daily' ? 'selected' : ''} aria-pressed={activityMode === 'daily'} onClick={() => setActivityMode('daily')}>每日</button>
+            <button type="button" className={activityMode === 'weekly' ? 'selected' : ''} aria-pressed={activityMode === 'weekly'} onClick={() => setActivityMode('weekly')}>每周</button>
+            <button type="button" className={activityMode === 'total' ? 'selected' : ''} aria-pressed={activityMode === 'total'} onClick={() => setActivityMode('total')}>累计</button>
           </div>
         </div>
-        <div className="token-activity-scroll">
-          <div className="token-activity-grid" aria-label="Token 活动网格">
-            {activity.cells.map((cell) => <span className={`level-${cell.level}`} key={cell.day} title={`${cell.day} · ${formatFullNumber(cell.value)} tokens`} />)}
+        <div className="token-activity-scroll" onScroll={() => setTokenTooltip(null)}>
+          <div className={`token-activity-grid${summary ? ' is-loaded' : ''}`} aria-label="Token 活动网格" aria-busy={!summary}>
+            {activity.cells.map((cell) => (
+              <button
+                type="button"
+                className={`token-activity-cell level-${cell.level}${cell.future ? ' is-future' : ''}`}
+                data-day={cell.day}
+                key={cell.day}
+                aria-label={cell.ariaLabel}
+                aria-describedby={tokenTooltip?.cell.day === cell.day ? tooltipId : undefined}
+                style={{ animationDelay: reduceMotion ? '0ms' : `${Math.round(cell.index * 0.85)}ms` }}
+                onPointerEnter={(event) => showTokenTooltip(cell, event.currentTarget)}
+                onPointerLeave={() => setTokenTooltip(null)}
+                onFocus={(event) => showTokenTooltip(cell, event.currentTarget)}
+                onBlur={() => setTokenTooltip(null)}
+                onKeyDown={(event) => {
+                  if (event.key === 'Escape') setTokenTooltip(null);
+                }}
+              />
+            ))}
           </div>
           <div className="token-activity-months">{activity.months.map((month) => <span key={`${month.label}-${month.index}`} style={{ gridColumnStart: month.index + 1 }}>{month.label}</span>)}</div>
         </div>
@@ -7679,6 +9354,18 @@ function UserProfilePanel({ userProfile, defaultAgent, onSaved }: { userProfile:
           </div>
         </div>
       )}
+      {tokenTooltip && createPortal(
+        <div
+          className={`profile-token-tooltip is-${tokenTooltip.placement}`}
+          id={tooltipId}
+          role="tooltip"
+          style={{ left: tokenTooltip.left, top: tokenTooltip.top }}
+        >
+          <strong>{tokenTooltip.cell.heading}</strong>
+          <span>{tokenTooltip.cell.detail}</span>
+        </div>,
+        document.body,
+      )}
     </section>
   );
 }
@@ -7707,70 +9394,6 @@ function ProfileModuleUsageRow({ item }: { item: UserProfileModuleUsage }) {
 
 function moduleUsageTotal(item: UserProfileModuleUsage) {
   return Number(item.useCount || 0) + Number(item.viewCount || 0) + Number(item.patchCount || 0);
-}
-
-function buildProfileActivity(days: UsageDay[], entries: UsageEntry[], mode: 'daily' | 'weekly' | 'total') {
-  const byDay = new Map<string, number>();
-  for (const row of days || []) {
-    const day = String(row.day || '').slice(0, 10);
-    if (day) byDay.set(day, Number(row.realTotalTokens || row.totalTokens || 0));
-  }
-  if (!byDay.size) {
-    for (const entry of entries || []) {
-      const day = String(entry.createdAt || '').slice(0, 10);
-      if (day) byDay.set(day, (byDay.get(day) || 0) + Number(entry.realTotalTokens || entry.totalTokens || 0));
-    }
-  }
-
-  const end = new Date();
-  end.setHours(0, 0, 0, 0);
-  const start = new Date(end);
-  start.setDate(start.getDate() - 370);
-  start.setDate(start.getDate() - start.getDay());
-
-  const rawCells: Array<{ day: string; value: number; week: number; date: Date }> = [];
-  for (let index = 0; index < 371; index += 1) {
-    const date = new Date(start);
-    date.setDate(start.getDate() + index);
-    const day = date.toISOString().slice(0, 10);
-    rawCells.push({ day, value: byDay.get(day) || 0, week: Math.floor(index / 7), date });
-  }
-
-  const weekTotals = rawCells.reduce((map, cell) => map.set(cell.week, (map.get(cell.week) || 0) + cell.value), new Map<number, number>());
-  let running = 0;
-  const modeValues = rawCells.map((cell) => {
-    if (mode === 'weekly') return weekTotals.get(cell.week) || 0;
-    if (mode === 'total') {
-      running += cell.value;
-      return running;
-    }
-    return cell.value;
-  });
-  const maxValue = Math.max(1, ...modeValues);
-  const cells = rawCells.map((cell, index) => ({
-    day: cell.day,
-    value: modeValues[index],
-    level: activityLevel(modeValues[index], maxValue),
-  }));
-  const months: Array<{ label: string; index: number }> = [];
-  let lastMonth = '';
-  for (const cell of rawCells) {
-    const month = `${cell.date.getFullYear()}-${cell.date.getMonth()}`;
-    if (month !== lastMonth && cell.date.getDate() <= 7) {
-      months.push({ label: `${cell.date.getMonth() + 1}月`, index: cell.week + 1 });
-      lastMonth = month;
-    }
-  }
-  return { cells, months: months.slice(-13) };
-}
-
-function activityLevel(value: number, maxValue: number) {
-  if (value <= 0) return 0;
-  const ratio = value / maxValue;
-  if (ratio > .75) return 4;
-  if (ratio > .45) return 3;
-  if (ratio > .18) return 2;
-  return 1;
 }
 
 function UserProfileForm({ userProfile, defaultAgent, onSaved, onCancel, compact = false }: { userProfile: UserProfile; defaultAgent: Agent | null; onSaved: (profile: UserProfile, agents?: Agent[]) => void; onCancel?: () => void; compact?: boolean }) {
@@ -7970,26 +9593,24 @@ function HermesRuntimePanel({ runtime, bootstrap, localStatus, diagnostics, apiA
   const runtimeApiWarning = runtimeApiStep?.status === 'warning';
   const autoStartLabel = autoStart?.status === 'starting' ? '工作台启动中' : autoStart?.status === 'ready' ? '工作台已就绪' : autoStart?.status === 'partial' ? '工作台已就绪，部分网关未启动' : autoStart?.status === 'failed' ? '工作台启动失败' : '等待启动';
   return (
-    <section className="studio-settings-panel hermes-runtime-panel">
-      <div className="studio-toolbar">
+    <SettingsPanel className="hermes-runtime-panel" ariaLabel="Hermes Agent Runtime">
+      <div className="runtime-control-row">
         <div>
-          <h3>Hermes Runtime</h3>
+          <strong>{autoStartLabel}</strong>
+          <small>{autoStart?.finishedAt ? `最近完成 ${formatTime(autoStart.finishedAt)}` : autoStart?.startedAt ? `开始于 ${formatTime(autoStart.startedAt)}` : '检测聊天桥接、外部兼容 API 和本地依赖。'}</small>
         </div>
         <div className="runtime-actions">
           <button className="secondary-btn" onClick={() => void onRefresh()}>重新检测</button>
           <button className="send-btn" onClick={() => void onStart()}>{bridgeReady || workbenchApiOnline ? '重新启动 Runtime' : '启动 Runtime'}</button>
         </div>
       </div>
-      <div className={`runtime-autostart ${autoStart?.status || 'idle'} ${autoStartWarnings.length ? 'has-warnings' : ''}`}>
-        <div>
-          <strong>{autoStartLabel}</strong>
-          <span>{autoStart?.finishedAt ? `最近完成 ${formatTime(autoStart.finishedAt)}` : autoStart?.startedAt ? `开始于 ${formatTime(autoStart.startedAt)}` : '本地管理服务启动后会检测聊天桥接、外部兼容 API 和 Profile Gateway。'}</span>
+      {autoStart?.steps?.length ? (
+        <div className="runtime-step-strip" aria-label="Runtime 启动步骤">
+          {autoStart.steps.map((step) => <span className={step.status} key={step.id}>{step.label}</span>)}
         </div>
-        {autoStart?.steps?.length ? (
-          <div className="runtime-autostart-steps">
-            {autoStart.steps.map((step) => <span className={step.status} key={step.id}>{step.label}</span>)}
-          </div>
-        ) : null}
+      ) : null}
+      {(autoStart?.error || autoStartWarnings.length > 0) && (
+        <div className="runtime-log-list">
         {autoStart?.error && (
           <details className="runtime-autostart-log">
             <summary>查看启动日志</summary>
@@ -8002,90 +9623,138 @@ function HermesRuntimePanel({ runtime, bootstrap, localStatus, diagnostics, apiA
             <pre>{autoStartWarnings.join('\n')}</pre>
           </details>
         )}
-      </div>
-      <div className="runtime-status-grid">
-        <div className={bundledRuntimeReady ? 'runtime-status-card connected' : 'runtime-status-card'}>
-          <span>Frakio Work 内置 Runtime</span>
-          <strong>{bundledRuntimeReady ? '可用' : '未打包'}</strong>
-          <small>{runtime?.runtime?.runtimeDir || diagnostics?.runtime?.runtimeDir || '等待检测'}</small>
         </div>
-        <div className={workbenchApiOnline ? 'runtime-status-card connected' : runtimeApiWarning ? 'runtime-status-card optional-warning' : 'runtime-status-card'}>
-          <span>外部兼容 API</span>
-          <strong>{workbenchApiOnline ? '运行中' : runtimeUnavailable ? '状态不可用' : '未运行，不影响工作台对话'}</strong>
-          <small>供第三方 OpenAI-compatible 客户端使用 · {bootstrap?.api?.apiBaseUrl || 'http://127.0.0.1:8642/v1'}</small>
-        </div>
-        <div className={bridgeReady ? 'runtime-status-card connected' : 'runtime-status-card'}>
-          <span>聊天运行桥接</span>
-          <strong>{bridgeReady ? '运行中' : '桥接未就绪'}</strong>
-          <small>{runtime?.bridge?.endpoint || '等待检测'}</small>
-          {runtime?.bridge?.error && <em>{runtime.bridge.error}</em>}
-        </div>
-        <div className="runtime-status-card">
-          <span>Hermes Home</span>
-          <strong>{runtime?.hermesHome || '~/.hermes'}</strong>
-          <small>官方配置、Profile 和模型凭据</small>
-        </div>
-        <div className="runtime-status-card">
-          <span>Frakio Work Home</span>
-          <strong>{runtime?.frakioWorkHome || diagnostics?.frakioWorkHome?.path || '~/.frakio-work'}</strong>
-          <small>{runtime?.agentRoot ? `运行 Runtime · ${runtime.agentRoot}` : '派生 API home、bridge socket 和 runtime 文件'}</small>
-        </div>
-        <div className={missingRuntimeTools.length ? 'runtime-status-card' : 'runtime-status-card connected'}>
-          <span>Runtime Tools</span>
-          <strong>{missingRuntimeTools.length ? `缺少 ${missingRuntimeTools.join(', ')}` : '依赖可用'}</strong>
-          <small>{['node', 'npm', 'npx', 'uv', 'python3'].map((name) => `${name}:${runtimeTools[name]?.available ? 'ok' : 'missing'}`).join(' · ')}</small>
-        </div>
-      </div>
-      {diagnostics && <div className="runtime-diagnostics">
-        <span><strong>管理服务</strong>{diagnostics.workbenchApi.url} · PID {diagnostics.workbenchApi.pid}</span>
-        <span><strong>当前构建</strong>v{diagnostics.workbenchApi.version || '未知'} · {diagnostics.workbenchApi.buildFingerprint || '无指纹'} · {diagnostics.workbenchApi.packaged ? '桌面安装包' : '源码开发版'}</span>
-        <span><strong>构建时间</strong>{diagnostics.workbenchApi.buildTime ? new Date(diagnostics.workbenchApi.buildTime).toLocaleString() : '未知'}</span>
-        <span><strong>Hermes Home</strong>{diagnostics.hermesHome.path} · {diagnostics.hermesHome.profileCount} profiles</span>
-        <span><strong>Frakio Work Home</strong>{diagnostics.frakioWorkHome?.path || '~/.frakio-work'}</span>
-        <span><strong>运行 Runtime</strong>{diagnostics.agentRoot.path || '未定位'}</span>
-        <span><strong>Bridge Script</strong>{diagnostics.bridgeScript.path || '未定位'}</span>
-        <span><strong>Python</strong>{diagnostics.python.path || '未定位'}</span>
-        <span><strong>Runtime Tools</strong>{['node', 'npm', 'npx', 'uv', 'python3'].map((name) => diagnostics.tools?.[name]?.path || `${name}: missing`).join(' · ')}</span>
-      </div>}
-      <p className="runtime-panel-note">Profile Gateway 状态与操作已合并到 Agent 配置的 Agent 卡片中。</p>
-    </section>
+      )}
+      <SettingsRow title="Frakio Work 内置 Runtime" description="工作台随应用提供的 Hermes Agent 运行环境。">
+        <SettingsStatusValue
+          state={bundledRuntimeReady ? '可用' : '未打包'}
+          detail={runtime?.runtime?.runtimeDir || diagnostics?.runtime?.runtimeDir || '等待检测'}
+          tone={bundledRuntimeReady ? 'ready' : 'warning'}
+        />
+      </SettingsRow>
+      <SettingsRow title="外部兼容 API" description="供第三方 OpenAI-compatible 客户端使用。">
+        <SettingsStatusValue
+          state={workbenchApiOnline ? '运行中' : runtimeUnavailable ? '状态不可用' : runtimeApiWarning ? '启动警告' : '未运行'}
+          detail={bootstrap?.api?.apiBaseUrl || 'http://127.0.0.1:8642/v1'}
+          tone={workbenchApiOnline ? 'ready' : runtimeApiWarning ? 'warning' : 'neutral'}
+        />
+      </SettingsRow>
+      <SettingsRow title="聊天运行桥接" description="承载 Frakio Work 对话与 Hermes Agent 的运行通信。">
+        <SettingsStatusValue
+          state={bridgeReady ? '运行中' : '桥接未就绪'}
+          detail={runtime?.bridge?.error || runtime?.bridge?.endpoint || '等待检测'}
+          tone={bridgeReady ? 'ready' : 'warning'}
+        />
+      </SettingsRow>
+      <SettingsRow title="Hermes Home" description={`${localStatus?.profiles?.length || 0} 个本地 Profile。`}>
+        <SettingsStatusValue state={runtime?.hermesHome || diagnostics?.hermesHome?.path || '~/.hermes'} />
+      </SettingsRow>
+      <SettingsRow title="Frakio Work Home" description="Runtime、Bridge Socket 和本地运行缓存。">
+        <SettingsStatusValue state={runtime?.frakioWorkHome || diagnostics?.frakioWorkHome?.path || '~/.frakio-work'} detail={runtime?.agentRoot || diagnostics?.agentRoot.path || ''} />
+      </SettingsRow>
+      <SettingsRow title="Runtime Tools" description="Hermes Agent 运行所需的本地命令。">
+        <SettingsStatusValue
+          state={missingRuntimeTools.length ? `缺少 ${missingRuntimeTools.join(', ')}` : '依赖可用'}
+          detail={['node', 'npm', 'npx', 'uv', 'python3'].map((name) => runtimeTools[name]?.path || `${name}: missing`).join(' · ')}
+          tone={missingRuntimeTools.length ? 'warning' : 'ready'}
+        />
+      </SettingsRow>
+      {diagnostics && (
+        <details className="runtime-parameters">
+          <summary>运行参数</summary>
+          <div>
+            <span><strong>管理服务</strong>{diagnostics.workbenchApi.url} · PID {diagnostics.workbenchApi.pid}</span>
+            <span><strong>当前构建</strong>v{diagnostics.workbenchApi.version || '未知'} · {diagnostics.workbenchApi.buildFingerprint || '无指纹'} · {diagnostics.workbenchApi.packaged ? '桌面安装包' : '源码开发版'}</span>
+            <span><strong>构建时间</strong>{diagnostics.workbenchApi.buildTime ? new Date(diagnostics.workbenchApi.buildTime).toLocaleString() : '未知'}</span>
+            <span><strong>运行 Runtime</strong>{diagnostics.agentRoot.path || '未定位'}</span>
+            <span><strong>Bridge Script</strong>{diagnostics.bridgeScript.path || '未定位'}</span>
+            <span><strong>Python</strong>{diagnostics.python.path || '未定位'}</span>
+          </div>
+        </details>
+      )}
+      <SettingsInlineNote>Profile Gateway 状态与操作继续由 Agent 配置中的 Agent 卡片管理。</SettingsInlineNote>
+    </SettingsPanel>
   );
 }
 
-function UpdatesPanel({ runtime, status, busy, error, result, onCheck, onCheckRuntime, onInstallRuntime, onActivateRuntime, onUseBundledRuntime, onDeleteRuntime, onUpdateFrakioWork }: {
+function UpdatesPanel({ runtime, status, busy, error, result, desktopUpdateState, onCheckDesktopUpdate, onDownloadDesktopUpdate, onCancelDesktopUpdate, onOpenDesktopUpdate, onCheckRuntime, onInstallRuntime, onActivateRuntime, onUseBundledRuntime, onDeleteRuntime }: {
   runtime: HermesRuntimeStatus | null;
   status: UpdatesStatus | null;
   busy: UpdateBusy;
   error: string;
   result: UpdateActionResult | null;
-  onCheck: () => Promise<void>;
+  desktopUpdateState: DesktopUpdateState | null;
+  onCheckDesktopUpdate: () => Promise<void>;
+  onDownloadDesktopUpdate: () => Promise<void>;
+  onCancelDesktopUpdate: () => Promise<void>;
+  onOpenDesktopUpdate: () => Promise<void>;
   onCheckRuntime: () => Promise<void>;
-  onInstallRuntime: () => Promise<void>;
+  onInstallRuntime: (tag?: string) => Promise<void>;
   onActivateRuntime: (version: string) => Promise<void>;
   onUseBundledRuntime: () => Promise<void>;
   onDeleteRuntime: (version: string) => Promise<void>;
-  onUpdateFrakioWork: () => Promise<void>;
 }) {
+  const [officialReleases, setOfficialReleases] = useState<HermesOfficialRelease[]>([]);
+  const [selectedReleaseTag, setSelectedReleaseTag] = useState('');
+  const [releaseListError, setReleaseListError] = useState('');
   const manager = runtime?.manager;
   const active = manager?.activeRuntime || runtime?.runtime || null;
   const bundled = manager?.bundledRuntime || null;
   const latest = manager?.officialLatest || null;
   const managed = manager?.managedRuntimes || [];
   const latestBundled = Boolean(latest?.version && bundled?.version === latest.version);
-  const latestInstalled = Boolean(latest?.version && (latestBundled || managed.some((item) => item.version === latest.version)));
+  const selectedRelease = officialReleases.find((release) => release.tag === selectedReleaseTag) || null;
+  const selectedInstalled = Boolean(selectedReleaseTag && managed.some((item) => item.manifest?.sourceTag === selectedReleaseTag));
+
+  useEffect(() => {
+    let activeRequest = true;
+    void fetch('/api/hermes-runtime/releases')
+      .then(async (response) => {
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok) throw new Error(data.error || '无法读取官方 Runtime 版本。');
+        return Array.isArray(data.releases) ? data.releases as HermesOfficialRelease[] : [];
+      })
+      .then((releases) => {
+        if (!activeRequest) return;
+        setOfficialReleases(releases);
+        setSelectedReleaseTag((current) => current || latest?.tag || releases[0]?.tag || '');
+        setReleaseListError('');
+      })
+      .catch((loadError) => {
+        if (!activeRequest) return;
+        setReleaseListError(loadError instanceof Error ? loadError.message : '无法读取官方 Runtime 版本。');
+        setSelectedReleaseTag((current) => current || latest?.tag || '');
+      });
+    return () => {
+      activeRequest = false;
+    };
+  }, [latest?.tag]);
+
   return (
-    <section className="updates-panel">
-      <div className="runtime-panel-head">
+    <section className="updates-page-body">
+      <div className="updates-page-toolbar">
         <div>
-          <h3>版本与更新</h3>
-          <p>Hermes Agent Runtime 与 Frakio Work 分开更新。内置 Runtime 始终保留。</p>
+          <strong>产品版本</strong>
+          <p>Frakio Work 在后台检查新版；Hermes Agent Runtime 始终由你手动安装和切换。</p>
         </div>
-        <button className="secondary-btn" onClick={() => void Promise.all([onCheck(), onCheckRuntime()])} disabled={Boolean(busy)}>{busy === 'check' || busy === 'runtime-check' ? '检查中' : '检查更新'}</button>
+        <button className="secondary-btn" onClick={() => void Promise.all([onCheckDesktopUpdate(), onCheckRuntime()])} disabled={Boolean(busy) || desktopUpdateState?.phase === 'checking'}>{busy === 'runtime-check' || desktopUpdateState?.phase === 'checking' ? '检查中' : '检查更新'}</button>
       </div>
-      <div className="updates-grid">
+      <div className="settings-section-head"><h3>Frakio Work</h3></div>
+      <SettingsPanel className="update-product-panel" ariaLabel="Frakio Work 版本更新">
+        <FrakioUpdateCard
+          status={status?.frakioWork || null}
+          desktopState={desktopUpdateState}
+          onCheck={onCheckDesktopUpdate}
+          onDownload={onDownloadDesktopUpdate}
+          onCancel={onCancelDesktopUpdate}
+          onOpenInstaller={onOpenDesktopUpdate}
+        />
+      </SettingsPanel>
+      <div className="settings-section-head"><h3>Hermes Agent Runtime</h3></div>
+      <SettingsPanel className="update-product-panel" ariaLabel="Hermes Agent Runtime 版本管理">
         <div className="update-card runtime-update-card">
           <div className="update-card-head">
-            <span><strong>Hermes Agent Runtime</strong><small>由 Frakio Work 独立管理，不依赖 Hermes Studio 或其他 Web UI。</small></span>
+            <span><strong>Hermes Agent Runtime</strong><small>官方版本独立安装。安装完成后，需要确认“使用”才会切换。</small></span>
             <em>{active?.source === 'managed' ? '用户安装' : active?.source === 'override' ? '开发覆盖' : 'Frakio Work 内置'}</em>
           </div>
           <div className="update-meta">
@@ -8095,8 +9764,20 @@ function UpdatesPanel({ runtime, status, busy, error, result, onCheck, onCheckRu
             <span><strong>运行路径</strong>{active?.runtimeDir || '未定位'}</span>
           </div>
           {manager?.fallbackReason && <div className="update-blocked">{manager.fallbackReason}</div>}
+          <div className="runtime-release-picker">
+            <label htmlFor="runtime-official-release">官方稳定版本</label>
+            <div>
+              <select id="runtime-official-release" value={selectedReleaseTag} onChange={(event) => setSelectedReleaseTag(event.target.value)} disabled={Boolean(busy) || (!officialReleases.length && !latest?.tag)}>
+                {!officialReleases.length && latest?.tag && <option value={latest.tag}>{latest.label || latest.tag}</option>}
+                {!officialReleases.length && !latest?.tag && <option value="">等待检查</option>}
+                {officialReleases.map((release) => <option value={release.tag} key={release.tag}>{release.label || release.tag}{release.releaseDate ? ` · ${release.releaseDate}` : ''}</option>)}
+              </select>
+              <button className="secondary-btn" onClick={() => void onInstallRuntime(selectedReleaseTag || undefined)} disabled={Boolean(busy) || !selectedReleaseTag || selectedInstalled || (latestBundled && selectedReleaseTag === latest?.tag)}>{busy === 'runtime-install' ? '安装中' : selectedInstalled ? '已安装' : latestBundled && selectedReleaseTag === latest?.tag ? '已内置' : '下载安装'}</button>
+            </div>
+            <small>{selectedRelease?.url ? <a href={selectedRelease.url} target="_blank" rel="noreferrer">查看此版本的官方说明</a> : '只提供 NousResearch 官方稳定版本。'}</small>
+          </div>
+          {releaseListError && !latest?.tag && <div className="update-blocked">{releaseListError}</div>}
           <div className="runtime-version-actions">
-            <button className="secondary-btn" onClick={() => void onInstallRuntime()} disabled={Boolean(busy) || latestInstalled || !latest?.tag}>{busy === 'runtime-install' ? '安装中' : latestBundled ? '最新版本已内置' : latestInstalled ? '最新版本已安装' : '下载安装'}</button>
             {active?.source === 'managed' && <button className="secondary-btn" onClick={() => void onUseBundledRuntime()} disabled={Boolean(busy)}>{busy === 'runtime-bundled' ? '切换中' : '恢复内置版本'}</button>}
           </div>
           {managed.length > 0 && <div className="runtime-version-list">
@@ -8111,68 +9792,93 @@ function UpdatesPanel({ runtime, status, busy, error, result, onCheck, onCheckRu
               </div>;
             })}
           </div>}
-          {manager?.sourcePath && <small className="update-remote">源码缓存（可删除后重新下载）：{manager.sourcePath}</small>}
         </div>
-        <UpdateModuleCard
-          title="Frakio Work"
-          description="更新桌面应用、Web UI、API、Frakio Bridge 和下一版内置 Runtime。"
-          status={status?.frakioWork || null}
-          busy={busy === 'frakio-work'}
-          onUpdate={onUpdateFrakioWork}
-          primaryLabel="更新"
-        />
-      </div>
+      </SettingsPanel>
       {error && <div className="form-error">{error}</div>}
       {result?.logs?.length ? <div className="updates-log"><strong>{result.target || 'update'} · {result.phase || 'status'}</strong><span>{result.logs.slice(-3).join(' · ')}</span>{result.backup?.path && <em>回滚点：{result.backup.path}</em>}{result.restartRequired && <em>更新已完成，重启当前 Frakio Work 服务后生效。</em>}</div> : null}
     </section>
   );
 }
 
-function UpdateModuleCard({ title, description, status, busy, onUpdate, primaryLabel }: { title: string; description: string; status: UpdateModuleStatus | null; busy: boolean; onUpdate: () => Promise<void>; primaryLabel: string }) {
-  if (status?.release) {
-    const release = status.release;
-    const canOpen = Boolean(release.releaseUrl);
-    return (
-      <div className={`update-card ${release.updateAvailable ? 'available' : ''}`}>
-        <div className="update-card-head">
-          <span><strong>{title}</strong><small>{description}</small></span>
-          <em>{release.updateAvailable ? '有可用更新' : release.latestVersion ? '已是最新' : '等待首个 Release'}</em>
-        </div>
-        <div className="update-meta">
-          <span><strong>当前版本</strong>v{release.currentVersion}</span>
-          <span><strong>最新版本</strong>{release.latestVersion ? `v${release.latestVersion}` : '尚未发布'}</span>
-          <span><strong>安装方式</strong>{release.installMode === 'desktop-release' ? 'macOS 安装包' : '源码版'}</span>
-          <span><strong>当前架构</strong>{release.asset?.name || '使用 Release 升级说明'}</span>
-        </div>
-        {release.notes && <p className="update-release-notes">{release.notes.slice(0, 280)}</p>}
-        {release.error && <div className="update-blocked">{release.error}</div>}
-        <button className="secondary-btn" onClick={() => void onUpdate()} disabled={!canOpen || busy}>{busy ? '打开中' : release.installMode === 'desktop-release' && release.asset ? '下载新版' : '查看 Release'}</button>
-      </div>
-    );
+function FrakioUpdateCard({ status, desktopState, onCheck, onDownload, onCancel, onOpenInstaller }: {
+  status: UpdateModuleStatus | null;
+  desktopState: DesktopUpdateState | null;
+  onCheck: () => Promise<void>;
+  onDownload: () => Promise<void>;
+  onCancel: () => Promise<void>;
+  onOpenInstaller: () => Promise<void>;
+}) {
+  const [notesOpen, setNotesOpen] = useState(false);
+  const release = status?.release || null;
+  const desktopSupported = desktopState?.supported === true;
+  const phase = desktopSupported ? desktopState.phase : release?.updateAvailable ? 'available' : release?.latestVersion ? 'up-to-date' : 'idle';
+  const percent = Math.max(0, Math.min(100, Math.round(Number(desktopState?.progress?.percent || 0))));
+  const stateLabel = phase === 'checking'
+    ? '检查中'
+    : phase === 'available'
+      ? '有可用更新'
+      : phase === 'downloading'
+        ? `下载中 ${percent}%`
+        : phase === 'downloaded'
+          ? '已下载'
+          : phase === 'error'
+            ? '下载失败'
+            : phase === 'up-to-date'
+              ? '已是最新'
+              : '等待检查';
+  const errorMessage = desktopSupported ? desktopState.error : release?.error;
+
+  async function openRelease() {
+    if (!release?.releaseUrl) return;
+    if (window.frakioDesktop?.openRelease) await window.frakioDesktop.openRelease(release.releaseUrl);
+    else window.open(release.releaseUrl, '_blank', 'noopener,noreferrer');
   }
-  const shortCurrent = shortCommit(status?.currentCommit);
-  const shortUpstream = shortCommit(status?.upstreamCommit);
-  const blocked = status?.blockedReason || '';
-  const canUpdate = Boolean(status?.isGitRepo && status.updateAvailable && status.canFastForward && status.installKind !== 'external');
-  const stateLabel = !status ? '等待检测' : !status.isGitRepo ? '不可自动更新' : status.installKind === 'external' ? '第三方安装' : blocked ? '需要处理' : status.updateAvailable ? '有可用更新' : '已是最新';
+
+  function primaryAction() {
+    if (!desktopSupported) return { label: '查看 Release', disabled: !release?.releaseUrl, action: openRelease };
+    if (phase === 'available' || phase === 'error') return { label: phase === 'error' ? '重新下载' : '下载更新', disabled: false, action: onDownload };
+    if (phase === 'downloading') return { label: '取消下载', disabled: false, action: onCancel };
+    if (phase === 'downloaded') return { label: '退出并打开安装包', disabled: false, action: onOpenInstaller };
+    return { label: phase === 'checking' ? '检查中' : '检查更新', disabled: phase === 'checking', action: onCheck };
+  }
+
+  const primary = primaryAction();
   return (
-    <div className={`update-card ${canUpdate ? 'available' : blocked ? 'blocked' : ''}`}>
+    <div className={`update-card ${phase === 'available' || phase === 'downloaded' ? 'available' : phase === 'error' ? 'blocked' : ''}`}>
       <div className="update-card-head">
-        <span><strong>{title}</strong><small>{description}</small></span>
+        <span><strong>Frakio Work</strong><small>更新桌面应用、Web UI、API、Frakio Bridge 和下一版内置 Runtime。</small></span>
         <em>{stateLabel}</em>
       </div>
       <div className="update-meta">
-        <span><strong>当前版本</strong>{status?.displayVersion || status?.packageVersion || shortCurrent || '未知'}</span>
-        {status?.latestVersion && <span><strong>最新版本</strong>{status.latestVersion}</span>}
-        <span><strong>技术信息</strong>{shortCurrent || '未知'}{status?.currentBranch ? ` · ${status.currentBranch}` : ''}{status?.currentTagDescription ? ` · ${status.currentTagDescription}` : ''}</span>
-        <span><strong>远端</strong>{shortUpstream || '未知'}</span>
-        <span><strong>路径</strong>{status?.path || '等待检测'}</span>
+        <span><strong>当前版本</strong>v{desktopState?.currentVersion || release?.currentVersion || status?.packageVersion || '未知'}</span>
+        <span><strong>最新版本</strong>{desktopState?.latestVersion || release?.latestVersion ? `v${(desktopState?.latestVersion || release?.latestVersion || '').replace(/^v/i, '')}` : '尚未发布'}</span>
+        <span><strong>安装方式</strong>{desktopSupported ? '应用内下载 DMG' : '源码版'}</span>
+        <span><strong>当前架构</strong>{desktopState?.assetName || release?.asset?.name || '使用 Release 升级说明'}</span>
+        {desktopState?.checkedAt && <span><strong>最近检查</strong>{formatTime(desktopState.checkedAt)}</span>}
       </div>
-      {status?.remoteUrl && <small className="update-remote">{status.remoteUrl}</small>}
-      {blocked && <div className="update-blocked">{blocked}</div>}
-      {status?.dirtyFiles?.length ? <div className="update-dirty">{status.dirtyFiles.slice(0, 6).map((file) => <code key={file}>{file}</code>)}</div> : null}
-      {status?.installKind === 'external' && <div className="update-blocked">检测到非官方 origin。自动恢复和回滚需要先接管此 Hermes checkout。</div>}
-      <button className="secondary-btn" onClick={() => void onUpdate()} disabled={!canUpdate || busy}>{busy ? '更新中' : primaryLabel}</button>
+      {phase === 'downloading' && <div className="settings-update-download-progress" aria-label={`下载进度 ${percent}%`}><span style={{ width: `${percent}%` }} /></div>}
+      {release?.notes && <p className="update-release-notes">{release.notes}</p>}
+      {errorMessage && <div className="update-blocked">{errorMessage}</div>}
+      <div className="settings-update-actions">
+        <button className="secondary-btn" onClick={() => void primary.action()} disabled={primary.disabled}>{primary.label}</button>
+        {release?.notes && <button className="secondary-btn quiet" onClick={() => setNotesOpen(true)}>查看完整更新日志</button>}
+      </div>
+      <AppDialog open={notesOpen} onOpenChange={setNotesOpen}>
+        <AppDialogContent className="release-notes-dialog">
+          <header className="release-notes-dialog-head">
+            <div>
+              <AppDialogTitle asChild><h2>Frakio Work {release?.latestVersion ? `v${release.latestVersion}` : '更新日志'}</h2></AppDialogTitle>
+              <AppDialogDescription>{release?.publishedAt ? `发布于 ${formatTime(release.publishedAt)}` : '完整 GitHub Release 说明'}</AppDialogDescription>
+            </div>
+            <AppDialogClose asChild><button className="icon-btn" aria-label="关闭更新日志"><X size={16} /></button></AppDialogClose>
+          </header>
+          <div className="release-notes-dialog-body"><RichMarkdown content={release?.notes || '暂无更新日志。'} /></div>
+          <footer className="release-notes-dialog-footer">
+            <button className="secondary-btn" onClick={() => void openRelease()} disabled={!release?.releaseUrl}>在 GitHub 查看</button>
+            <AppDialogClose asChild><button className="secondary-btn">关闭</button></AppDialogClose>
+          </footer>
+        </AppDialogContent>
+      </AppDialog>
     </div>
   );
 }
@@ -8229,54 +9935,284 @@ function shortCommit(value?: string) {
   return value ? value.slice(0, 7) : '';
 }
 
-type SettingsSection = 'hermes' | 'agents' | 'profile' | 'workbench' | 'archivedThreads' | 'mcp' | 'models' | 'channels' | 'plugins' | 'jobs' | 'monitoring' | 'vaults';
+type SettingsSection = 'localConnection' | 'hermesAgent' | 'updates' | 'appearance' | 'privacy' | 'agents' | 'skills' | 'profile' | 'workbench' | 'archivedThreads' | 'mcp' | 'models' | 'channels' | 'plugins' | 'jobs' | 'monitoring' | 'vaults';
 
-const settingsGroups: Array<{ title: string; items: Array<{ id: SettingsSection; label: string; icon: React.ComponentType<{ size?: number }> }> }> = [
-  { title: '个人', items: [{ id: 'profile', label: '个人资料', icon: UserCircle }, { id: 'workbench', label: '工作台', icon: PanelRight }, { id: 'archivedThreads', label: '归档对话', icon: Archive }] },
-  { title: '本地 Hermes', items: [{ id: 'hermes', label: '本地 Hermes', icon: Sparkles }, { id: 'agents', label: 'Agent 配置', icon: Network }, { id: 'models', label: '模型', icon: Bot }] },
-  { title: '集成', items: [{ id: 'mcp', label: 'MCP', icon: Boxes }, { id: 'channels', label: '频道', icon: MessageSquare }, { id: 'plugins', label: '插件', icon: Boxes }] },
-  { title: '编码', items: [{ id: 'jobs', label: '任务', icon: Clock3 }, { id: 'monitoring', label: '监控', icon: Activity }] },
-  { title: '仓库', items: [{ id: 'vaults', label: '仓库', icon: Database }] },
+const settingsGroups: Array<{ title: string; items: Array<{ id: SettingsSection; label: string; icon: React.ComponentType<{ size?: number }>; aliases?: string[] }> }> = [
+  { title: '个人', items: [{ id: 'profile', label: '个人资料', icon: UserCircle }, { id: 'workbench', label: '工作台', icon: PanelRight }, { id: 'appearance', label: '外观', icon: Palette, aliases: ['主题', '浅色', '深色', '紧凑模式'] }, { id: 'privacy', label: '隐私', icon: ShieldCheck, aliases: ['匿名使用统计', 'Umami'] }, { id: 'archivedThreads', label: '归档对话', icon: Archive }] },
+  { title: '本地能力', items: [{ id: 'localConnection', label: '本地连接', icon: Cable, aliases: ['本地 Hermes', '连接 Page', 'Hermes Home', 'Frakio Work Home'] }, { id: 'hermesAgent', label: 'Hermes Agent', icon: Sparkles, aliases: ['Hermes Runtime', 'Runtime', '诊断', '备份', '回滚'] }, { id: 'agents', label: 'Agent 配置', icon: Network }, { id: 'skills', label: '技能', icon: Sparkles, aliases: ['Skill', '全局技能', 'Agent 技能'] }, { id: 'plugins', label: '插件', icon: Boxes, aliases: ['Plugin', '全局插件', 'Agent 插件'] }, { id: 'models', label: '模型', icon: Bot }, { id: 'vaults', label: '仓库', icon: Database }] },
+  { title: '集成', items: [{ id: 'mcp', label: 'MCP', icon: Boxes }, { id: 'channels', label: '频道', icon: MessageSquare }] },
+  { title: '自动化', items: [{ id: 'jobs', label: '任务', icon: Clock3 }, { id: 'monitoring', label: '监控', icon: Activity }] },
+  { title: '系统', items: [{ id: 'updates', label: '版本更新', icon: RefreshCw, aliases: ['版本与更新', 'Frakio Work 更新', 'Hermes Agent Runtime 更新'] }] },
 ];
 
 function SettingsRail({ activeSection, onSectionChange, onReturnToConversation }: { activeSection: SettingsSection; onSectionChange: (section: SettingsSection) => void; onReturnToConversation: () => void }) {
   const [settingsQuery, setSettingsQuery] = useState('');
+  const [mobileOpen, setMobileOpen] = useState(false);
   const normalizedSettingsQuery = settingsQuery.trim().toLowerCase();
   const visibleSettingsGroups = settingsGroups
     .map((group) => ({
       ...group,
-      items: group.items.filter((item) => !normalizedSettingsQuery || `${group.title} ${item.label}`.toLowerCase().includes(normalizedSettingsQuery)),
+      items: group.items.filter((item) => !normalizedSettingsQuery || `${group.title} ${item.label} ${(item.aliases || []).join(' ')}`.toLowerCase().includes(normalizedSettingsQuery)),
     }))
     .filter((group) => group.items.length > 0);
 
   return (
     <aside className="settings-rail-sidebar">
-      <button className="settings-return" onClick={onReturnToConversation}><ArrowLeft size={16} /><span>返回对话</span></button>
-      <label className="settings-search">
-        <Search size={15} />
-        <input value={settingsQuery} onChange={(event) => setSettingsQuery(event.target.value)} placeholder="搜索设置..." />
-      </label>
-      <div className="settings-nav">
-        {visibleSettingsGroups.map((group) => (
-          <section className="settings-nav-group" key={group.title}>
-            <span>{group.title}</span>
-            {group.items.map((item) => {
-              const Icon = item.icon;
-              return (
-                <button className={activeSection === item.id ? 'selected' : ''} key={item.id} onClick={() => onSectionChange(item.id)}>
-                  <Icon size={16} />
-                  <strong>{item.label}</strong>
-                </button>
-              );
-            })}
-          </section>
-        ))}
+      <div className="settings-rail-head">
+        <button className="settings-return" onClick={onReturnToConversation}><ArrowLeft size={16} /><span>返回对话</span></button>
+        <button className="settings-mobile-toggle" type="button" aria-label={mobileOpen ? '收起设置导航' : '展开设置导航'} aria-expanded={mobileOpen} onClick={() => setMobileOpen((current) => !current)}>
+          {mobileOpen ? <X size={16} /> : <Settings size={16} />}
+        </button>
+      </div>
+      <div className={mobileOpen ? 'settings-rail-body open' : 'settings-rail-body'}>
+        <label className="settings-search">
+          <Search size={15} />
+          <input value={settingsQuery} onChange={(event) => setSettingsQuery(event.target.value)} placeholder="搜索设置..." />
+        </label>
+        <div className="settings-nav">
+          {visibleSettingsGroups.map((group) => (
+            <section className="settings-nav-group" key={group.title}>
+              <span>{group.title}</span>
+              {group.items.map((item) => {
+                const Icon = item.icon;
+                return (
+                  <button
+                    className={activeSection === item.id ? 'selected' : ''}
+                    key={item.id}
+                    aria-current={activeSection === item.id ? 'page' : undefined}
+                    onClick={() => {
+                      onSectionChange(item.id);
+                      setMobileOpen(false);
+                    }}
+                  >
+                    <Icon size={16} />
+                    <strong>{item.label}</strong>
+                  </button>
+                );
+              })}
+            </section>
+          ))}
+        </div>
       </div>
     </aside>
   );
 }
 
-function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, hermesRuntime, hermesDiagnostics, hermesApiAvailability, hermesError, updatesStatus, updatesBusy, updatesError, updatesResult, onCheckUpdates, onUpdateHermesAgent, onUpdateFrakioWork, onCheckHermesRuntime, onInstallHermesRuntime, onActivateHermesRuntime, onUseBundledHermesRuntime, onDeleteHermesRuntime, onCreateHermesBackup, onRollbackHermesBackup, onDeleteHermesBackup, onCleanupHermesBackups, userProfile, uiSettings, telemetryStatus, isImportingHermes, vaultPathInput, setVaultPathInput, vaultError, vaultBusy, addVault, reindexVault, deleteVault, onImportHermes, onRunFirstUseGuide, firstUseGuideRunning, onStartHermesRuntime, onRefreshHermesRuntime, onStartProfileGateway, onUpdateUi, onUserProfileSaved, pinnedNav, onTogglePinned, modelError, saveModel, deleteModel, fetchAvailableModels, onCapabilityChanged, activeSection, archivedThreads, onRefreshArchivedThreads, onRestoreThread, onDeleteThread, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreateAgent, profileEditor, onUpdateDefaultAgent }: {
+function SettingsStatusValue({ state, detail, tone = 'neutral' }: { state: string; detail?: string; tone?: 'neutral' | 'ready' | 'warning' }) {
+  return (
+    <span className={`settings-status-value ${tone}`}>
+      <strong>{state}</strong>
+      {detail && <small>{detail}</small>}
+    </span>
+  );
+}
+
+function LocalConnectionPage({ hermesStatus, hermesBootstrap, hermesRuntime, hermesDiagnostics, hermesApiAvailability, profile, onRunFirstUseGuide, firstUseGuideRunning }: {
+  hermesStatus: HermesLocalStatus | null;
+  hermesBootstrap: HermesBootstrapStatus | null;
+  hermesRuntime: HermesRuntimeStatus | null;
+  hermesDiagnostics: HermesRuntimeDiagnostics | null;
+  hermesApiAvailability: HermesApiAvailability;
+  profile: string;
+  onRunFirstUseGuide: () => void;
+  firstUseGuideRunning: boolean;
+}) {
+  const [managedWebStatus, setManagedWebStatus] = useState<{ managed?: boolean; authenticated?: boolean; transport?: string } | null>(null);
+  const [networkStatus, setNetworkStatus] = useState<HermesNetworkStatus | null>(null);
+  const [nextManagedPassword, setNextManagedPassword] = useState('');
+  const [managedPasswordMessage, setManagedPasswordMessage] = useState('');
+  useEffect(() => {
+    void fetch('/api/auth/status').then((response) => response.json()).then(setManagedWebStatus).catch(() => {});
+  }, []);
+  useEffect(() => {
+    const controller = new AbortController();
+    void fetch(`/api/hermes/network-status?profile=${encodeURIComponent(profile || 'default')}`, { signal: controller.signal })
+      .then((response) => response.ok ? response.json() : Promise.reject(new Error('network status unavailable')))
+      .then(setNetworkStatus)
+      .catch(() => {
+        if (!controller.signal.aborted) setNetworkStatus(null);
+      });
+    return () => controller.abort();
+  }, [profile, hermesRuntime?.bridge?.ready]);
+  const networkDetail = (capability: HermesNetworkStatus['search'] | HermesNetworkStatus['browser']) => {
+    if (capability.detail === 'free_provider_ready') return '免费搜索可用，服务繁忙时可能限流';
+    if (capability.detail === 'tool_disabled') return '工具未启用';
+    if (capability.detail === 'provider_not_configured') return '搜索后端未配置';
+    if (capability.detail === 'provider_unavailable') return '已配置后端当前不可用';
+    if (capability.detail === 'provider_probe_failed') return '状态检测失败';
+    if (capability.detail === 'browser_cli_missing') return '只读浏览器组件未就绪';
+    if (capability.detail === 'chromium_missing') return 'Chromium 未就绪';
+    return capability.provider ? `${capability.provider} 已就绪` : '已就绪';
+  };
+  const changeManagedPassword = async () => {
+    setManagedPasswordMessage('');
+    const response = await fetch('/api/auth/password', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ password: nextManagedPassword }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      setManagedPasswordMessage(payload.error || '密码修改失败。');
+      return;
+    }
+    setNextManagedPassword('');
+    setManagedPasswordMessage('管理员密码已更新，其他登录会话已退出。');
+  };
+  const localProfiles = hermesBootstrap?.profiles.length ? hermesBootstrap.profiles : hermesStatus?.profiles || [];
+  const detectedProfiles = localProfiles.length;
+  const workbenchOnline = hermesApiAvailability !== 'offline';
+  const bridgeReady = Boolean(hermesRuntime?.bridge?.ready);
+  const externalApiOnline = Boolean(hermesBootstrap?.api?.online);
+  const hermesHome = hermesRuntime?.hermesHome || hermesDiagnostics?.hermesHome?.path || hermesBootstrap?.installPath || '~/.hermes';
+  const frakioHome = hermesRuntime?.frakioWorkHome || hermesDiagnostics?.frakioWorkHome?.path || '~/.frakio-work';
+  const checkedAt = hermesBootstrap?.checkedAt || hermesStatus?.checkedAt || '';
+  return (
+    <>
+      <div className="settings-head"><h2>本地连接</h2></div>
+      <div className="settings-section-head"><h3>Frakio Work</h3></div>
+      <SettingsPanel ariaLabel="Frakio Work 本地连接">
+        <SettingsRow title="本地管理服务" description="为桌面端提供本地状态、设置和运行管理。">
+          <SettingsStatusValue
+            state={workbenchOnline ? '已连接' : '未连接'}
+            detail={hermesDiagnostics?.workbenchApi.url || 'http://127.0.0.1:8787'}
+            tone={workbenchOnline ? 'ready' : 'warning'}
+          />
+        </SettingsRow>
+        <SettingsRow title="聊天运行桥接" description="连接 Frakio Work 对话与 Hermes Agent Runtime。">
+          <SettingsStatusValue
+            state={bridgeReady ? '运行中' : '未就绪'}
+            detail={hermesRuntime?.bridge?.endpoint || '等待检测'}
+            tone={bridgeReady ? 'ready' : 'warning'}
+          />
+        </SettingsRow>
+        <SettingsRow title="网页搜索" description="实时信息优先使用搜索；单个免费服务限流不代表本机离线。">
+          <SettingsStatusValue
+            state={networkStatus?.search.ready ? '可用' : '未就绪'}
+            detail={networkStatus ? networkDetail(networkStatus.search) : '等待检测'}
+            tone={networkStatus?.search.ready ? 'ready' : 'warning'}
+          />
+        </SettingsRow>
+        <SettingsRow title="网页浏览" description="搜索失败时使用只读浏览器；目标网站拒绝或超时不代表本机离线。">
+          <SettingsStatusValue
+            state={networkStatus?.browser.ready ? '可用' : '未就绪'}
+            detail={networkStatus ? networkDetail(networkStatus.browser) : '等待检测'}
+            tone={networkStatus?.browser.ready ? 'ready' : 'warning'}
+          />
+        </SettingsRow>
+        <SettingsInlineNote>Plan 模式允许网页搜索和只读浏览。点击、输入、脚本控制或终端 curl 被拦截时，属于 Plan 安全策略，不是网络故障。</SettingsInlineNote>
+        <SettingsRow title="外部兼容 API" description="供第三方 OpenAI-compatible 客户端使用，不影响工作台对话。">
+          <SettingsStatusValue
+            state={externalApiOnline ? '运行中' : '未运行'}
+            detail={hermesBootstrap?.api?.apiBaseUrl || 'http://127.0.0.1:8642/v1'}
+            tone={externalApiOnline ? 'ready' : 'neutral'}
+          />
+        </SettingsRow>
+        <SettingsRow title="Frakio Work Home" description="运行状态、Bridge Socket 和应用缓存目录。">
+          <SettingsStatusValue state={frakioHome} />
+        </SettingsRow>
+      </SettingsPanel>
+      {managedWebStatus?.managed ? (
+        <>
+          <div className="settings-section-head"><h3>局域网访问</h3></div>
+          <SettingsPanel ariaLabel="局域网访问">
+            <SettingsRow title="当前访问地址" description="同一可信局域网中的设备可以通过运行主机的 IP 地址访问。">
+              <SettingsStatusValue state={window.location.origin} tone="ready" />
+            </SettingsRow>
+            <SettingsRow title="传输方式" description="当前使用可信局域网 HTTP。不要把此端口直接映射到公网；公网访问请配置 HTTPS 反向代理。">
+              <SettingsStatusValue state={managedWebStatus.transport === 'https' ? 'HTTPS' : '可信局域网 HTTP'} tone={managedWebStatus.transport === 'https' ? 'ready' : 'warning'} />
+            </SettingsRow>
+            <SettingsRow title="修改管理员密码" description="密码至少 10 个字符。保存后会撤销其他设备的登录状态。">
+              <span className="managed-password-control">
+                <input type="password" value={nextManagedPassword} onChange={(event) => setNextManagedPassword(event.target.value)} placeholder="输入新密码" />
+                <button className="secondary-btn" disabled={nextManagedPassword.length < 10} onClick={() => void changeManagedPassword()}>保存</button>
+              </span>
+            </SettingsRow>
+            {managedPasswordMessage ? <div className="settings-inline-message">{managedPasswordMessage}</div> : null}
+          </SettingsPanel>
+        </>
+      ) : null}
+      <div className="settings-section-head"><h3>Hermes Agent</h3></div>
+      <SettingsPanel ariaLabel="Hermes Agent 本地连接">
+        <SettingsRow title="本地配置" description="检测本机 Hermes Home 与 Profile。">
+          <SettingsStatusValue
+            state={detectedProfiles ? `已发现 ${detectedProfiles} 个 Profile` : '未发现 Profile'}
+            detail={checkedAt ? `最近检测 ${formatTime(checkedAt)}` : '等待检测'}
+            tone={detectedProfiles ? 'ready' : 'warning'}
+          />
+        </SettingsRow>
+        <SettingsRow title="Hermes Home" description="Hermes Agent 的官方配置、Profile 和模型凭据目录。">
+          <SettingsStatusValue state={hermesHome} />
+        </SettingsRow>
+        <SettingsRow title="Hermes Agent Runtime" description="当前由 Frakio Work 管理的本地运行时。">
+          <SettingsStatusValue
+            state={hermesRuntime?.runtime?.version ? `v${hermesRuntime.runtime.version}` : hermesRuntime?.runtime?.runtimeDir ? '可用' : '等待检测'}
+            detail={hermesRuntime?.runtime?.runtimeDir || ''}
+            tone={hermesRuntime?.runtime?.runtimeDir ? 'ready' : 'neutral'}
+          />
+        </SettingsRow>
+        <SettingsRow title="初次使用引导" description="重新检查依赖并完成 Frakio Work 与 Hermes Agent 的连接。">
+          <button className="secondary-btn" onClick={onRunFirstUseGuide} disabled={firstUseGuideRunning}>{firstUseGuideRunning ? '引导运行中' : '运行引导'}</button>
+        </SettingsRow>
+      </SettingsPanel>
+    </>
+  );
+}
+
+function WorkbenchProfileSyncPanel({ title, detail, hint, canSync, busy, error, onSync }: {
+  title: string;
+  detail: string;
+  hint: string;
+  canSync: boolean;
+  busy: boolean;
+  error: string;
+  onSync: () => Promise<void>;
+}) {
+  return (
+    <>
+      <div className="settings-section-head"><h3>本地配置同步</h3></div>
+      <SettingsPanel ariaLabel="本地配置同步">
+        <SettingsRow title="Hermes Agent Profiles" description={`${title}。${detail}`}>
+          <button className="send-btn" onClick={() => void onSync()} disabled={busy || !canSync}>{busy ? '同步中' : '同步配置'}</button>
+        </SettingsRow>
+        <SettingsInlineNote>{hint}。模型仍需在 Frakio Work 中单独配置。</SettingsInlineNote>
+      </SettingsPanel>
+      {error && <div className="form-error">{error}</div>}
+    </>
+  );
+}
+
+function HermesBackupPanel({ status, busy, onCreate, onRollback, onDelete, onCleanup }: {
+  status: UpdatesStatus | null;
+  busy: UpdateBusy;
+  onCreate: () => Promise<void>;
+  onRollback: (backup: HermesBackup, scopes: RollbackScopes) => Promise<void>;
+  onDelete: (backup: HermesBackup) => Promise<void>;
+  onCleanup: (mode: 'older-than-30-days' | 'keep-latest-10') => Promise<void>;
+}) {
+  const backups = status?.backups || [];
+  return (
+    <>
+      <div className="settings-section-head"><h3>配置保护</h3></div>
+      <SettingsPanel className="hermes-backup-panel" ariaLabel="Hermes Agent 配置保护">
+        <SettingsRow title="创建配置快照" description="保存当前 Hermes Agent 配置，供更新或排错后回滚。">
+          <button className="secondary-btn" onClick={() => void onCreate()} disabled={Boolean(busy)}>{busy === 'backup' ? '备份中' : '立即备份'}</button>
+        </SettingsRow>
+        <SettingsRow title="清理旧备份" description="只清理备份缓存，不影响当前 Hermes Agent 配置。">
+          <span className="settings-inline-actions">
+            <button className="secondary-btn" onClick={() => void onCleanup('keep-latest-10')} disabled={Boolean(busy)}>保留最近 10 条</button>
+            <button className="secondary-btn danger" onClick={() => void onCleanup('older-than-30-days')} disabled={Boolean(busy)}>清理 30 天前</button>
+          </span>
+        </SettingsRow>
+        {backups.length
+          ? backups.map((backup) => <HermesBackupRow backup={backup} busy={busy} onRollback={onRollback} onDelete={onDelete} key={backup.id} />)
+          : <SettingsInlineNote>还没有配置快照。首次手动备份或执行更新时会在这里显示。</SettingsInlineNote>}
+      </SettingsPanel>
+    </>
+  );
+}
+
+function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, hermesRuntime, hermesDiagnostics, hermesApiAvailability, hermesError, updatesStatus, updatesBusy, updatesError, updatesResult, desktopUpdateState, onCheckDesktopUpdate, onDownloadDesktopUpdate, onCancelDesktopUpdate, onOpenDesktopUpdate, onCheckHermesRuntime, onInstallHermesRuntime, onActivateHermesRuntime, onUseBundledHermesRuntime, onDeleteHermesRuntime, onCreateHermesBackup, onRollbackHermesBackup, onDeleteHermesBackup, onCleanupHermesBackups, userProfile, uiSettings, telemetryStatus, isImportingHermes, vaultPathInput, setVaultPathInput, vaultError, vaultBusy, addVault, reindexVault, deleteVault, onImportHermes, onRunFirstUseGuide, firstUseGuideRunning, onStartHermesRuntime, onRefreshHermesRuntime, onStartProfileGateway, onUpdateUi, onUserProfileSaved, pinnedNav, onTogglePinned, modelError, saveModel, deleteModel, fetchAvailableModels, onCapabilityChanged, activeSection, archivedThreads, onRefreshArchivedThreads, onRestoreThread, onDeleteThread, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreateAgent, profileEditor, onUpdateDefaultAgent }: {
   vaults: Vault[];
   models: ModelProfile[];
   agents: Agent[];
@@ -8290,11 +10226,13 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
   updatesBusy: UpdateBusy;
   updatesError: string;
   updatesResult: UpdateActionResult | null;
-  onCheckUpdates: () => Promise<void>;
-  onUpdateHermesAgent: () => Promise<void>;
-  onUpdateFrakioWork: () => Promise<void>;
+  desktopUpdateState: DesktopUpdateState | null;
+  onCheckDesktopUpdate: () => Promise<void>;
+  onDownloadDesktopUpdate: () => Promise<void>;
+  onCancelDesktopUpdate: () => Promise<void>;
+  onOpenDesktopUpdate: () => Promise<void>;
   onCheckHermesRuntime: () => Promise<void>;
-  onInstallHermesRuntime: () => Promise<void>;
+  onInstallHermesRuntime: (tag?: string) => Promise<void>;
   onActivateHermesRuntime: (version: string) => Promise<void>;
   onUseBundledHermesRuntime: () => Promise<void>;
   onDeleteHermesRuntime: (version: string) => Promise<void>;
@@ -8348,8 +10286,7 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
   const canSyncHermes = detectedProfiles > 0;
   const workbenchApiOffline = hermesApiAvailability === 'offline';
   const localHermesTitle = workbenchApiOffline ? 'Frakio Work 本地管理服务未运行' : canSyncHermes ? '已发现本地 Hermes 配置' : '未发现本地 Hermes 配置';
-  const frakioHome = hermesRuntime?.frakioWorkHome || hermesDiagnostics?.frakioWorkHome?.path || '~/.frakio-work';
-  const localHermesDetail = workbenchApiOffline ? '无法连接 127.0.0.1:8787，前端无法检测或启动本地 Hermes runtime。' : `Hermes Home ${hermesPath} · Frakio Work Home ${frakioHome} · ${detectedProfiles} 个 Profile · 模型需在 Frakio Work 单独配置`;
+  const localHermesDetail = workbenchApiOffline ? '无法连接 127.0.0.1:8787，暂时不能检测本地 Profile' : `Hermes Home ${hermesPath} · ${detectedProfiles} 个 Profile`;
   const localHermesHint = workbenchApiOffline
     ? '请用 npm run dev 同时启动 Web 和 API，或单独运行 npm run dev:api。'
     : hermesBootstrap?.checkedAt || hermesStatus?.checkedAt
@@ -8360,25 +10297,53 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
   return (
     <section className="settings-page codex-settings-page">
       <div className="settings-content">
-          {activeSection === 'hermes' && <>
-            <div className="settings-head"><h2>本地 Hermes 设置</h2></div>
-            <div className="local-hermes-card">
-              <div className="local-hermes-main">
-                <div className={workbenchApiOffline ? 'bootstrap-badge error' : canSyncHermes ? 'bootstrap-badge connected' : 'bootstrap-badge missing'}><Sparkles size={16} /></div>
-                <div>
-                  <strong>{localHermesTitle}</strong>
-                  <span>{localHermesDetail}</span>
-                  <small>{localHermesHint}</small>
-                </div>
-              </div>
-              <div className="local-hermes-actions">
-                <button className="secondary-btn" onClick={onRunFirstUseGuide} disabled={firstUseGuideRunning}>{firstUseGuideRunning ? '引导运行中' : '初次使用引导'}</button>
-                <button className="send-btn" onClick={() => void onImportHermes()} disabled={isImportingHermes || !canSyncHermes}>{isImportingHermes ? '同步中' : '同步本地 Hermes 设置'}</button>
-              </div>
-            </div>
-            {hermesError && <div className="form-error">{hermesError}</div>}
+          {activeSection === 'localConnection' && (
+            <LocalConnectionPage
+              hermesStatus={hermesStatus}
+              hermesBootstrap={hermesBootstrap}
+              hermesRuntime={hermesRuntime}
+              hermesDiagnostics={hermesDiagnostics}
+              hermesApiAvailability={hermesApiAvailability}
+              profile={defaultAgentProfile}
+              onRunFirstUseGuide={onRunFirstUseGuide}
+              firstUseGuideRunning={firstUseGuideRunning}
+            />
+          )}
+
+          {activeSection === 'hermesAgent' && <>
+            <div className="settings-head"><h2>Hermes Agent</h2></div>
+            <div className="settings-section-head"><h3>Runtime 与诊断</h3></div>
             <HermesRuntimePanel runtime={hermesRuntime} bootstrap={hermesBootstrap} localStatus={hermesStatus} diagnostics={hermesDiagnostics} apiAvailability={hermesApiAvailability} onStart={onStartHermesRuntime} onRefresh={onRefreshHermesRuntime} />
-            <UpdatesPanel runtime={hermesRuntime} status={updatesStatus} busy={updatesBusy} error={updatesError} result={updatesResult} onCheck={onCheckUpdates} onCheckRuntime={onCheckHermesRuntime} onInstallRuntime={onInstallHermesRuntime} onActivateRuntime={onActivateHermesRuntime} onUseBundledRuntime={onUseBundledHermesRuntime} onDeleteRuntime={onDeleteHermesRuntime} onUpdateFrakioWork={onUpdateFrakioWork} />
+            <HermesBackupPanel
+              status={updatesStatus}
+              busy={updatesBusy}
+              onCreate={onCreateHermesBackup}
+              onRollback={onRollbackHermesBackup}
+              onDelete={onDeleteHermesBackup}
+              onCleanup={onCleanupHermesBackups}
+            />
+            {(hermesError || updatesError) && <div className="form-error">{hermesError || updatesError}</div>}
+          </>}
+
+          {activeSection === 'updates' && <>
+            <div className="settings-head"><h2>版本更新</h2></div>
+            <UpdatesPanel
+              runtime={hermesRuntime}
+              status={updatesStatus}
+              busy={updatesBusy}
+              error={updatesError}
+              result={updatesResult}
+              desktopUpdateState={desktopUpdateState}
+              onCheckDesktopUpdate={onCheckDesktopUpdate}
+              onDownloadDesktopUpdate={onDownloadDesktopUpdate}
+              onCancelDesktopUpdate={onCancelDesktopUpdate}
+              onOpenDesktopUpdate={onOpenDesktopUpdate}
+              onCheckRuntime={onCheckHermesRuntime}
+              onInstallRuntime={onInstallHermesRuntime}
+              onActivateRuntime={onActivateHermesRuntime}
+              onUseBundledRuntime={onUseBundledHermesRuntime}
+              onDeleteRuntime={onDeleteHermesRuntime}
+            />
           </>}
 
           {activeSection === 'agents' && (
@@ -8401,50 +10366,76 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
           )}
 
           {activeSection === 'profile' && (
-            <UserProfilePanel
-              userProfile={userProfile}
-              defaultAgent={defaultAgent}
-              onSaved={onUserProfileSaved}
-            />
+            <>
+              <div className="settings-head"><h2>个人资料</h2></div>
+              <UserProfilePanel
+                userProfile={userProfile}
+                defaultAgent={defaultAgent}
+                onSaved={onUserProfileSaved}
+              />
+            </>
           )}
 
           {activeSection === 'workbench' && <>
             <div className="settings-head"><h2>工作台</h2></div>
+            <div className="settings-section-head"><h3>工作台偏好</h3></div>
+            <SettingsPanel ariaLabel="工作台偏好">
+              <SettingsRow title="新对话标语" description="显示在新对话输入框上方的提示语。">
+                <SettingsField><input value={uiSettings.newChatPrompt || '我们接下来做点什么？'} onChange={(event) => onUpdateUi({ newChatPrompt: event.target.value })} /></SettingsField>
+              </SettingsRow>
+              <SettingsRow title="发送键" description="选择在输入框中发送消息的快捷键。">
+                <SettingsField><select value={uiSettings.sendKey || 'enter'} onChange={(event) => onUpdateUi({ sendKey: event.target.value as WorkbenchUiSettings['sendKey'] })}><option value="enter">Enter 发送</option><option value="mod-enter">Cmd/Ctrl + Enter 发送</option></select></SettingsField>
+              </SettingsRow>
+              <SettingsRow title="默认操作权限" description="新对话采用的外部操作审批方式。">
+                <SettingsField><select value={uiSettings.defaultPermissionMode || 'manual'} onChange={(event) => onUpdateUi({ defaultPermissionMode: event.target.value as PermissionMode })}>{(['manual', 'smart', 'off'] as const).map((mode) => <option key={mode} value={mode}>{permissionLabel(mode)}</option>)}</select></SettingsField>
+              </SettingsRow>
+              <SettingsRow title="全局决策 Agent" description="在没有明确指定时负责全局决策的 Agent。">
+                <SettingsField><select value={uiSettings.fallbackDecisionAgentId || uiSettings.defaultAgentId || ''} onChange={(event) => onUpdateUi({ fallbackDecisionAgentId: event.target.value })}>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></SettingsField>
+              </SettingsRow>
+              <SettingsRow title="上下文压缩阈值" description="达到该 Token 数后开始压缩长对话。">
+                <SettingsField><input type="number" value={uiSettings.contextTriggerTokens || 500000} onChange={(event) => onUpdateUi({ contextTriggerTokens: Number(event.target.value) })} /></SettingsField>
+              </SettingsRow>
+              <SettingsRow title="群聊触发 Token" description="群聊达到该长度后触发上下文处理。">
+                <SettingsField><input type="number" value={uiSettings.groupChatTriggerTokens || 100000} onChange={(event) => onUpdateUi({ groupChatTriggerTokens: Number(event.target.value) })} /></SettingsField>
+              </SettingsRow>
+              <SettingsRow title="历史尾部消息数" description="压缩后始终保留的最近消息数量。">
+                <SettingsField><input type="number" value={uiSettings.historyTailMessages || 10} onChange={(event) => onUpdateUi({ historyTailMessages: Number(event.target.value) })} /></SettingsField>
+              </SettingsRow>
+              <SettingsRow title="Agent 间 @ 路由上限" description="控制一轮对话中 Agent 之间允许继续转发的深度。">
+                <SettingsField><select value={uiSettings.agentMentionMaxDepth === 'unlimited' ? 'unlimited' : 'fixed'} onChange={(event) => onUpdateUi({ agentMentionMaxDepth: event.target.value === 'unlimited' ? 'unlimited' : (typeof uiSettings.agentMentionMaxDepth === 'number' ? uiSettings.agentMentionMaxDepth : 2) })}><option value="fixed">固定次数</option><option value="unlimited">无限制</option></select></SettingsField>
+              </SettingsRow>
+              {uiSettings.agentMentionMaxDepth !== 'unlimited' && (
+                <SettingsRow title="最多转发次数" description="设置固定路由模式下允许的转发次数。">
+                  <SettingsField><input type="number" min="0" step="1" value={typeof uiSettings.agentMentionMaxDepth === 'number' ? uiSettings.agentMentionMaxDepth : 2} onChange={(event) => onUpdateUi({ agentMentionMaxDepth: Math.max(0, Math.floor(Number(event.target.value) || 0)) })} /></SettingsField>
+                </SettingsRow>
+              )}
+              <SettingsInlineNote>无限制模式仍会阻止重复循环，并在单轮达到 64 次 Agent 运行时自动停止。</SettingsInlineNote>
+            </SettingsPanel>
+            <WorkbenchResponseSettings uiSettings={uiSettings} onUpdateUi={onUpdateUi} />
+            <WorkbenchProfileSyncPanel
+              title={localHermesTitle}
+              detail={localHermesDetail}
+              hint={localHermesHint}
+              canSync={canSyncHermes}
+              busy={isImportingHermes}
+              error={hermesError}
+              onSync={onImportHermes}
+            />
+          </>}
+
+          {activeSection === 'appearance' && <AppearanceSettingsPage uiSettings={uiSettings} pinnedNav={pinnedNav} onUpdateUi={onUpdateUi} onTogglePinned={onTogglePinned} />}
+
+          {activeSection === 'privacy' && <>
+            <div className="settings-head"><h2>隐私</h2></div>
             <TelemetrySettingsPanel uiSettings={uiSettings} status={telemetryStatus} onUpdateUi={onUpdateUi} />
-            <WorkbenchDisplaySettings uiSettings={uiSettings} onUpdateUi={onUpdateUi} />
-            <div className="settings-section-head spaced"><h3>工作台偏好</h3></div>
-            <div className="preference-grid">
-              <label className="wide">新对话标语<input value={uiSettings.newChatPrompt || '我们接下来做点什么？'} onChange={(event) => onUpdateUi({ newChatPrompt: event.target.value })} /></label>
-              <label>发送键<select value={uiSettings.sendKey || 'enter'} onChange={(event) => onUpdateUi({ sendKey: event.target.value as WorkbenchUiSettings['sendKey'] })}><option value="enter">Enter 发送</option><option value="mod-enter">Cmd/Ctrl + Enter 发送</option></select></label>
-              <label>默认操作权限<select value={uiSettings.defaultPermissionMode || 'manual'} onChange={(event) => onUpdateUi({ defaultPermissionMode: event.target.value as PermissionMode })}>{(['manual', 'smart', 'off'] as const).map((mode) => <option key={mode} value={mode}>{permissionLabel(mode)}</option>)}</select></label>
-              <label>全局决策 Agent<select value={uiSettings.fallbackDecisionAgentId || uiSettings.defaultAgentId || ''} onChange={(event) => onUpdateUi({ fallbackDecisionAgentId: event.target.value })}>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>
-              <label>上下文压缩阈值<input type="number" value={uiSettings.contextTriggerTokens || 500000} onChange={(event) => onUpdateUi({ contextTriggerTokens: Number(event.target.value) })} /></label>
-              <label>群聊触发 Token<input type="number" value={uiSettings.groupChatTriggerTokens || 100000} onChange={(event) => onUpdateUi({ groupChatTriggerTokens: Number(event.target.value) })} /></label>
-              <label>历史尾部消息数<input type="number" value={uiSettings.historyTailMessages || 10} onChange={(event) => onUpdateUi({ historyTailMessages: Number(event.target.value) })} /></label>
-              <label>Agent 间 @ 路由上限<select value={uiSettings.agentMentionMaxDepth === 'unlimited' ? 'unlimited' : 'fixed'} onChange={(event) => onUpdateUi({ agentMentionMaxDepth: event.target.value === 'unlimited' ? 'unlimited' : (typeof uiSettings.agentMentionMaxDepth === 'number' ? uiSettings.agentMentionMaxDepth : 2) })}><option value="fixed">固定次数</option><option value="unlimited">无限制</option></select></label>
-              {uiSettings.agentMentionMaxDepth !== 'unlimited' && <label>最多转发次数<input type="number" min="0" step="1" value={typeof uiSettings.agentMentionMaxDepth === 'number' ? uiSettings.agentMentionMaxDepth : 2} onChange={(event) => onUpdateUi({ agentMentionMaxDepth: Math.max(0, Math.floor(Number(event.target.value) || 0)) })} /></label>}
-              <p className="preference-help">无限制仍会阻止重复循环，并在单轮达到 64 次 Agent 运行时自动停止。</p>
-            </div>
-            <div className="settings-section-head"><h3>左侧置顶</h3></div>
-            <div className="pin-grid">
-              {railNavItems.map((item) => {
-                const Icon = item.icon;
-                return (
-                  <button className={pinnedNav[item.id] === false ? 'pin-card' : 'pin-card active'} key={item.id} onClick={() => onTogglePinned(item.id)}>
-                    <Icon size={16} />
-                    <span>{item.label}</span>
-                    <CheckCircle2 size={16} />
-                  </button>
-                );
-              })}
-            </div>
           </>}
 
           {activeSection === 'models' && <ModelCenter models={models} profiles={localProfiles} defaultProfile={defaultAgentProfile || uiSettings.defaultProfile || 'default'} modelError={modelError} saveModel={saveModel} deleteModel={deleteModel} fetchAvailableModels={fetchAvailableModels} onCapabilityChanged={onCapabilityChanged} />}
+          {activeSection === 'skills' && <HermesModulesPage kind="skill" onStartProfileGateway={onStartProfileGateway} />}
           {activeSection === 'archivedThreads' && <ArchivedThreadsPanel threads={archivedThreads} onRefresh={onRefreshArchivedThreads} onRestore={onRestoreThread} onDelete={onDeleteThread} />}
           {activeSection === 'mcp' && <McpSettingsPage profiles={localProfiles} defaultProfile={defaultAgentProfile || uiSettings.defaultProfile || hermesBootstrap?.approval.profileName || 'default'} />}
           {activeSection === 'channels' && <ChannelsPage profiles={localProfiles} defaultProfile={defaultAgentProfile || uiSettings.defaultProfile || hermesBootstrap?.approval.profileName || 'default'} embedded />}
-          {activeSection === 'plugins' && <PluginsPage agents={agents} profiles={localProfiles} embedded />}
+          {activeSection === 'plugins' && <HermesModulesPage kind="plugin" onStartProfileGateway={onStartProfileGateway} />}
           {activeSection === 'jobs' && <JobsPage profiles={localProfiles} defaultProfile={defaultAgentProfile || uiSettings.defaultProfile || hermesBootstrap?.approval.profileName || 'default'} embedded />}
           {activeSection === 'monitoring' && <MonitoringPage embedded />}
           {activeSection === 'vaults' && <>
@@ -8470,6 +10461,291 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
             </div>
           </>}
       </div>
+    </section>
+  );
+}
+
+type ManagedModuleAction = { type: 'promote' | 'demote' | 'delete'; item: ManagedHermesModule };
+
+function ManagedModuleAvatar({ name, avatarUrl, color }: { name: string; avatarUrl?: string; color?: string }) {
+  return (
+    <span className="managed-module-avatar" style={avatarUrl ? undefined : { background: color || '#64748b' }} aria-hidden="true">
+      {avatarUrl ? <img src={avatarUrl} alt="" /> : name.slice(0, 1).toUpperCase()}
+    </span>
+  );
+}
+
+function HermesModulesPage({ kind, onStartProfileGateway }: { kind: ManagedHermesModuleKind; onStartProfileGateway: (profileName: string) => Promise<void> }) {
+  const title = kind === 'skill' ? '技能' : '插件';
+  const [payload, setPayload] = useState<ManagedHermesModulesPayload | null>(null);
+  const [scope, setScope] = useState('global');
+  const [query, setQuery] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const [action, setAction] = useState<ManagedModuleAction | null>(null);
+  const [demoteTarget, setDemoteTarget] = useState('');
+  const [restartProfiles, setRestartProfiles] = useState<string[]>([]);
+  const [editor, setEditor] = useState<{ item: ManagedHermesModule; content: string; loading: boolean; saving: boolean } | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const data = await requestJson<ManagedHermesModulesPayload>(`/api/hermes-modules?kind=${kind}`);
+      setPayload(data);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : `${title}读取失败。`);
+    } finally {
+      setLoading(false);
+    }
+  }, [kind, title]);
+
+  useEffect(() => {
+    setScope('global');
+    setPayload(null);
+    void load();
+  }, [kind, load]);
+
+  const selectedProfile = payload?.profiles.find((profile) => profile.profileName === scope) || null;
+  const sourceItems = scope === 'global'
+    ? payload?.global || []
+    : (payload?.profile || []).filter((item) => item.profileName === scope);
+  const normalizedQuery = query.trim().toLowerCase();
+  const items = sourceItems.filter((item) => !normalizedQuery || `${item.name} ${item.description} ${item.category} ${item.originAgentName || ''}`.toLowerCase().includes(normalizedQuery));
+
+  function acceptMutation(result: { modules?: ManagedHermesModulesPayload; restartRequiredProfiles?: string[] }) {
+    if (result.modules) setPayload(result.modules);
+    if (result.restartRequiredProfiles?.length) setRestartProfiles(result.restartRequiredProfiles);
+  }
+
+  async function runAction(target: ManagedModuleAction) {
+    const key = `${target.type}:${target.item.scope}:${target.item.name}`;
+    setBusy(key);
+    setError('');
+    try {
+      if (target.type === 'promote') {
+        acceptMutation(await requestJson<{ modules?: ManagedHermesModulesPayload; restartRequiredProfiles?: string[] }>('/api/hermes-modules/scope', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'promote', kind, name: target.item.name, profileName: target.item.profileName }),
+        }));
+        setScope('global');
+      } else if (target.type === 'demote') {
+        const targetProfileName = target.item.originProfileName || demoteTarget;
+        acceptMutation(await requestJson<{ modules?: ManagedHermesModulesPayload; restartRequiredProfiles?: string[] }>('/api/hermes-modules/scope', {
+          method: 'POST',
+          body: JSON.stringify({ action: 'demote', kind, name: target.item.name, targetProfileName }),
+        }));
+        setScope(targetProfileName);
+      } else {
+        acceptMutation(await requestJson<{ modules?: ManagedHermesModulesPayload; restartRequiredProfiles?: string[] }>('/api/hermes-modules', {
+          method: 'DELETE',
+          body: JSON.stringify({ kind, name: target.item.name, scope: target.item.scope, profileName: target.item.profileName }),
+        }));
+      }
+      setAction(null);
+      setDemoteTarget('');
+    } catch (err) {
+      const message = err instanceof Error ? err.message : '操作失败。';
+      const details = (err as Error & { details?: { conflicts?: Array<{ agentName?: string; profileName?: string }> } })?.details;
+      const conflicts = details?.conflicts?.map((item) => item.agentName || item.profileName).filter(Boolean).join('、');
+      setError(conflicts ? `${message} 冲突来源：${conflicts}` : message);
+      setAction(null);
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function toggle(item: ManagedHermesModule) {
+    setBusy(`state:${item.name}`);
+    setError('');
+    try {
+      acceptMutation(await requestJson<{ modules?: ManagedHermesModulesPayload; restartRequiredProfiles?: string[] }>('/api/hermes-modules/state', {
+        method: 'PUT',
+        body: JSON.stringify({ kind, name: item.name, profileName: item.profileName, enabled: !item.enabled }),
+      }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '状态保存失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  async function openEditor(item: ManagedHermesModule) {
+    setEditor({ item, content: '', loading: true, saving: false });
+    try {
+      const params = new URLSearchParams({ kind, scope: item.scope, name: item.name, ...(item.profileName ? { profileName: item.profileName } : {}) });
+      const result = await requestJson<{ content: string }>(`/api/hermes-modules/file?${params.toString()}`);
+      setEditor({ item, content: result.content || '', loading: false, saving: false });
+    } catch (err) {
+      setEditor(null);
+      setError(err instanceof Error ? err.message : '模块文件读取失败。');
+    }
+  }
+
+  async function saveEditor() {
+    if (!editor) return;
+    setEditor({ ...editor, saving: true });
+    try {
+      const result = await requestJson<{ modules: ManagedHermesModulesPayload; restartRequiredProfiles?: string[] }>('/api/hermes-modules/file', {
+        method: 'PUT',
+        body: JSON.stringify({ kind, scope: editor.item.scope, name: editor.item.name, profileName: editor.item.profileName, content: editor.content }),
+      });
+      acceptMutation(result);
+      setEditor(null);
+    } catch (err) {
+      setEditor((current) => current ? { ...current, saving: false } : current);
+      setError(err instanceof Error ? err.message : '模块保存失败。');
+    }
+  }
+
+  async function restartAffectedProfiles() {
+    setBusy('restart');
+    setError('');
+    try {
+      for (const profileName of restartProfiles) await onStartProfileGateway(profileName);
+      setRestartProfiles([]);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Agent 网关重启失败。');
+    } finally {
+      setBusy('');
+    }
+  }
+
+  function requestAction(next: ManagedModuleAction) {
+    setAction(next);
+    if (next.type === 'demote' && !next.item.originProfileName) setDemoteTarget(payload?.profiles[0]?.profileName || '');
+  }
+
+  const actionTitle = action?.type === 'promote' ? `将 ${action.item.name} 设为全局？`
+    : action?.type === 'demote' ? `取消 ${action.item.name} 的全局共享？`
+      : action ? `删除 ${action.item.name}？` : '';
+  const actionDescription = action?.type === 'promote'
+    ? `内容完全相同的副本会被归档，来源记录为 ${action.item.agentName || action.item.profileName}。`
+    : action?.type === 'demote'
+      ? '取消后只保留在接收它的 Agent 中，其他 Agent 将不再继承。'
+      : '模块会移入可恢复归档，并从当前范围移除。';
+
+  return (
+    <section className="managed-modules-page" data-module-kind={kind}>
+      <div className="settings-head managed-modules-head">
+        <div><h2>{title}</h2><p>{kind === 'skill' ? '管理所有 Agent 的技能范围与启用状态。' : '管理所有 Agent 的插件范围与运行状态。'}</p></div>
+        <button className="secondary-btn" onClick={() => void load()} disabled={loading}><RefreshCw className={loading ? 'spin' : ''} size={15} />刷新</button>
+      </div>
+
+      <div className="managed-scope-strip" aria-label={`${title}范围`}>
+        <button className={scope === 'global' ? 'selected' : ''} onClick={() => setScope('global')}>
+          <span className="managed-global-avatar"><Sparkles size={16} /></span>
+          <span><strong>全局</strong><small>{payload?.global.length || 0} 个共享{title}</small></span>
+        </button>
+        {(payload?.profiles || []).map((profile) => (
+          <button className={scope === profile.profileName ? 'selected' : ''} key={profile.profileName} onClick={() => setScope(profile.profileName)}>
+            <ManagedModuleAvatar name={profile.name} avatarUrl={profile.avatarUrl} color={profile.color} />
+            <span><strong>{profile.name}</strong><small>{profile.role || profile.profileName}</small></span>
+          </button>
+        ))}
+      </div>
+
+      <div className="managed-module-toolbar">
+        <div>
+          <strong>{scope === 'global' ? `全局${title}` : `${selectedProfile?.name || scope} 的${title}`}</strong>
+          <span>{scope === 'global' ? '所有 Agent 统一可用' : `另继承 ${payload?.global.length || 0} 个全局${title}`}</span>
+        </div>
+        <label className="managed-module-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder={`搜索${title}`} /></label>
+      </div>
+
+      {error && <div className="form-error managed-module-error">{error}</div>}
+      {loading && !payload ? <div className="empty-state">正在读取{title}...</div> : items.length ? (
+        <div className="managed-module-list">
+          {items.map((item) => {
+            const itemBusy = busy.includes(item.name);
+            const duplicates = item.duplicateProfileNames || [];
+            return (
+              <article className="managed-module-row" key={`${item.scope}-${item.profileName}-${item.name}`}>
+                <div className="managed-module-main">
+                  <div className="managed-module-title">
+                    <span className={item.enabled ? 'managed-state-dot enabled' : 'managed-state-dot'} />
+                    <strong>{item.name}</strong>
+                    <em className={item.enabled ? 'enabled' : ''}>{item.enabled ? '已启用' : '未启用'}</em>
+                  </div>
+                  <p>{item.description || `这个${title}暂时没有描述。`}</p>
+                  <div className="managed-module-meta">
+                    <span>{item.scope === 'global' ? '全局共享' : 'Agent 独有'}</span>
+                    {item.category && <span>{item.category}</span>}
+                    {duplicates.length > 0 && <span>{duplicates.length + 1} 个相同副本</span>}
+                    {item.scope === 'global' && (
+                      <span className="managed-module-origin">
+                        {item.originAgentName ? <ManagedModuleAvatar name={item.originAgentName} avatarUrl={item.originAvatarUrl} color={item.originColor} /> : <span className="managed-origin-native"><Sparkles size={11} /></span>}
+                        来源：{item.originAgentName || '原生全局'}
+                      </span>
+                    )}
+                  </div>
+                </div>
+                <div className="managed-module-actions">
+                  {item.scope === 'profile' && (
+                    <label className="module-switch" title={item.enabled ? '已启用' : '未启用'}>
+                      <input type="checkbox" checked={item.enabled} disabled={itemBusy} onChange={() => void toggle(item)} />
+                      <span />
+                    </label>
+                  )}
+                  <button className="secondary-btn" onClick={() => void openEditor(item)} disabled={itemBusy}><Pencil size={14} />编辑</button>
+                  {item.scope === 'profile'
+                    ? <button className="secondary-btn" onClick={() => requestAction({ type: 'promote', item })} disabled={itemBusy}><ArrowUpFromLine size={14} />设为全局</button>
+                    : <button className="secondary-btn" onClick={() => requestAction({ type: 'demote', item })} disabled={itemBusy}><ArrowDownToLine size={14} />取消全局</button>}
+                  <button className="secondary-btn danger" onClick={() => requestAction({ type: 'delete', item })} disabled={itemBusy}><Trash2 size={14} />删除</button>
+                </div>
+              </article>
+            );
+          })}
+        </div>
+      ) : <div className="empty-state">{normalizedQuery ? `没有匹配的${title}。` : scope === 'global' ? `还没有全局${title}。` : `这个 Agent 还没有独有${title}。`}</div>}
+
+      {action && (
+        <AppAlertDialog open onOpenChange={(open) => { if (!open && !busy) setAction(null); }}>
+          <AppAlertDialogContent>
+            <AppAlertDialogTitle className="app-alert-title">{actionTitle}</AppAlertDialogTitle>
+            <AppAlertDialogDescription className="app-alert-description">
+              <strong>{action.item.name}</strong>
+              <span>{actionDescription}</span>
+            </AppAlertDialogDescription>
+            {action.type === 'demote' && !action.item.originProfileName && (
+              <label className="managed-demote-target">接收 Agent<select value={demoteTarget} onChange={(event) => setDemoteTarget(event.target.value)}>{(payload?.profiles || []).map((profile) => <option value={profile.profileName} key={profile.profileName}>{profile.name}</option>)}</select></label>
+            )}
+            <div className="app-alert-actions">
+              <AppAlertDialogCancel className="cancel" onClick={() => setAction(null)}>取消</AppAlertDialogCancel>
+              <AppAlertDialogAction className={action.type === 'delete' ? 'danger' : ''} disabled={Boolean(busy) || (action.type === 'demote' && !action.item.originProfileName && !demoteTarget)} onClick={() => void runAction(action)}>
+                {action.type === 'promote' ? '设为全局' : action.type === 'demote' ? '取消全局' : '删除'}
+              </AppAlertDialogAction>
+            </div>
+          </AppAlertDialogContent>
+        </AppAlertDialog>
+      )}
+
+      {restartProfiles.length > 0 && (
+        <AppAlertDialog open onOpenChange={(open) => { if (!open && busy !== 'restart') setRestartProfiles([]); }}>
+          <AppAlertDialogContent>
+            <AppAlertDialogTitle className="app-alert-title">重启受影响的 Agent？</AppAlertDialogTitle>
+            <AppAlertDialogDescription className="app-alert-description">
+              <strong>{restartProfiles.map((profileName) => payload?.profiles.find((profile) => profile.profileName === profileName)?.name || profileName).join('、')}</strong>
+              <span>插件配置已保存。重启这些网关后立即生效；取消则在下次启动时生效。</span>
+            </AppAlertDialogDescription>
+            <div className="app-alert-actions">
+              <AppAlertDialogCancel className="cancel" onClick={() => setRestartProfiles([])}>下次启动生效</AppAlertDialogCancel>
+              <AppAlertDialogAction disabled={busy === 'restart'} onClick={() => void restartAffectedProfiles()}>{busy === 'restart' ? '重启中' : '立即重启'}</AppAlertDialogAction>
+            </div>
+          </AppAlertDialogContent>
+        </AppAlertDialog>
+      )}
+
+      {editor && (
+        <AppDialog open onOpenChange={(open) => { if (!open && !editor.saving) setEditor(null); }}>
+          <AppDialogContent className="managed-module-editor-dialog">
+            <div className="modal-head"><div><AppDialogTitle>{editor.item.name}</AppDialogTitle><AppDialogDescription>{editor.item.scope === 'global' ? '全局' : editor.item.agentName || editor.item.profileName} · {kind === 'skill' ? 'SKILL.md' : '插件清单'}</AppDialogDescription></div><AppDialogClose className="icon-btn" aria-label="关闭"><X size={18} /></AppDialogClose></div>
+            {editor.loading ? <div className="empty-state">正在读取文件...</div> : <textarea value={editor.content} onChange={(event) => setEditor((current) => current ? { ...current, content: event.target.value } : current)} disabled={editor.saving} spellCheck={false} />}
+            <div className="modal-actions"><button className="secondary-btn" onClick={() => setEditor(null)} disabled={editor.saving}>取消</button><button className="send-btn" onClick={() => void saveEditor()} disabled={editor.loading || editor.saving}>{editor.saving ? '保存中' : '保存'}</button></div>
+          </AppDialogContent>
+        </AppDialog>
+      )}
     </section>
   );
 }
@@ -8766,6 +11042,7 @@ function calculateProviderModelMenuPlacement(trigger: DOMRect, viewportWidth: nu
 function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLabel = '未配置模型', className = '', ariaLabel = '切换模型', title = '切换模型', allowDefault = false, usingDefault = false, capabilities, runOverride, onRunOverrideChange }: { models: ModelProfile[]; value: string; onChange: (value: string) => void; agentName?: string; emptyLabel?: string; className?: string; ariaLabel?: string; title?: string; allowDefault?: boolean; usingDefault?: boolean; capabilities?: Record<string, ModelCapability>; runOverride?: AgentRunOverride; onRunOverrideChange?: (override: AgentRunOverride) => void }) {
   const [open, setOpen] = useState(false);
   const [section, setSection] = useState<'root' | 'model' | 'reasoning' | 'speed'>('model');
+  const [narrowMenu, setNarrowMenu] = useState(() => window.innerWidth < 720);
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
   const [submenuSide, setSubmenuSide] = useState<'left' | 'right'>('right');
   const [openAbove, setOpenAbove] = useState(true);
@@ -8783,6 +11060,12 @@ function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLab
   const speedLabel = selectedCapability?.serviceTiers.length
     ? selectedTier?.name || (runOverride?.speedMode === 'standard' ? '标准' : '跟随 Agent')
     : selectedCapability?.serviceTierStatus === 'unsupported' ? '该模型不支持' : '能力未确认';
+
+  useEffect(() => {
+    const updateNarrowMenu = () => setNarrowMenu(window.innerWidth < 720);
+    window.addEventListener('resize', updateNarrowMenu);
+    return () => window.removeEventListener('resize', updateNarrowMenu);
+  }, []);
 
   const positionMenu = useCallback(() => {
     const trigger = rootRef.current?.getBoundingClientRect();
@@ -8844,8 +11127,8 @@ function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLab
       <header><button type="button" onClick={() => setSection('root')} aria-label="返回"><ArrowLeft size={15} /></button><strong>模型</strong></header>
       <div className="provider-model-scroll">
         {allowDefault && (
-          <button type="button" className={`provider-model-follow-default ${usingDefault ? 'selected' : ''}`} onClick={() => chooseModel('')}>
-            <span>跟随 Agent 默认模型</span><small>默认模型变化时同步更新</small>{usingDefault && <Check size={14} aria-hidden="true" />}
+          <button type="button" className={`provider-model-follow-default ${usingDefault ? 'selected' : ''}`} onClick={() => chooseModel('')} title="默认模型变化时同步更新">
+            <span>跟随 Agent 默认模型</span>{usingDefault && <Check size={14} aria-hidden="true" />}
           </button>
         )}
         {providers.length ? providers.map((provider) => (
@@ -8866,7 +11149,7 @@ function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLab
     <section className="provider-model-subpanel">
       <header><button type="button" onClick={() => setSection('root')} aria-label="返回"><ArrowLeft size={15} /></button><strong>推理强度</strong></header>
       <div className="provider-setting-options">
-        <button className={!runOverride?.reasoningEffort ? 'selected' : ''} onClick={() => onRunOverrideChange?.({ ...runOverride, reasoningEffort: undefined })}><span>跟随 Agent</span><small>不发送覆盖参数</small>{!runOverride?.reasoningEffort && <Check size={14} aria-hidden="true" />}</button>
+        <button className={!runOverride?.reasoningEffort ? 'selected' : ''} onClick={() => onRunOverrideChange?.({ ...runOverride, reasoningEffort: undefined })} title="不发送推理强度覆盖参数"><span>跟随 Agent</span>{!runOverride?.reasoningEffort && <Check size={14} aria-hidden="true" />}</button>
         {(selectedCapability?.reasoningEfforts || []).map((effort) => { const isSelected = runOverride?.reasoningEffort === effort; return <button className={isSelected ? 'selected' : ''} key={effort} onClick={() => onRunOverrideChange?.({ ...runOverride, reasoningEffort: effort })}><span>{reasoningLabels[effort] || effort}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>; })}
       </div>
     </section>
@@ -8876,20 +11159,150 @@ function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLab
     <section className="provider-model-subpanel">
       <header><button type="button" onClick={() => setSection('root')} aria-label="返回"><ArrowLeft size={15} /></button><strong>速度</strong></header>
       <div className="provider-setting-options">
-        <button className={!runOverride?.speedMode ? 'selected' : ''} onClick={() => onRunOverrideChange?.({ ...runOverride, speedMode: undefined })}><span>跟随 Agent</span><small>不发送覆盖参数</small>{!runOverride?.speedMode && <Check size={14} aria-hidden="true" />}</button>
+        <button className={!runOverride?.speedMode ? 'selected' : ''} onClick={() => onRunOverrideChange?.({ ...runOverride, speedMode: undefined })} title="不发送速度覆盖参数"><span>跟随 Agent</span>{!runOverride?.speedMode && <Check size={14} aria-hidden="true" />}</button>
         <button className={runOverride?.speedMode === 'standard' ? 'selected' : ''} onClick={() => onRunOverrideChange?.({ ...runOverride, speedMode: 'standard' })}><span>标准</span>{runOverride?.speedMode === 'standard' && <Check size={14} aria-hidden="true" />}</button>
-        {(selectedCapability?.serviceTiers || []).map((tier) => { const isSelected = runOverride?.speedMode === tier.id || runOverride?.speedMode === 'fast'; return <button className={isSelected ? 'selected' : ''} key={tier.id} onClick={() => onRunOverrideChange?.({ ...runOverride, speedMode: tier.id })}><span>{tier.name}</span>{(tier.billingNotice || tier.description) && <small>{tier.billingNotice || tier.description}</small>}{isSelected && <Check size={14} aria-hidden="true" />}</button>; })}
+        {(selectedCapability?.serviceTiers || []).map((tier) => { const isSelected = runOverride?.speedMode === tier.id || runOverride?.speedMode === 'fast'; return <button className={isSelected ? 'selected' : ''} key={tier.id} onClick={() => onRunOverrideChange?.({ ...runOverride, speedMode: tier.id })} title={tier.billingNotice || tier.description || tier.name}><span>{tier.name}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>; })}
       </div>
     </section>
   );
 
   const rootPanel = advanced ? (
     <section className="provider-model-root-panel">
-      <button type="button" className={section === 'model' ? 'active' : ''} onClick={() => setSection('model')}><Bot size={15} /><span><strong>模型</strong><small>{selectedLabel}</small></span><ChevronRight size={14} /></button>
-      <button type="button" className={section === 'reasoning' ? 'active' : ''} onClick={() => setSection('reasoning')} disabled={!selectedCapability?.reasoning}><Brain size={15} /><span><strong>推理强度</strong><small>{selectedCapability?.reasoning ? reasoningLabel : selectedCapability?.reasoningStatus === 'unsupported' ? '该模型不支持' : '能力未确认'}</small></span><ChevronRight size={14} /></button>
-      <button type="button" className={section === 'speed' ? 'active' : ''} onClick={() => setSection('speed')} disabled={!selectedCapability?.serviceTiers.length}><Gauge size={15} /><span><strong>速度</strong><small>{speedLabel}</small></span><ChevronRight size={14} /></button>
+      <button type="button" className={section === 'model' ? 'active' : ''} onClick={() => setSection('model')}><span>模型</span><em>{selectedLabel}</em><ChevronRight size={14} /></button>
+      <button type="button" className={section === 'reasoning' ? 'active' : ''} onClick={() => setSection('reasoning')} disabled={!selectedCapability?.reasoning} title={selectedCapability?.reasoning ? '调整当前运行的推理强度' : selectedCapability?.reasoningStatus === 'unsupported' ? '该模型不支持' : '能力未确认'}><span>推理强度</span><em>{selectedCapability?.reasoning ? reasoningLabel : selectedCapability?.reasoningStatus === 'unsupported' ? '不支持' : '未确认'}</em><ChevronRight size={14} /></button>
+      <button type="button" className={section === 'speed' ? 'active' : ''} onClick={() => setSection('speed')} disabled={!selectedCapability?.serviceTiers.length} title={speedLabel}><span>速度</span><em>{selectedCapability?.serviceTiers.length ? speedLabel : selectedCapability?.serviceTierStatus === 'unsupported' ? '不支持' : '未确认'}</em><ChevronRight size={14} /></button>
     </section>
   ) : null;
+
+  if (advanced && !narrowMenu) {
+    const reasoningAvailable = Boolean(selectedCapability?.reasoning);
+    const speedAvailable = Boolean(selectedCapability?.serviceTiers.length);
+    const reasoningStatus = reasoningAvailable
+      ? reasoningLabel
+      : selectedCapability?.reasoningStatus === 'unsupported' ? '不支持' : '未确认';
+    const compactSpeedLabel = speedAvailable ? speedLabel : selectedCapability?.serviceTierStatus === 'unsupported' ? '不支持' : '未确认';
+
+    return (
+      <AppMenu open={open} onOpenChange={setOpen} modal={false}>
+        <div className={`provider-model-picker ${className}`} ref={rootRef}>
+          <AppMenuTrigger asChild>
+            <button type="button" className="provider-model-trigger" disabled={!providers.length} aria-label={ariaLabel} title={title}>
+              {agentName && <span>{agentName}</span>}
+              <strong>{selectedLabel}{runOverride?.reasoningEffort ? ` · ${reasoningLabel}` : ''}</strong>
+              <ChevronDown size={14} />
+            </button>
+          </AppMenuTrigger>
+        </div>
+        <AppMenuContent className="provider-model-menu-v2" side="top" align="end" aria-label={title}>
+          <AppMenuSub>
+            <AppMenuSubTrigger className="provider-model-root-option">
+              <span>模型</span>
+              <em>{selectedLabel}</em>
+            </AppMenuSubTrigger>
+            <AppMenuSubContent className="provider-model-submenu-v2 provider-model-list-menu-v2" sideOffset={8} alignOffset={-5} aria-label="选择模型">
+              {allowDefault && (
+                <AppMenuItem className={usingDefault ? 'provider-model-option selected' : 'provider-model-option'} onSelect={() => chooseModel('')}>
+                  <span>跟随 Agent 默认模型</span>
+                  {usingDefault && <Check size={14} aria-hidden="true" />}
+                </AppMenuItem>
+              )}
+              {providers.length ? providers.map((provider) => (
+                <div className="provider-model-menu-group" role="group" aria-label={provider.name || provider.provider} key={provider.id}>
+                  <span className="provider-model-menu-group-label">{provider.name || provider.provider}</span>
+                  {modelNamesForProvider(provider).map((modelName) => {
+                    const itemValue = modelChoiceValue(provider, modelName);
+                    const isSelected = selected.value === itemValue;
+                    return (
+                      <AppMenuItem className={isSelected ? 'provider-model-option selected' : 'provider-model-option'} key={itemValue} onSelect={() => chooseModel(itemValue)}>
+                        <span>{modelName}</span>
+                        {isSelected && <Check size={14} aria-hidden="true" />}
+                      </AppMenuItem>
+                    );
+                  })}
+                </div>
+              )) : <span className="provider-model-empty">{emptyLabel}</span>}
+            </AppMenuSubContent>
+          </AppMenuSub>
+
+          <AppMenuSub>
+            <AppMenuSubTrigger
+              className="provider-model-root-option"
+              disabled={!reasoningAvailable}
+              title={reasoningAvailable ? '调整当前运行的推理强度' : reasoningStatus}
+            >
+              <span>推理强度</span>
+              <em>{reasoningStatus}</em>
+            </AppMenuSubTrigger>
+            <AppMenuSubContent className="provider-model-submenu-v2" sideOffset={8} alignOffset={-5} aria-label="选择推理强度">
+              <AppMenuItem
+                className={!runOverride?.reasoningEffort ? 'provider-model-option selected' : 'provider-model-option'}
+                onSelect={() => onRunOverrideChange?.({ ...runOverride, reasoningEffort: undefined })}
+                title="不发送推理强度覆盖参数"
+              >
+                <span>跟随 Agent</span>
+                {!runOverride?.reasoningEffort && <Check size={14} aria-hidden="true" />}
+              </AppMenuItem>
+              {(selectedCapability?.reasoningEfforts || []).map((effort) => {
+                const isSelected = runOverride?.reasoningEffort === effort;
+                return (
+                  <AppMenuItem
+                    className={isSelected ? 'provider-model-option selected' : 'provider-model-option'}
+                    key={effort}
+                    onSelect={() => onRunOverrideChange?.({ ...runOverride, reasoningEffort: effort })}
+                  >
+                    <span>{reasoningLabels[effort] || effort}</span>
+                    {isSelected && <Check size={14} aria-hidden="true" />}
+                  </AppMenuItem>
+                );
+              })}
+            </AppMenuSubContent>
+          </AppMenuSub>
+
+          <AppMenuSub>
+            <AppMenuSubTrigger
+              className="provider-model-root-option"
+              disabled={!speedAvailable}
+              title={speedAvailable ? '调整当前运行的速度' : compactSpeedLabel}
+            >
+              <span>速度</span>
+              <em>{compactSpeedLabel}</em>
+            </AppMenuSubTrigger>
+            <AppMenuSubContent className="provider-model-submenu-v2" sideOffset={8} alignOffset={-5} aria-label="选择速度">
+              <AppMenuItem
+                className={!runOverride?.speedMode ? 'provider-model-option selected' : 'provider-model-option'}
+                onSelect={() => onRunOverrideChange?.({ ...runOverride, speedMode: undefined })}
+                title="不发送速度覆盖参数"
+              >
+                <span>跟随 Agent</span>
+                {!runOverride?.speedMode && <Check size={14} aria-hidden="true" />}
+              </AppMenuItem>
+              <AppMenuItem
+                className={runOverride?.speedMode === 'standard' ? 'provider-model-option selected' : 'provider-model-option'}
+                onSelect={() => onRunOverrideChange?.({ ...runOverride, speedMode: 'standard' })}
+              >
+                <span>标准</span>
+                {runOverride?.speedMode === 'standard' && <Check size={14} aria-hidden="true" />}
+              </AppMenuItem>
+              {(selectedCapability?.serviceTiers || []).map((tier) => {
+                const isSelected = runOverride?.speedMode === tier.id || runOverride?.speedMode === 'fast';
+                return (
+                  <AppMenuItem
+                    className={isSelected ? 'provider-model-option selected' : 'provider-model-option'}
+                    key={tier.id}
+                    onSelect={() => onRunOverrideChange?.({ ...runOverride, speedMode: tier.id })}
+                    title={tier.billingNotice || tier.description || tier.name}
+                  >
+                    <span>{tier.name}</span>
+                    {isSelected && <Check size={14} aria-hidden="true" />}
+                  </AppMenuItem>
+                );
+              })}
+            </AppMenuSubContent>
+          </AppMenuSub>
+        </AppMenuContent>
+      </AppMenu>
+    );
+  }
 
   return (
     <div className={`provider-model-picker ${className}`} ref={rootRef}>
@@ -9091,81 +11504,6 @@ function AuxiliaryModelsPanel({ profile, groups }: { profile: string; groups: Mo
   );
 }
 
-function emptyMoaPreset(): MoaPreset {
-  return { enabled: true, reference_models: [{ provider: '', model: '' }], aggregator: { provider: '', model: '' }, reference_temperature: null, aggregator_temperature: null, max_tokens: 4096, reference_max_tokens: null, fanout: 'per_iteration' };
-}
-
-function CombinationModelsPanel({ profile, groups }: { profile: string; groups: ModelSlotGroup[] }) {
-  const [moa, setMoa] = useState<MoaConfig | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [error, setError] = useState('');
-  const [editing, setEditing] = useState<{ originalName: string; name: string; preset: MoaPreset } | null>(null);
-  const clone = <T,>(value: T): T => JSON.parse(JSON.stringify(value));
-
-  async function load() {
-    if (!profile) return;
-    setLoading(true); setError('');
-    try { setMoa(await requestJson<MoaConfig>(`/api/hermes/config/moa?profile=${encodeURIComponent(profile)}`)); }
-    catch (err: any) { setError(err.message || '组合模型配置读取失败'); }
-    finally { setLoading(false); }
-  }
-  useEffect(() => { void load(); }, [profile]);
-
-  async function persist(next: MoaConfig) {
-    setSaving(true); setError('');
-    try {
-      const data = await requestJson<{ moa: MoaConfig }>(`/api/hermes/config/moa?profile=${encodeURIComponent(profile)}`, { method: 'PUT', body: JSON.stringify({ moa: next }) });
-      setMoa(data.moa); setEditing(null);
-    } catch (err: any) { setError(err.message || '组合模型配置保存失败'); }
-    finally { setSaving(false); }
-  }
-
-  function saveEditor() {
-    if (!moa || !editing) return;
-    const name = editing.name.trim();
-    if (!/^[A-Za-z0-9_.-]{1,80}$/.test(name)) return setError('名称只能包含字母、数字、点、短横线和下划线。');
-    if (name !== editing.originalName && moa.presets[name]) return setError('同名组合模型已经存在。');
-    if (!editing.preset.reference_models.length || editing.preset.reference_models.some((slot) => !slot.provider || !slot.model)) return setError('至少需要一个完整的参考模型。');
-    if (!editing.preset.aggregator.provider || !editing.preset.aggregator.model) return setError('请选择汇总模型。');
-    const next = clone(moa);
-    if (editing.originalName && editing.originalName !== name) {
-      delete next.presets[editing.originalName];
-      if (next.default_preset === editing.originalName) next.default_preset = name;
-      if (next.active_preset === editing.originalName) next.active_preset = name;
-    }
-    next.presets[name] = clone(editing.preset);
-    if (!next.default_preset) next.default_preset = name;
-    void persist(next);
-  }
-
-  function updateSlot(kind: 'reference' | 'aggregator', index: number, field: keyof MoaModelSlot, value: string) {
-    setEditing((current) => {
-      if (!current) return current;
-      const preset = clone(current.preset);
-      const slot = kind === 'aggregator' ? preset.aggregator : preset.reference_models[index];
-      slot[field] = value;
-      if (field === 'provider') slot.model = '';
-      return { ...current, preset };
-    });
-  }
-
-  function modelOptions(provider: string) { return groups.find((group) => group.provider === provider)?.models || []; }
-  const rows = Object.entries(moa?.presets || {});
-  return <section className="model-routing-panel"><div className="model-routing-head"><div><h3>组合模型</h3><p>多个参考模型先给出视角，再由一个汇总模型负责最终回复和工具调用。</p></div><div className="top-actions"><button className="secondary-btn" onClick={() => void load()} disabled={loading}>{loading ? '刷新中' : '刷新'}</button><button className="send-btn" disabled={!moa} onClick={() => setEditing({ originalName: '', name: '', preset: emptyMoaPreset() })}>添加组合模型</button></div></div>
-    {error && <div className="form-error">{error}</div>}
-    <div className="model-routing-table combination-routing-table"><div className="model-routing-row head"><span>名称</span><span>参考模型</span><span>汇总模型</span><span>操作</span></div>{rows.map(([name, preset]) => <div className="model-routing-row" key={name}><strong>{name}{moa?.default_preset === name && <small className="default-badge">默认</small>}</strong><span className="mono-cell">{preset.reference_models.map((slot) => `${slot.provider} / ${slot.model}`).join(', ')}</span><span className="mono-cell">{preset.aggregator.provider} / {preset.aggregator.model}</span><span className="row-actions"><button onClick={() => setEditing({ originalName: name, name, preset: clone(preset) })}>编辑</button><button disabled={moa?.default_preset === name} onClick={() => { if (!moa) return; void persist({ ...clone(moa), default_preset: name }); }}>设为默认</button><button disabled={rows.length <= 1} onClick={() => { if (!moa || rows.length <= 1) return; const next = clone(moa); delete next.presets[name]; const fallback = Object.keys(next.presets)[0]; if (next.default_preset === name) next.default_preset = fallback; if (next.active_preset === name) next.active_preset = ''; void persist(next); }}>删除</button></span></div>)}</div>
-    {editing && <div className="modal-backdrop" onClick={() => !saving && setEditing(null)}><div className="modal moa-editor-modal" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><h2>{editing.originalName ? '编辑组合模型' : '添加组合模型'}</h2><p>正在编辑 Profile：{profile}</p></div><button className="icon-btn" onClick={() => setEditing(null)}><X size={18} /></button></div><div className="routing-form-grid">
-      <label>名称<input value={editing.name} onChange={(event) => setEditing((current) => current ? { ...current, name: event.target.value } : current)} placeholder="default" /></label><label className="toggle-field">启用<input type="checkbox" checked={editing.preset.enabled} onChange={(event) => setEditing((current) => current ? { ...current, preset: { ...current.preset, enabled: event.target.checked } } : current)} /></label>
-      <label>参考温度<input type="number" step="0.1" value={editing.preset.reference_temperature ?? ''} onChange={(event) => setEditing((current) => current ? { ...current, preset: { ...current.preset, reference_temperature: event.target.value === '' ? null : Number(event.target.value) } } : current)} placeholder="Provider 默认" /></label><label>汇总温度<input type="number" step="0.1" value={editing.preset.aggregator_temperature ?? ''} onChange={(event) => setEditing((current) => current ? { ...current, preset: { ...current.preset, aggregator_temperature: event.target.value === '' ? null : Number(event.target.value) } } : current)} placeholder="Provider 默认" /></label>
-      <label>最终输出上限<input type="number" min="1" value={editing.preset.max_tokens} onChange={(event) => setEditing((current) => current ? { ...current, preset: { ...current.preset, max_tokens: Number(event.target.value) } } : current)} /></label><label>单个参考输出上限<input type="number" min="1" value={editing.preset.reference_max_tokens ?? ''} onChange={(event) => setEditing((current) => current ? { ...current, preset: { ...current.preset, reference_max_tokens: event.target.value === '' ? null : Number(event.target.value) } } : current)} placeholder="不限制" /></label>
-      <label>Fanout<select value={editing.preset.fanout} onChange={(event) => setEditing((current) => current ? { ...current, preset: { ...current.preset, fanout: event.target.value as MoaPreset['fanout'] } } : current)}><option value="per_iteration">每次工具迭代</option><option value="user_turn">每轮用户消息一次</option></select></label>
-      <div className="slot-editor wide-field"><div className="slot-editor-head"><strong>参考模型</strong><button className="secondary-btn compact" onClick={() => setEditing((current) => current ? { ...current, preset: { ...current.preset, reference_models: [...current.preset.reference_models, { provider: '', model: '' }] } } : current)}>添加参考模型</button></div>{editing.preset.reference_models.map((slot, index) => <div className="slot-editor-row" key={index}><select value={slot.provider} onChange={(event) => updateSlot('reference', index, 'provider', event.target.value)}><option value="">选择 Provider</option>{groups.map((group) => <option value={group.provider} key={group.provider}>{group.label}</option>)}</select><input list={`moa-reference-models-${index}`} value={slot.model} onChange={(event) => updateSlot('reference', index, 'model', event.target.value)} disabled={!slot.provider} placeholder="选择或输入模型 ID" /><datalist id={`moa-reference-models-${index}`}>{modelOptions(slot.provider).map((model) => <option value={model} key={model} />)}</datalist><button className="icon-btn danger" disabled={editing.preset.reference_models.length <= 1} onClick={() => setEditing((current) => current ? { ...current, preset: { ...current.preset, reference_models: current.preset.reference_models.filter((_, itemIndex) => itemIndex !== index) } } : current)}><Trash2 size={15} /></button></div>)}</div>
-      <div className="slot-editor wide-field"><div className="slot-editor-head"><strong>汇总模型</strong></div><div className="slot-editor-row"><select value={editing.preset.aggregator.provider} onChange={(event) => updateSlot('aggregator', 0, 'provider', event.target.value)}><option value="">选择 Provider</option>{groups.map((group) => <option value={group.provider} key={group.provider}>{group.label}</option>)}</select><input list="moa-aggregator-models" value={editing.preset.aggregator.model} onChange={(event) => updateSlot('aggregator', 0, 'model', event.target.value)} disabled={!editing.preset.aggregator.provider} placeholder="选择或输入模型 ID" /><datalist id="moa-aggregator-models">{modelOptions(editing.preset.aggregator.provider).map((model) => <option value={model} key={model} />)}</datalist></div></div>
-    </div><div className="modal-actions"><button className="secondary-btn" onClick={() => setEditing(null)}>取消</button><button className="send-btn" disabled={saving} onClick={saveEditor}>{saving ? '保存中' : '保存'}</button></div></div></div>}
-  </section>;
-}
-
 function ModelConfigPage({ models, profiles, defaultProfile, modelError, saveModel, deleteModel, fetchAvailableModels, onCapabilityChanged }: { models: ModelProfile[]; profiles: HermesProfile[]; defaultProfile: string; modelError: string; saveModel: SaveModel; deleteModel: (modelId: string) => Promise<boolean>; fetchAvailableModels: FetchAvailableModels; onCapabilityChanged: (modelId: string, modelName: string, capability: ModelCapability) => void }) {
   return (
     <section className="settings-page">
@@ -9175,7 +11513,7 @@ function ModelConfigPage({ models, profiles, defaultProfile, modelError, saveMod
 }
 
 function ModelCenter({ models, profiles, defaultProfile, modelError, saveModel, deleteModel, fetchAvailableModels, onCapabilityChanged }: { models: ModelProfile[]; profiles: HermesProfile[]; defaultProfile: string; modelError: string; saveModel: SaveModel; deleteModel: (modelId: string) => Promise<boolean>; fetchAvailableModels: FetchAvailableModels; onCapabilityChanged: (modelId: string, modelName: string, capability: ModelCapability) => void }) {
-  const [activeTab, setActiveTab] = useState<'general' | 'auxiliary' | 'combination'>('general');
+  const [activeTab, setActiveTab] = useState<'general' | 'auxiliary'>('general');
   const [profile, setProfile] = useState(defaultProfile || profiles[0]?.name || 'default');
   const [editingModel, setEditingModel] = useState<ModelProfile | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
@@ -9203,9 +11541,9 @@ function ModelCenter({ models, profiles, defaultProfile, modelError, saveModel, 
           {activeTab === 'general' && <button className="secondary-btn" onClick={() => { setEditingModel(null); setModalOpen(true); }}><Plus size={16} />添加模型</button>}
         </div>
       </div>
-      <div className="module-matrix-tabs model-center-tabs"><button className={activeTab === 'general' ? 'selected' : ''} onClick={() => setActiveTab('general')}>通用模型</button><button className={activeTab === 'auxiliary' ? 'selected' : ''} onClick={() => setActiveTab('auxiliary')}>辅助模型</button><button className={activeTab === 'combination' ? 'selected' : ''} onClick={() => setActiveTab('combination')}>组合模型</button></div>
+      <div className="module-matrix-tabs model-center-tabs"><button className={activeTab === 'general' ? 'selected' : ''} onClick={() => setActiveTab('general')}>通用模型</button><button className={activeTab === 'auxiliary' ? 'selected' : ''} onClick={() => setActiveTab('auxiliary')}>辅助模型</button></div>
       {modelError && <div className="form-error">{modelError}</div>}
-      {activeTab === 'auxiliary' ? <AuxiliaryModelsPanel profile={profile} groups={slotGroups} /> : activeTab === 'combination' ? <CombinationModelsPanel profile={profile} groups={slotGroups} /> : <div className="model-grid">
+      {activeTab === 'auxiliary' ? <AuxiliaryModelsPanel profile={profile} groups={slotGroups} /> : <div className="model-grid">
         {models.map((model) => (
           <div className="model-card" key={model.id} role="button" tabIndex={0} onClick={() => { setEditingModel(model); setModalOpen(true); }} onKeyDown={(event) => { if (event.key === 'Enter') { setEditingModel(model); setModalOpen(true); } }}>
             <div className="model-card-top">
@@ -9238,7 +11576,7 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
   const draftForModel = (value: ModelProfile | null): ModelPayload => ({
     name: value?.name || '', provider: value?.provider || '', kind: value?.kind || 'official', protocol: value?.protocol || 'OpenAI Compatible',
     model: value?.model || '', models: value?.models?.length ? value.models : [value?.model || ''].filter(Boolean), baseUrl: value?.baseUrl || '', apiKey: '',
-    providerKey: value?.providerKey || '', apiMode: value?.apiMode || 'chat_completions', modelsUrl: value?.modelsUrl || '', modelApiModes: value?.modelApiModes || {},
+    providerKey: value?.providerKey || '', apiMode: value?.apiMode || '', apiModePreference: value?.apiModePreference || (value ? (value.apiMode === 'codex_responses' || value.apiMode === 'openai_responses' ? 'openai_responses' : value.apiMode === 'anthropic_messages' ? 'anthropic_messages' : 'chat_completions') : 'auto'), modelsUrl: value?.modelsUrl || '', modelApiModes: value?.modelApiModes || {},
     compat: value?.compat || { thinkingFormat: 'openai', requestOverrides: {} }, modelCompat: value?.modelCompat || {}, contextLimit: value?.contextLimit || null,
     pricing: value?.pricing || emptyPricing, capabilityMode: value?.capabilityMode || 'auto', capabilityOverrides: value?.capabilityOverrides || {},
   });
@@ -9247,7 +11585,7 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
   };
   const comparableDraft = (value: ModelPayload) => JSON.stringify({ ...value, apiKey: value.apiKey || '' });
   const connectionSignature = (value: ModelPayload) => JSON.stringify({
-    baseUrl: value.baseUrl.trim().replace(/\/+$/, '').toLowerCase(), apiMode: value.apiMode || '', model: value.model,
+    baseUrl: value.baseUrl.trim().replace(/\/+$/, '').toLowerCase(), apiModePreference: value.apiModePreference || 'auto', apiMode: value.apiMode || '', model: value.model,
     modelApiModes: value.modelApiModes || {}, capabilityMode: value.capabilityMode, capabilityOverrides: value.capabilityOverrides || {},
     compat: value.compat || {}, modelCompat: value.modelCompat || {}, apiKey: value.apiKey || '',
   });
@@ -9268,6 +11606,10 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
   const [verifyMessage, setVerifyMessage] = useState('');
   const [fetchError, setFetchError] = useState('');
   const [isFetching, setIsFetching] = useState(false);
+  const [elapsedSeconds, setElapsedSeconds] = useState(0);
+  const [detectionStage, setDetectionStage] = useState('');
+  const [baseHelpOpen, setBaseHelpOpen] = useState(false);
+  const detectionAbortRef = useRef<AbortController | null>(null);
   const selectedPresetData = presets.find((preset) => preset.value === selectedPreset) || null;
   const selectedAuthType = selectedPresetData?.authType || null;
   const filteredPresets = presets.filter((preset) => `${preset.label} ${preset.value}`.toLowerCase().includes(providerQuery.toLowerCase().trim()));
@@ -9283,10 +11625,26 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
   const previousVerificationSignature = useRef(verificationSignature);
 
   useEffect(() => {
+    if (verifyState !== 'running') {
+      setElapsedSeconds(0);
+      return;
+    }
+    const startedAt = Date.now();
+    const timer = window.setInterval(() => setElapsedSeconds(Math.floor((Date.now() - startedAt) / 1000)), 1000);
+    return () => window.clearInterval(timer);
+  }, [verifyState]);
+
+  useEffect(() => () => detectionAbortRef.current?.abort(), []);
+
+  useEffect(() => {
     if (previousVerificationSignature.current === verificationSignature) return;
     previousVerificationSignature.current = verificationSignature;
     setVerifyState('idle');
     setVerifyMessage('');
+    setDetectionStage('');
+    detectionAbortRef.current?.abort();
+    detectionAbortRef.current = null;
+    setIsFetching(false);
   }, [verificationSignature]);
 
   useEffect(() => {
@@ -9336,6 +11694,11 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
     if (apiMode === 'openai_responses' || apiMode === 'codex_responses' || apiMode === 'chat_completions') return 'OpenAI Compatible';
     return apiMode ? 'Custom' : 'OpenAI Compatible';
   }
+  function protocolLabel(apiMode?: ProviderApiMode) {
+    if (apiMode === 'codex_responses' || apiMode === 'openai_responses') return 'OpenAI Responses';
+    if (apiMode === 'anthropic_messages') return 'Anthropic Messages';
+    return 'OpenAI Chat Completions';
+  }
   function kindFromPreset(preset: ProviderPreset): ModelKind {
     if (preset.value === 'lmstudio') return 'local';
     if (preset.value.includes('fun') || preset.value.includes('gateway') || preset.value.includes('router')) return 'relay';
@@ -9350,6 +11713,9 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
   }
   function applyPreset(providerKey: string) {
     const preset = presets.find((item) => item.value === providerKey);
+    detectionAbortRef.current?.abort();
+    detectionAbortRef.current = null;
+    setIsFetching(false);
     setSelectedPreset(providerKey);
     setProviderOpen(false);
     setFetchError('');
@@ -9358,7 +11724,11 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
     const nextAuthenticated = preset.authType ? Boolean(preset.authenticated || authorizedProviders[preset.value]) : false;
     setProviderQuery(preset.label);
     setAvailableModels(nextModels);
+    setDetectedCapabilities({});
     setCatalogInfo(preset.catalog || null);
+    setVerifyState('idle');
+    setVerifyMessage('');
+    setDetectionStage('');
     setOauthState(preset.authType ? (nextAuthenticated ? (nextModels.length ? 'ready' : 'catalog_error') : 'unauthenticated') : 'unauthenticated');
     setDraft((current) => ({
       ...current,
@@ -9366,6 +11736,7 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
       provider: preset.label,
       providerKey: preset.value,
       apiMode: preset.apiMode || 'chat_completions',
+      apiModePreference: preset.apiMode === 'codex_responses' || preset.apiMode === 'openai_responses' ? 'openai_responses' : preset.apiMode === 'anthropic_messages' ? 'anthropic_messages' : 'chat_completions',
       protocol: protocolFromApiMode(preset.apiMode || 'chat_completions'),
       kind: kindFromPreset(preset),
       baseUrl: preset.baseUrl,
@@ -9374,6 +11745,9 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
     }));
   }
   function resetForProviderType(nextType: 'preset' | 'custom') {
+    detectionAbortRef.current?.abort();
+    detectionAbortRef.current = null;
+    setIsFetching(false);
     setProviderType(nextType);
     setSelectedPreset('');
     setProviderQuery('');
@@ -9390,7 +11764,8 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
       baseUrl: '',
       apiKey: '',
       providerKey: '',
-      apiMode: 'chat_completions',
+      apiMode: '',
+      apiModePreference: 'auto',
       modelsUrl: '',
       modelApiModes: {},
       compat: { thinkingFormat: 'openai', requestOverrides: {} },
@@ -9400,6 +11775,11 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
       capabilityMode: 'auto',
       capabilityOverrides: {},
     });
+    setDetectedCapabilities({});
+    setCatalogInfo(null);
+    setVerifyState('idle');
+    setVerifyMessage('');
+    setDetectionStage('');
   }
   function updateCustomBaseUrl(baseUrl: string) {
     setDraft((current) => ({
@@ -9415,17 +11795,79 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
       return;
     }
     setIsFetching(true);
+    setVerifyState('running');
+    setVerifyMessage('');
+    setDetectionStage('正在获取模型并验证连接');
+    const controller = new AbortController();
+    detectionAbortRef.current?.abort();
+    detectionAbortRef.current = controller;
     try {
-      const result = await fetchAvailableModels(draft.baseUrl, draft.apiKey, { ...draft, modelId: model?.id });
-      const nextModels = result.models;
-      setDetectedCapabilities(result.capabilities);
+      const response = await fetch('/api/model-providers/detect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({ ...currentPayload(), modelId: model?.id, apiKey: draft.apiKey, stream: true }),
+      });
+      if (!response.body) throw new Error('检测响应不可读取。');
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let result: any = null;
+      const consumeLine = (line: string) => {
+        if (!line.trim()) return;
+        const event = JSON.parse(line);
+        if (event.type === 'stage' && typeof event.stage === 'string') setDetectionStage(event.stage);
+        if (event.type === 'result') result = event.data;
+        if (event.type === 'error') {
+          const detail = [event.protocol, event.path, event.status ? `HTTP ${event.status}` : '', event.error].filter(Boolean).join(' · ');
+          throw new Error(detail || 'Provider 检测失败。');
+        }
+      };
+      while (true) {
+        const chunk = await reader.read();
+        buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !chunk.done });
+        const lines = buffer.split('\n');
+        buffer = lines.pop() || '';
+        for (const line of lines) consumeLine(line);
+        if (chunk.done) break;
+      }
+      if (buffer.trim()) consumeLine(buffer);
+      if (!result) throw new Error('检测没有返回有效结果。');
+      if (detectionAbortRef.current !== controller) return;
+      const nextModels = Array.isArray(result.models) ? result.models as string[] : [];
+      const nextModel = nextModels.includes(draft.model) ? draft.model : String(result.model || nextModels[0] || '');
+      const nextDraft: ModelPayload = {
+        ...draft,
+        baseUrl: String(result.baseUrl || draft.baseUrl),
+        apiMode: result.apiMode as ProviderApiMode,
+        apiModePreference: result.apiModePreference as ProviderApiModePreference,
+        protocol: protocolFromApiMode(result.apiMode as ProviderApiMode),
+        models: nextModels,
+        model: nextModel,
+        capabilityMode: 'auto',
+      };
+      setDetectedCapabilities(result.capability && nextModel ? { [nextModel]: result.capability as ModelCapability } : {});
       setCatalogInfo(result.catalog || null);
       setAvailableModels(nextModels);
-      if (nextModels[0]) setDraft((current) => ({ ...current, models: nextModels, model: nextModels.includes(current.model) ? current.model : nextModels[0] }));
+      setDraft(nextDraft);
+      previousVerificationSignature.current = connectionSignature(nextDraft);
+      setVerifyState('passed');
+      setDetectionStage('检测完成');
+      const capability = result.capability as ModelCapability | undefined;
+      const reasoning = capability?.reasoningEfforts?.length ? `支持 ${capability.reasoningEfforts.length} 档推理` : '推理能力尚未确认';
+      setVerifyMessage(result.autoCompletedV1
+        ? `已自动补全 /v1，连接验证通过 · ${protocolLabel(result.apiMode)} · ${reasoning}`
+        : `检测完成 · ${protocolLabel(result.apiMode)} · ${reasoning}`);
     } catch (error) {
+      if (controller.signal.aborted) return;
+      setVerifyState('failed');
+      setDetectionStage('检测失败');
       setFetchError(error instanceof Error ? error.message : '模型列表获取失败。');
     } finally {
-      setIsFetching(false);
+      if (detectionAbortRef.current === controller) {
+        detectionAbortRef.current = null;
+        setIsFetching(false);
+      }
     }
   }
   function currentPayload(): ModelPayload {
@@ -9439,60 +11881,21 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
       pricing: draft.pricing || emptyPricing,
     };
   }
-  async function verifyConfiguration() {
-    if (!model?.id || !draft.model) return;
-    setVerifyState('running');
-    setVerifyMessage('');
-    try {
-      const capability = draft.capabilityMode === 'manual' ? activeManualCapability : activeCapability;
-      const payload = currentPayload();
-      const res = await fetch(`/api/models/${model.id}/verify`, {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ mode: canDiscoverCapabilities ? 'discover' : 'connection', modelId: draft.model, apiKey: draft.apiKey, configuration: payload, saveOnSuccess: true, reasoningEffort: capability?.defaultReasoning || capability?.reasoningEfforts?.[0], serviceTier: capability?.serviceTiers?.[0]?.id }),
-      });
-      const data = await res.json();
-      if (!res.ok) throw new Error(data.error || '配置验证失败。');
-      if (data.capability) {
-        const nextCapability = data.capability as ModelCapability;
-        setDetectedCapabilities((current) => ({ ...current, [draft.model]: nextCapability }));
-      }
-      if (data.catalog) setCatalogInfo(data.catalog as CatalogInfo);
-      const nextDraft = { ...payload, apiKey: '' };
-      previousVerificationSignature.current = connectionSignature(nextDraft);
-      setDraft(nextDraft);
-      setSavedDraft(nextDraft);
-      if (Array.isArray(data.models)) await onSave(nextDraft, { close: false, persistedModels: data.models as ModelProfile[] });
-      if (data.capability) onCapabilityChanged(model.id, draft.model, data.capability as ModelCapability);
-      setVerifyState('passed');
-      const probeResults = (data.probeResults || []) as CapabilityProbeResult[];
-      if (data.verificationKind === 'codex_oauth') {
-        setVerifyMessage('授权与账号模型目录验证通过，配置已保存');
-      } else if (data.verificationKind === 'claude_oauth' || data.verificationKind === 'gemini_code_assist') {
-        setVerifyMessage('OAuth 原生验证通过，配置已保存');
-      } else if (data.mode === 'discover') {
-        const reasoningCount = probeResults.filter((item) => item.kind === 'reasoning' && item.status === 'accepted').length;
-        const priorityAccepted = probeResults.some((item) => item.kind === 'service_tier' && item.status === 'accepted');
-        const unknownCount = probeResults.filter((item) => item.status === 'unknown').length;
-        setVerifyMessage(`验证通过，配置已保存 · ${reasoningCount} 个推理档位${priorityAccepted ? ' · 支持快速服务层' : ' · 未确认快速服务层'}${unknownCount ? ` · ${unknownCount} 项暂时未知` : ''}`);
-      } else {
-        setVerifyMessage(`验证通过，配置已保存 · 推理 ${data.effectiveReasoning} · 服务层 ${data.effectiveServiceTier}`);
-      }
-    } catch (error) {
-      setVerifyState('failed');
-      setVerifyMessage(error instanceof Error ? error.message : '配置验证失败。');
-    }
-  }
   async function saveDraft() {
     if (selectedAuthType && !authorizedProviders[draft.providerKey || '']) {
       setOauthState('authorizing');
       setAuthType(selectedAuthType);
       return;
     }
-    if (model && connectionDirty && !window.confirm('当前连接参数尚未验证，仍要保存？')) return;
+    if (connectionDirty && verifyState !== 'passed') {
+      setFetchError('连接参数已变化，请先完成获取并检测。');
+      return;
+    }
     await onSave(currentPayload());
   }
   function requestClose() {
     if (isDirty && !window.confirm('当前有未保存的更改，确定要放弃吗？')) return;
+    detectionAbortRef.current?.abort();
     onClose();
   }
   async function handleAuthSuccess(result: { models?: string[]; catalog?: CatalogInfo; capabilities?: Record<string, ModelCapability>; authenticated?: boolean }) {
@@ -9527,44 +11930,30 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
   const needsAuthorization = Boolean(selectedAuthType && !authorizedProviders[draft.providerKey || '']);
   const saveDisabled = providerType === 'preset'
     ? !selectedPreset || (needsAuthorization ? false : (!draft.model || !(availableModels.length || draft.models.length) || (!selectedAuthType && !draft.baseUrl)))
-    : !draft.baseUrl || !hasUsableApiKey || !draft.model || !(availableModels.length || draft.models.length);
-  const activeCapability = routeChanged ? undefined : detectedCapabilities[draft.model];
-  const activeManualCapability: ModelCapabilityOverride = draft.capabilityOverrides[draft.model] || { reasoning: false, reasoningEfforts: [], reasoningMap: {}, serviceTiers: [], fastMode: 'none', status: 'unsupported' };
-  const canDiscoverCapabilities = providerType === 'custom'
-    && draft.capabilityMode === 'auto'
-    && (draft.apiMode === 'codex_responses' || draft.apiMode === 'openai_responses')
-    && (!activeCapability || activeCapability.status === 'unknown' || activeCapability.status === 'verification_failed');
-  const reasoningOptions = ['off', 'minimal', 'low', 'medium', 'high', 'xhigh', 'max', 'ultra'];
-  const reasoningOptionLabels: Record<string, string> = { off: '关闭', minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最大', ultra: '极致' };
-  const capabilitySourceLabel = activeCapability?.source === 'active_probe' ? '线路验证' : activeCapability?.source || '';
-  const verificationButtonLabel = draft.providerKey === 'openai-codex'
-    ? '验证授权并保存'
-    : selectedAuthType
-      ? '验证并保存（可能产生少量用量）'
-      : '验证并保存（消耗少量额度）';
+    : isFetching || !draft.baseUrl || !hasUsableApiKey || !draft.model || !(availableModels.length || draft.models.length) || (connectionDirty && verifyState !== 'passed');
+  const activeCapability = routeChanged && verifyState !== 'passed' ? undefined : detectedCapabilities[draft.model];
   const capabilitySummary = activeCapability
-    ? `${activeCapability.reasoning ? `推理：${activeCapability.reasoningEfforts.join(' / ')}` : activeCapability.reasoningStatus === 'unsupported' ? '不支持推理档位' : '推理能力未确认'} · ${activeCapability.serviceTiers.length ? `服务层：${activeCapability.serviceTiers.map((tier) => tier.name).join(' / ')}` : activeCapability.serviceTierStatus === 'unsupported' ? '不支持速度服务层' : '速度能力未确认'} · ${capabilitySourceLabel}`
+    ? `${activeCapability.reasoning ? `支持 ${activeCapability.reasoningEfforts.length} 档推理` : '推理能力尚未确认'} · ${activeCapability.serviceTiers.length ? '线路接受快速模式' : '快速模式尚未确认'}${activeCapability.confidence === 'inferred' ? ' · 推断结果' : ''}`
     : '获取模型后显示自动识别结果。';
-
-  function updateManualCapability(patch: Partial<ModelCapabilityOverride>) {
-    if (!draft.model) return;
-    const current = draft.capabilityOverrides[draft.model] || { reasoning: false, reasoningEfforts: [], fastMode: 'none' as FastMode };
-    setDraft((value) => ({
-      ...value,
-      capabilityOverrides: {
-        ...value.capabilityOverrides,
-        [draft.model]: { ...current, ...patch },
-      },
-    }));
-  }
-  function updateReasoningMapping(effort: string, state: 'unknown' | 'unsupported' | 'supported', mappedValue?: string) {
-    const nextMap = { ...(activeManualCapability.reasoningMap || {}) };
-    if (state === 'unknown') delete nextMap[effort];
-    else if (state === 'unsupported') nextMap[effort] = null;
-    else nextMap[effort] = mappedValue || (effort === 'off' ? 'none' : effort);
-    const reasoningEfforts = Object.entries(nextMap).filter(([, mapped]) => typeof mapped === 'string' && mapped).map(([level]) => level);
-    updateManualCapability({ reasoning: reasoningEfforts.length > 0, reasoningMap: nextMap, reasoningEfforts, status: reasoningEfforts.length ? 'confirmed' : 'unsupported' });
-  }
+  const effectiveProtocolLabel = draft.apiMode ? protocolLabel(draft.apiMode) : '';
+  const baseUrlNeedsV1 = (() => {
+    if (!['auto', 'chat_completions', 'openai_responses'].includes(draft.apiModePreference || 'auto')) return false;
+    if (draft.apiMode === 'anthropic_messages') return false;
+    try {
+      const parsed = new URL(draft.baseUrl);
+      if (parsed.hostname.toLowerCase() === 'api.anthropic.com' || /\/anthropic(?:\/v1)?\/?$/i.test(parsed.pathname)) return false;
+      if (/\.openai\.azure\.com$/i.test(parsed.hostname) || /\/openai\/deployments\//i.test(parsed.pathname)) return false;
+      const path = parsed.pathname.replace(/\/(?:models|responses|messages|chat\/completions)\/?$/i, '');
+      return !path.split('/').filter(Boolean).some((part) => /^v\d+(?:beta\d*)?$/i.test(part));
+    } catch {
+      return false;
+    }
+  })();
+  const detectionWaitMessage = elapsedSeconds >= 30
+    ? '部分线路可能需要更长时间，检测仍在进行。'
+    : elapsedSeconds >= 15
+      ? '线路响应较慢，仍在继续探测，请耐心等待。'
+      : '正在探测模型能力，通常需要 10–15 秒，请耐心等待。';
 
   return createPortal((
     <div className="modal-backdrop">
@@ -9577,39 +11966,31 @@ function ModelEditorModal({ model, onClose, onSave, fetchAvailableModels, onCapa
           {providerType === 'preset' ? (
             <>
               <label className="provider-field provider-combobox-wrap"><span>选择 Provider <em>*</em></span><ProviderPresetCombobox query={providerQuery} open={providerOpen} presets={filteredPresets} onOpenChange={setProviderOpen} onQueryChange={(value) => { setProviderQuery(value); setProviderOpen(true); }} onSelect={applyPreset} /></label>
-              <label className="provider-field"><span>Base URL <em>*</em></span><input value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} placeholder="例如 https://api.example.com/v1" /></label>
-              {!selectedAuthType && <label className="provider-field"><span>API Key <em>*</em></span><input value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder={model?.hasApiKey ? '已保存，留空表示继续使用' : 'sk-...'} type="password" />{model?.hasApiKey && !savedCredentialReusable && !draft.apiKey && <small className="error">Base URL 地址已变化，请重新输入 API Key。</small>}</label>}
+              <label className="provider-field"><span>Base URL <em>*</em></span><div className="provider-base-url-control"><input disabled={isFetching} value={draft.baseUrl} onChange={(event) => setDraft({ ...draft, baseUrl: event.target.value })} placeholder="例如 https://api.example.com/v1" /><button type="button" className={baseUrlNeedsV1 ? 'provider-base-help warning' : 'provider-base-help'} aria-label="Base URL 帮助" aria-expanded={baseHelpOpen} onClick={() => setBaseHelpOpen((open) => !open)} onBlur={() => window.setTimeout(() => setBaseHelpOpen(false), 120)}>{baseUrlNeedsV1 ? <TriangleAlert size={15} /> : <CircleHelp size={15} />}</button><span className={baseHelpOpen ? 'provider-base-tooltip open' : 'provider-base-tooltip'} role="tooltip">{baseUrlNeedsV1 ? '当前地址可能缺少 /v1。检测时会同时尝试原地址和 /v1 地址，验证成功后自动使用正确地址。' : 'OpenAI 兼容接口通常以 /v1 结尾；Anthropic 官方地址无需添加。系统会在检测时确认并补全正确路径。'}</span></div></label>
+              {!selectedAuthType && <label className="provider-field"><span>API Key <em>*</em></span><input disabled={isFetching} value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder={model?.hasApiKey ? '已保存，留空表示继续使用' : 'sk-...'} type="password" />{model?.hasApiKey && !savedCredentialReusable && !draft.apiKey && <small className="error">Base URL 地址已变化，请重新输入 API Key。</small>}</label>}
               {selectedAuthType && <div className="auth-provider-note"><ShieldCheck size={16} /><span>{oauthState === 'ready' ? `${selectedPresetData?.label} 已授权，模型目录已就绪。` : oauthState === 'catalog_error' ? `${selectedPresetData?.label} 已授权，但模型目录尚不可用。` : oauthState === 'authorized_loading_catalog' ? '正在读取授权账号的模型目录。' : `${selectedPresetData?.label} 将通过授权登录保存到 Hermes Profile。`}</span></div>}
-              <label className="provider-field"><span>默认模型 <em>*</em></span>{availableModels.length ? <select value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })}>{availableModels.map((item) => <option key={item} value={item}>{item}</option>)}</select> : selectedAuthType ? <input value="" disabled placeholder="授权后获取模型" /> : <input value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} />}</label>
+              <label className="provider-field"><span>默认模型 <em>*</em></span>{availableModels.length ? <select disabled={isFetching} value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })}>{availableModels.map((item) => <option key={item} value={item}>{item}</option>)}</select> : selectedAuthType ? <input value="" disabled placeholder="授权后获取模型" /> : <input disabled={isFetching} value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} />}</label>
             </>
           ) : (
             <>
               <label className="provider-field"><span>名称</span><input value={draft.name} onChange={(event) => setDraft({ ...draft, name: event.target.value })} placeholder="根据 Base URL 自动生成" /></label>
-              <label className="provider-field"><span>Base URL <em>*</em></span><input value={draft.baseUrl} onChange={(event) => updateCustomBaseUrl(event.target.value)} placeholder="例如 https://api.example.com/v1" /></label>
-              <label className="provider-field"><span>API Key <em>*</em></span><input value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder={model?.hasApiKey ? '已保存，留空表示继续使用' : 'sk-...'} type="password" />{model?.hasApiKey && !savedCredentialReusable && !draft.apiKey && <small className="error">Base URL 地址已变化，请重新输入 API Key。</small>}</label>
-              <label className="provider-field"><span>默认模型 <em>*</em></span>{availableModels.length ? <select value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })}>{availableModels.map((item) => <option key={item} value={item}>{item}</option>)}</select> : <input value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} />}</label>
+              <label className="provider-field"><span>Base URL <em>*</em></span><div className="provider-base-url-control"><input disabled={isFetching} value={draft.baseUrl} onChange={(event) => updateCustomBaseUrl(event.target.value)} placeholder="例如 https://api.example.com/v1" /><button type="button" className={baseUrlNeedsV1 ? 'provider-base-help warning' : 'provider-base-help'} aria-label="Base URL 帮助" aria-expanded={baseHelpOpen} onClick={() => setBaseHelpOpen((open) => !open)} onBlur={() => window.setTimeout(() => setBaseHelpOpen(false), 120)}>{baseUrlNeedsV1 ? <TriangleAlert size={15} /> : <CircleHelp size={15} />}</button><span className={baseHelpOpen ? 'provider-base-tooltip open' : 'provider-base-tooltip'} role="tooltip">{baseUrlNeedsV1 ? '当前地址可能缺少 /v1。检测时会同时尝试原地址和 /v1 地址，验证成功后自动使用正确地址。' : 'OpenAI 兼容接口通常以 /v1 结尾；Anthropic 官方地址无需添加。系统会在检测时确认并补全正确路径。'}</span></div></label>
+              <label className="provider-field"><span>API Key <em>*</em></span><input disabled={isFetching} value={draft.apiKey} onChange={(event) => setDraft({ ...draft, apiKey: event.target.value })} placeholder={model?.hasApiKey ? '已保存，留空表示继续使用' : 'sk-...'} type="password" />{model?.hasApiKey && !savedCredentialReusable && !draft.apiKey && <small className="error">Base URL 地址已变化，请重新输入 API Key。</small>}</label>
+              <label className="provider-field"><span>默认模型 <em>*</em></span>{availableModels.length ? <select disabled={isFetching} value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })}>{availableModels.map((item) => <option key={item} value={item}>{item}</option>)}</select> : <input disabled={isFetching} value={draft.model} onChange={(event) => setDraft({ ...draft, model: event.target.value })} />}</label>
               <label className="provider-field"><span>上下文长度</span><input value={draft.contextLimit ?? ''} onChange={(event) => { const parsed = Number(event.target.value); setDraft({ ...draft, contextLimit: event.target.value && Number.isFinite(parsed) ? Math.max(0, parsed) : null }); }} placeholder="例如 256000（可选）" inputMode="numeric" /></label>
-              <label className="provider-field"><span>API 协议</span><select value={draft.apiMode || 'chat_completions'} onChange={(event) => setDraft({ ...draft, apiMode: event.target.value as ProviderApiMode })}><option value="chat_completions">OpenAI Chat Completions</option><option value="openai_responses">OpenAI Responses</option><option value="codex_responses">OpenAI Codex Responses</option><option value="anthropic_messages">Anthropic Messages</option><option value="bedrock_converse">Bedrock Converse</option><option value="codex_app_server">Codex App Server</option></select></label>
-              <label className="provider-field"><span>模型目录 URL</span><input value={draft.modelsUrl || ''} onChange={(event) => setDraft({ ...draft, modelsUrl: event.target.value })} placeholder="可选，默认自动尝试常见 /models 地址" /></label>
+              <label className="provider-field"><span>API 协议</span><div className="provider-protocol-control"><select disabled={isFetching} value={draft.apiModePreference || 'auto'} onChange={(event) => { const preference = event.target.value as ProviderApiModePreference; setDraft({ ...draft, apiModePreference: preference, apiMode: preference === 'auto' ? '' : preference }); }}><option value="auto">自动适配（推荐）</option><option value="chat_completions">OpenAI Chat Completions</option><option value="openai_responses">OpenAI Responses</option><option value="anthropic_messages">Anthropic Messages</option></select><small>{draft.apiModePreference === 'auto' ? (effectiveProtocolLabel ? `当前使用 ${effectiveProtocolLabel}` : '检测后自动选择') : '手动指定'}</small></div></label>
             </>
           )}
-          {fetchModelsVisible && <button type="button" className="secondary-btn provider-fetch" onClick={() => void handleFetchModels()} disabled={fetchModelsDisabled}>{isFetching ? '获取中' : '获取模型'}</button>}
+          {fetchModelsVisible && <button type="button" className="secondary-btn provider-fetch" onClick={() => void handleFetchModels()} disabled={fetchModelsDisabled}>{isFetching ? <><LoaderCircle className="spin" size={15} />正在检测</> : verifyState === 'failed' ? '重新检测' : '获取并检测'}</button>}
           {selectedAuthType && draft.providerKey === 'openai-codex' && authorizedProviders[draft.providerKey] && !availableModels.length && <button type="button" className="secondary-btn provider-fetch" onClick={() => void refreshOAuthCatalog()} disabled={isFetching}>{isFetching ? '正在获取模型' : '重新获取模型'}</button>}
           {fetchError && <div className="form-error">{fetchError}</div>}
-          {routeChanged && draft.baseUrl.trim().replace(/\/+$/, '').toLowerCase() !== savedDraft.baseUrl.trim().replace(/\/+$/, '').toLowerCase() ? <div className="provider-catalog-status"><strong>模型目录：待重新获取</strong><small>Base URL 已变化，现有目录仅供参考。</small></div> : catalogInfo && <div className="provider-catalog-status"><strong>模型目录：{catalogInfo.source === 'provider_catalog' ? 'Provider 富目录' : catalogInfo.source === 'model_ids' ? '仅模型 ID' : '本地目录'}</strong><small>{catalogInfo.lastSuccessAt ? `最近成功 ${new Date(catalogInfo.lastSuccessAt).toLocaleString()}` : '尚未成功刷新'}{catalogInfo.refreshError ? ` · ${catalogInfo.refreshError}` : ''}</small></div>}
+          {isFetching && <div className="provider-detection-status" aria-live="polite" aria-busy="true"><div className="provider-detection-line"><LoaderCircle className="spin" size={16} /><strong>{detectionStage}</strong><span>已等待 {elapsedSeconds} 秒</span></div><div className="provider-detection-progress" aria-hidden="true"><i /></div><small>{detectionWaitMessage}</small></div>}
+          {!isFetching && verifyMessage && <div className={verifyState === 'failed' ? 'provider-detection-status failed' : 'provider-detection-status complete'} aria-live="polite" aria-busy="false"><strong>{verifyMessage}</strong></div>}
+          {routeChanged && verifyState !== 'passed' && draft.baseUrl.trim().replace(/\/+$/, '').toLowerCase() !== savedDraft.baseUrl.trim().replace(/\/+$/, '').toLowerCase() ? <div className="provider-catalog-status"><strong>模型列表待重新检测</strong></div> : catalogInfo && <div className="provider-catalog-status"><strong>已找到 {availableModels.length} 个模型</strong><small>{catalogInfo.lastSuccessAt ? `最近检测 ${new Date(catalogInfo.lastSuccessAt).toLocaleString()}` : '本次检测已完成'}</small></div>}
           <section className="provider-capability-settings">
-            <div className="provider-capability-head"><div><strong>能力设置</strong><small>{draft.model || '请先选择默认模型'}</small></div><div className="provider-mode-tabs capability-mode-tabs"><button type="button" className={draft.capabilityMode === 'auto' ? 'selected' : ''} onClick={() => setDraft({ ...draft, capabilityMode: 'auto' })}>自动识别</button><button type="button" className={draft.capabilityMode === 'manual' ? 'selected' : ''} onClick={() => setDraft({ ...draft, capabilityMode: 'manual' })}>手动</button></div></div>
-            {draft.capabilityMode === 'auto' ? <p className="provider-capability-summary">{capabilitySummary}</p> : (
-              <div className="provider-capability-manual">
-                <label className="provider-capability-toggle"><span><strong>推理强度</strong><small>只在中转服务明确支持时开启</small></span><button className={activeManualCapability.reasoning ? 'toggle-switch on' : 'toggle-switch'} type="button" onClick={() => updateManualCapability({ reasoning: !activeManualCapability.reasoning, reasoningEfforts: activeManualCapability.reasoning ? [] : ['high'], reasoningMap: activeManualCapability.reasoning ? {} : { high: 'high' }, status: activeManualCapability.reasoning ? 'unsupported' : 'confirmed' })} aria-pressed={activeManualCapability.reasoning}><i /></button></label>
-                {activeManualCapability.reasoning && <div className="provider-capability-mappings">{reasoningOptions.map((effort) => { const mapped = activeManualCapability.reasoningMap?.[effort]; const state = mapped === null ? 'unsupported' : typeof mapped === 'string' ? 'supported' : 'unknown'; return <div key={effort}><strong>{reasoningOptionLabels[effort]}</strong><select value={state} onChange={(event) => updateReasoningMapping(effort, event.target.value as 'unknown' | 'unsupported' | 'supported')}><option value="unknown">未知</option><option value="unsupported">不支持</option><option value="supported">支持</option></select>{state === 'supported' && <input value={mapped || ''} onChange={(event) => updateReasoningMapping(effort, 'supported', event.target.value)} placeholder="线路参数值" />}</div>; })}</div>}
-                <label className="provider-field"><span>当前模型协议</span><select value={activeManualCapability.apiMode || draft.apiMode || 'chat_completions'} onChange={(event) => updateManualCapability({ apiMode: event.target.value as ProviderApiMode })}><option value="chat_completions">OpenAI Chat Completions</option><option value="openai_responses">OpenAI Responses</option><option value="codex_responses">OpenAI Codex Responses</option><option value="anthropic_messages">Anthropic Messages</option></select></label>
-                <label className="provider-field"><span>推理参数格式</span><select value={activeManualCapability.thinkingFormat || 'openai'} onChange={(event) => updateManualCapability({ thinkingFormat: event.target.value })}><option value="openai">OpenAI</option><option value="openrouter">OpenRouter</option><option value="deepseek">DeepSeek</option><option value="together">Together</option><option value="zai">Z.AI</option><option value="qwen">Qwen</option><option value="chat_template">Chat Template</option><option value="string_thinking">字符串 Thinking</option></select></label>
-                <label className="provider-field"><span>速度模式</span><select value={activeManualCapability.fastMode} onChange={(event) => updateManualCapability({ fastMode: event.target.value as FastMode })}><option value="none">不支持快速模式</option><option value="openai_priority">OpenAI Priority Processing</option><option value="anthropic_fast">Anthropic Fast Mode</option></select></label>
-              </div>
-            )}
+            <div className="provider-capability-head"><div><strong>能力识别</strong><small>{draft.model || '请先完成检测'}</small></div><span className="provider-auto-badge">自动</span></div>
+            <p className="provider-capability-summary">{capabilitySummary}</p>
           </section>
-          {model?.id && <div className="provider-verification"><button type="button" className="secondary-btn" disabled={verifyState === 'running' || !hasUsableApiKey} onClick={() => void verifyConfiguration()}>{verifyState === 'running' ? (canDiscoverCapabilities ? '正在识别并保存' : '正在验证并保存') : verificationButtonLabel}</button>{verifyMessage && <small className={verifyState === 'failed' ? 'error' : ''}>{verifyMessage}</small>}</div>}
         </div>
         <div className="provider-modal-footer"><button className="secondary-btn" onClick={requestClose}>取消</button><button className="send-btn" onClick={() => void saveDraft()} disabled={saveDisabled}>{needsAuthorization ? '授权' : model ? '保存' : '添加'}</button></div>
         {authType && <ProviderAuthModal authType={authType} onClose={() => { setAuthType(null); setOauthState('unauthenticated'); }} onSuccess={(result) => void handleAuthSuccess(result)} />}
@@ -9843,7 +12224,7 @@ function RuntimePulse({ gateway }: { gateway: HermesRuntimeStatus['gateways'][nu
 type GatewayOperation = 'refreshing' | 'starting' | 'restarting';
 
 function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, onDelete, profileEditor, onRefreshHermesRuntime, onStartProfileGateway }: { agent: Agent; models: ModelProfile[]; gateway: HermesRuntimeStatus['gateways'][number] | null; onChanged: () => Promise<void>; onUpdateAgent: (agentId: string, payload: Partial<Agent>) => Promise<void>; onDelete: () => void; profileEditor: ProfileEditorControls; onRefreshHermesRuntime: () => Promise<unknown>; onStartProfileGateway: (profileName: string) => Promise<void> }) {
-  const [tab, setTab] = useState<'notes' | 'user' | 'soul' | 'skills' | 'plugins'>('notes');
+  const [tab, setTab] = useState<'notes' | 'user' | 'soul'>('notes');
   const [avatarError, setAvatarError] = useState('');
   const [avatarSaving, setAvatarSaving] = useState(false);
   const [avatarCropFile, setAvatarCropFile] = useState<File | null>(null);
@@ -9860,23 +12241,20 @@ function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, 
     { id: 'notes', label: '笔记' },
     { id: 'user', label: '用户画像' },
     { id: 'soul', label: '灵魂' },
-    { id: 'skills', label: '技能' },
-    { id: 'plugins', label: '插件' },
   ] as const;
   const editableProfileName = agent.source === 'hermes-profile' && agent.profileName ? agent.profileName : '';
   const runtimeProfileName = agent.profileName || agent.id;
   const gatewayOperation = gatewayOperations[runtimeProfileName] || null;
   const gatewayBusy = Boolean(gatewayOperation);
   const gatewayOperationLabel = gatewayOperation === 'refreshing' ? '正在刷新网关状态' : gatewayOperation === 'restarting' ? '网关重启中' : gatewayOperation === 'starting' ? '网关启动中' : '';
-  const modules = tab === 'skills' ? agent.skills || [] : agent.plugins || [];
   useEffect(() => {
     setNameDraft(agent.name);
     setNameEditing(false);
     setNameError('');
   }, [agent.id, agent.name]);
-  function openEditor(kind: ProfileEditableKind, title: string, moduleName?: string) {
+  function openEditor(kind: ProfileEditableKind, title: string) {
     if (!editableProfileName) return;
-    void profileEditor.open({ agentId: agent.id, agentName: agent.name, profileName: editableProfileName, kind, title, moduleName });
+    void profileEditor.open({ agentId: agent.id, agentName: agent.name, profileName: editableProfileName, kind, title });
   }
   function selectTab(nextTab: typeof tab) {
     if (nextTab === tab) return;
@@ -10063,7 +12441,6 @@ function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, 
         {tab === 'notes' && <EditableTextPanel agentId={agent.id} title="笔记" kind="notes" profileName={editableProfileName} text={agent.memory || ''} fallback={agent.memoryExcerpt || '这个 Profile 暂时没有 MEMORY.md 可展示。'} onEdit={() => openEditor('notes', '笔记')} editor={profileEditor} />}
         {tab === 'user' && <EditableTextPanel agentId={agent.id} title="用户画像" kind="user" profileName={editableProfileName} text={agent.userProfile || ''} fallback={agent.userProfileExcerpt || '这个 Profile 暂时没有 USER.md 可展示。'} onEdit={() => openEditor('user', '用户画像')} editor={profileEditor} />}
         {tab === 'soul' && <EditableTextPanel agentId={agent.id} title="灵魂" kind="soul" profileName={editableProfileName} text={agent.soul || ''} fallback={agent.soulExcerpt || '这个 Profile 暂时没有 SOUL.md 可展示。'} onEdit={() => openEditor('soul', '灵魂')} editor={profileEditor} />}
-        {(tab === 'skills' || tab === 'plugins') && <EditableModuleList title={tab === 'skills' ? '技能' : '插件'} kind={tab === 'skills' ? 'skill' : 'plugin'} profileName={editableProfileName} items={modules} onSaved={onChanged} onEdit={(name) => openEditor('skill', '技能', name)} editor={profileEditor} agentId={agent.id} />}
       </div>
     </section>
   );
@@ -10078,101 +12455,6 @@ function EditableTextPanel({ agentId, title, kind, profileName, text, fallback, 
         {!isActive && (profileName ? <button className="secondary-btn" onClick={onEdit}><Pencil size={15} />编辑</button> : <span>保存为 Hermes Profile 后可编辑</span>)}
       </div>
       {isActive ? <InlineProfileEditor editor={editor} /> : <p>{text || fallback}</p>}
-    </div>
-  );
-}
-
-function EditableModuleList({ title, kind, profileName, items, onSaved, onEdit, editor, agentId }: { title: string; kind: 'skill' | 'plugin'; profileName: string; items: ProfileModuleEntry[]; onSaved: () => Promise<void>; onEdit: (name: string) => void; editor: ProfileEditorControls; agentId: string }) {
-  const [view, setView] = useState<'cards' | 'list'>('cards');
-  const [error, setError] = useState('');
-  const [togglingName, setTogglingName] = useState('');
-  const activeSkillTarget = kind === 'skill' && editor.state.target?.agentId === agentId && editor.state.target.kind === 'skill' ? editor.state.target : null;
-  async function toggleSkill(item: ProfileModuleEntry) {
-    if (!profileName || kind !== 'skill') return;
-    const name = moduleEntryName(item);
-    const enabled = !moduleEntryEnabled(item);
-    setError('');
-    setTogglingName(name);
-    try {
-      const res = await fetch(`/api/hermes-profiles/${encodeURIComponent(profileName)}/skill-state`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ name, enabled }),
-      });
-      const payload = await res.json().catch(() => ({}));
-      if (!res.ok) throw new Error(payload.error || '状态保存失败。');
-      await onSaved();
-    } catch (err) {
-      setError(err instanceof Error ? err.message : '状态保存失败。');
-    } finally {
-      setTogglingName('');
-    }
-  }
-  const emptyText = kind === 'skill' ? '当前 Profile 没有独立配置技能。' : '当前没有可展示的全局插件。';
-  const lockedText = kind === 'skill' ? '保存为 Hermes Profile 后可配置技能' : '保存为 Hermes Profile 后可查看插件状态';
-  if (activeSkillTarget) {
-    return (
-      <div className="module-panel editable-panel inline-skill-editor-panel">
-        <div className="panel-edit-head module-panel-head">
-          <div><strong>{title} / {activeSkillTarget.moduleName}</strong><span>{activeSkillTarget.profileName} · SKILL.md</span></div>
-        </div>
-        <InlineProfileEditor editor={editor} />
-      </div>
-    );
-  }
-  return (
-    <div className="module-panel editable-panel">
-      <div className="panel-edit-head module-panel-head">
-        <div>
-          <strong>{title}</strong>
-          {kind === 'plugin' && <span>全局共享，状态按当前 Profile 显示</span>}
-        </div>
-        {profileName ? (
-          <div className="module-view-tabs" aria-label={`${title}展示方式`}>
-            <button className={view === 'cards' ? 'selected' : ''} onClick={() => setView('cards')}>卡片</button>
-            <button className={view === 'list' ? 'selected' : ''} onClick={() => setView('list')}>列表</button>
-          </div>
-        ) : <span>{lockedText}</span>}
-      </div>
-      {items.length ? (
-        <div className={view === 'cards' ? 'module-card-grid' : 'module-list'}>
-          {items.map((item) => {
-            const name = moduleEntryName(item);
-            const enabled = moduleEntryEnabled(item);
-            const status = moduleEntryStatus(item);
-            const usage = moduleEntryUsage(item);
-            const source = moduleEntrySource(item);
-            return (
-              <div className={view === 'cards' ? 'module-card' : 'module-row'} key={`${kind}-${name}`}>
-                <div className="module-entry-main">
-                  <div className="module-entry-title">
-                    <span className={`module-state-dot ${enabled || status === 'enabled' ? 'on' : ''}`} />
-                    <strong>{name}</strong>
-                    <em className={`module-status ${enabled || status === 'enabled' ? 'on' : ''}`}>{moduleEntryStatusLabel(item)}</em>
-                  </div>
-                  <p>{moduleEntryDescription(item) || (kind === 'skill' ? '这个技能暂时没有描述。' : '全局插件，按当前 Profile 的启用配置显示。')}</p>
-                  <div className="module-entry-meta">
-                    {moduleEntryCategory(item) && <span>{moduleEntryCategory(item)}</span>}
-                    {source && <span>{source === 'global' ? '全局' : source === 'profile' ? 'Profile' : source}</span>}
-                    {usage.useCount ? <span>使用 {usage.useCount}</span> : null}
-                    {usage.patchCount ? <span>修改 {usage.patchCount}</span> : null}
-                  </div>
-                </div>
-                <div className="module-entry-actions">
-                  {kind === 'skill' && profileName && (
-                    <label className="module-switch" title={enabled ? '已启用' : '未启用'}>
-                      <input type="checkbox" checked={enabled} disabled={togglingName === name} onChange={() => void toggleSkill(item)} />
-                      <span />
-                    </label>
-                  )}
-                  {kind === 'skill' && profileName && <button className="secondary-btn" onClick={() => onEdit(name)}><Pencil size={14} />编辑</button>}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      ) : <p>{emptyText}</p>}
-      {error && <div className="form-error">{error}</div>}
     </div>
   );
 }
@@ -10219,6 +12501,130 @@ function AgentAvatar({ agent, size = 'md' }: { agent: Agent; size?: 'sm' | 'md' 
   );
 }
 
+function RailScrollingTitle({ title, className = '' }: { title: string; className?: string }) {
+  const titleRef = useRef<HTMLElement>(null);
+
+  useLayoutEffect(() => {
+    const titleElement = titleRef.current;
+    const row = titleElement?.closest<HTMLElement>('[data-rail-hover-row]');
+    if (!titleElement || !row) return;
+
+    const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)');
+    let startTimer = 0;
+    let animationFrame = 0;
+
+    const cancelAnimation = () => {
+      window.clearTimeout(startTimer);
+      window.cancelAnimationFrame(animationFrame);
+      startTimer = 0;
+      animationFrame = 0;
+    };
+
+    const overflowDistance = () => {
+      const distance = Math.max(0, titleElement.scrollWidth - titleElement.clientWidth);
+      titleElement.dataset.overflowing = distance > 1 ? 'true' : 'false';
+      return distance;
+    };
+
+    const animateTo = (
+      target: number,
+      duration: number,
+      delay: number,
+      easing: (progress: number) => number,
+      onComplete?: () => void,
+      onStart?: () => void,
+    ) => {
+      cancelAnimation();
+      if (reducedMotion.matches) {
+        titleElement.scrollLeft = 0;
+        delete titleElement.dataset.revealing;
+        onComplete?.();
+        return;
+      }
+      startTimer = window.setTimeout(() => {
+        onStart?.();
+        const start = titleElement.scrollLeft;
+        const distance = target - start;
+        if (Math.abs(distance) <= 1) {
+          titleElement.scrollLeft = target;
+          onComplete?.();
+          return;
+        }
+        const startedAt = performance.now();
+        const tick = (now: number) => {
+          const progress = Math.min(1, (now - startedAt) / duration);
+          titleElement.scrollLeft = start + distance * easing(progress);
+          if (progress < 1) animationFrame = window.requestAnimationFrame(tick);
+          else onComplete?.();
+        };
+        animationFrame = window.requestAnimationFrame(tick);
+      }, delay);
+    };
+
+    const reveal = () => {
+      const distance = overflowDistance();
+      if (distance <= 1) return;
+      const duration = Math.min(3000, Math.max(800, Math.round((distance / 55) * 1000)));
+      animateTo(distance, duration, 400, (progress) => progress, undefined, () => {
+        titleElement.dataset.revealing = 'true';
+      });
+    };
+
+    const reset = () => {
+      if (reducedMotion.matches) {
+        cancelAnimation();
+        titleElement.scrollLeft = 0;
+        delete titleElement.dataset.revealing;
+        return;
+      }
+      animateTo(0, 180, 0, (progress) => 1 - ((1 - progress) ** 3), () => {
+        delete titleElement.dataset.revealing;
+      });
+    };
+
+    const handleFocusIn = (event: FocusEvent) => {
+      if (event.relatedTarget instanceof Node && row.contains(event.relatedTarget)) return;
+      reveal();
+    };
+    const handleFocusOut = (event: FocusEvent) => {
+      if (event.relatedTarget instanceof Node && row.contains(event.relatedTarget)) return;
+      reset();
+    };
+    const handleResize = () => {
+      cancelAnimation();
+      titleElement.scrollLeft = 0;
+      delete titleElement.dataset.revealing;
+      const distance = overflowDistance();
+      if (distance > 1 && (row.matches(':hover') || row.contains(document.activeElement))) reveal();
+    };
+    const handleMotionChange = () => {
+      if (reducedMotion.matches) reset();
+    };
+
+    row.addEventListener('pointerenter', reveal);
+    row.addEventListener('pointerleave', reset);
+    row.addEventListener('focusin', handleFocusIn);
+    row.addEventListener('focusout', handleFocusOut);
+    reducedMotion.addEventListener('change', handleMotionChange);
+    const resizeObserver = new ResizeObserver(handleResize);
+    resizeObserver.observe(titleElement);
+    overflowDistance();
+
+    return () => {
+      cancelAnimation();
+      delete titleElement.dataset.revealing;
+      resizeObserver.disconnect();
+      reducedMotion.removeEventListener('change', handleMotionChange);
+      row.removeEventListener('pointerenter', reveal);
+      row.removeEventListener('pointerleave', reset);
+      row.removeEventListener('focusin', handleFocusIn);
+      row.removeEventListener('focusout', handleFocusOut);
+    };
+  }, [title]);
+
+  return <strong ref={titleRef} className={`rail-scrolling-title ${className}`.trim()} title={title}>{title}</strong>;
+}
+
 function ThreadRailContent({ thread, agents, onOpen, onMore }: {
   thread: ThreadSummary;
   agents: Agent[];
@@ -10244,7 +12650,7 @@ function ThreadRailContent({ thread, agents, onOpen, onMore }: {
       <button className="rail-main rail-thread-main" onClick={onOpen} aria-label={`${thread.title}${pinnedLabel}，参与 Agent：${participantLabel}，${statusLabel}`}>
         <span className="rail-thread-line">
           {thread.pinnedAt && <span className="rail-thread-pin" title="已置顶" aria-hidden="true"><Pin size={12} fill="currentColor" /></span>}
-          <strong className="rail-thread-title">{thread.title}</strong>
+          <RailScrollingTitle title={thread.title} className="rail-thread-title" />
           <span className={`rail-thread-participants ${thread.runStatus || 'idle'}`} title={participantLabel} aria-hidden="true">
             {visibleParticipants.map((agent) => {
               const isActive = agent.id === (thread.activeAgentId || thread.defaultAgentId || thread.primaryAgentId);
@@ -10265,20 +12671,22 @@ function ThreadRailContent({ thread, agents, onOpen, onMore }: {
   );
 }
 
-function RenameDialog({ target, onClose, onSave }: {
+function RenameDialog({ target, onClose, onSave, onGenerateTitle }: {
   target: Exclude<RenameDialogTarget, null>;
   onClose: () => void;
   onSave: (value: string) => Promise<void>;
+  onGenerateTitle?: () => Promise<string>;
 }) {
   const [draft, setDraft] = useState(target.title);
   const [saving, setSaving] = useState(false);
+  const [generating, setGenerating] = useState(false);
   const [error, setError] = useState('');
-  const titleId = useId();
   const noun = target.kind === 'workspace' ? '项目' : '对话';
   useEffect(() => {
     setDraft(target.title);
     setError('');
     setSaving(false);
+    setGenerating(false);
   }, [target.id, target.title]);
 
   async function submit(event?: React.FormEvent) {
@@ -10298,73 +12706,47 @@ function RenameDialog({ target, onClose, onSave }: {
     }
   }
 
-  return createPortal(
-    <div className="modal-backdrop rename-dialog-backdrop" role="presentation" onMouseDown={onClose}>
-      <form className="modal rename-dialog" role="dialog" aria-modal="true" aria-labelledby={titleId} onSubmit={(event) => void submit(event)} onMouseDown={(event) => event.stopPropagation()}>
-        <div className="modal-head">
-          <div><h2 id={titleId}>重命名{noun}</h2><p>{target.title}</p></div>
-          <button type="button" className="icon-btn provider-modal-close" onClick={onClose} aria-label="关闭" disabled={saving}><X size={18} /></button>
-        </div>
-        <label className="form-row">
-          <span>{noun}名称</span>
-          <input value={draft} onChange={(event) => setDraft(event.target.value)} maxLength={target.kind === 'workspace' ? 60 : 60} autoFocus disabled={saving} />
-        </label>
-        {error && <div className="inline-error">{error}</div>}
-        <div className="modal-actions">
-          <button type="button" className="secondary-btn" onClick={onClose} disabled={saving}>取消</button>
-          <button type="submit" className="send-btn" disabled={saving || !draft.trim()}>{saving ? '保存中' : '保存'}</button>
-        </div>
-      </form>
-    </div>,
-    document.body,
-  );
-}
+  async function generateTitle() {
+    if (!onGenerateTitle || generating || saving) return;
+    setGenerating(true);
+    setError('');
+    try {
+      setDraft(await onGenerateTitle());
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '自动生成标题失败。');
+    } finally {
+      setGenerating(false);
+    }
+  }
 
-function FirstUseGuideOverlay({ guide, onClose, onRetry, onInstall }: { guide: FirstUseGuideState; onClose: () => void; onRetry: () => void; onInstall: () => void }) {
-  const busy = guide.status === 'running';
-  const done = guide.status === 'ready';
-  const needsInstall = guide.status === 'needs-install';
   return (
-    <div className="first-use-screen" role="dialog" aria-modal="true" aria-labelledby="first-use-title">
-      <div className="first-use-panel">
-        <div className="first-use-orbit" aria-hidden="true">
-          <LaunchAvatar pulse={false} />
-          <span className={`first-use-ring ${busy ? 'running' : done ? 'done' : guide.status === 'failed' ? 'failed' : ''}`} />
-        </div>
-        <div className="first-use-body">
-          <div className="first-use-head">
-            <span>Frakio Work for Hermes Agent</span>
-            <h2 id="first-use-title">{guide.title}</h2>
-            <p>{guide.detail}</p>
-          </div>
-          <div className="first-use-steps">
-            {guide.steps.map((step) => {
-              const Icon = step.status === 'ready' || step.status === 'skipped' ? CheckCircle2 : step.status === 'failed' ? ShieldAlert : step.status === 'running' ? RefreshCw : Circle;
-              return (
-                <div className={`first-use-step ${step.status}`} key={step.id}>
-                  <Icon className={step.status === 'running' ? 'spin' : ''} size={16} />
-                  <span><strong>{step.label}</strong><small>{step.detail}</small></span>
-                </div>
-              );
-            })}
-          </div>
-          {guide.error && <div className="form-error">{guide.error}</div>}
-          <div className="first-use-actions">
-            {needsInstall && <button className="secondary-btn" onClick={onInstall}>准备 Hermes Agent</button>}
-            {guide.status === 'failed' && <button className="secondary-btn" onClick={onRetry}>重新运行</button>}
-            <button className={done ? 'send-btn' : 'secondary-btn'} onClick={onClose} disabled={busy}>{busy ? '运行中' : done ? '进入工作台' : '稍后处理'}</button>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-}
-
-function LaunchAvatar({ pulse }: { pulse: boolean }) {
-  return (
-    <span className={`launch-image-avatar brand-logo ${pulse ? 'pulse' : ''}`}>
-      <img src={frakioBrandLogoUrl} alt="" />
-    </span>
+    <AppDialog open onOpenChange={(nextOpen) => { if (!nextOpen && !saving && !generating) onClose(); }}>
+      <AppDialogContent className="rename-dialog app-form-dialog" onEscapeKeyDown={(event) => { if (saving || generating) event.preventDefault(); }}>
+        <form className="rename-dialog-form" onSubmit={(event) => void submit(event)}>
+          <header className="rename-dialog-head">
+            <AppDialogTitle asChild><h2>重命名{noun}</h2></AppDialogTitle>
+            <AppDialogDescription className="visually-hidden">输入新的{noun}名称，或自动生成一个标题。</AppDialogDescription>
+            <AppDialogClose asChild>
+              <button type="button" className="rename-dialog-close" aria-label="关闭" disabled={saving || generating}><X size={15} /></button>
+            </AppDialogClose>
+          </header>
+          <label className="rename-dialog-field">
+            <span>{noun}名称</span>
+            <input value={draft} onChange={(event) => setDraft(event.target.value)} maxLength={60} autoFocus disabled={saving || generating} />
+          </label>
+          {error && <div className="inline-error">{error}</div>}
+          <footer className="rename-dialog-actions">
+            {onGenerateTitle
+              ? <button type="button" className="rename-title-generate" disabled={saving || generating} onClick={() => void generateTitle()}>{generating ? '生成中…' : '自动生成标题'}</button>
+              : <span />}
+            <div>
+              <AppDialogClose asChild><button type="button" className="rename-dialog-cancel" disabled={saving || generating}>取消</button></AppDialogClose>
+              <button type="submit" className="rename-dialog-save" disabled={saving || generating || !draft.trim()}>{saving ? '保存中…' : '保存'}</button>
+            </div>
+          </footer>
+        </form>
+      </AppDialogContent>
+    </AppDialog>
   );
 }
 
@@ -10378,91 +12760,6 @@ function readLaunchUserAvatarSnapshot() {
   }
 }
 
-function readFirstUseGuideCompleted() {
-  if (typeof window === 'undefined') return true;
-  try {
-    return window.localStorage.getItem(firstUseGuideStorageKey) === '1';
-  } catch {
-    return false;
-  }
-}
-
-function writeFirstUseGuideCompleted() {
-  if (typeof window === 'undefined') return;
-  try {
-    window.localStorage.setItem(firstUseGuideStorageKey, '1');
-  } catch {
-    // First-use guide can still run without persistent browser storage.
-  }
-}
-
-function createFirstUseGuideSteps(): FirstUseGuideStep[] {
-  return [
-    { id: 'detect', label: '检测本机 Hermes', detail: '等待开始', status: 'pending' },
-    { id: 'runtime', label: '启动本地 runtime', detail: '等待检测完成', status: 'pending' },
-    { id: 'import', label: '同步 Profile 配置', detail: '模型仍由用户在模型中心配置', status: 'pending' },
-    { id: 'finish', label: '完成连接', detail: '等待同步完成', status: 'pending' },
-  ];
-}
-
-function createHermesInstallGuideSteps(): FirstUseGuideStep[] {
-  return [
-    { id: 'check-tools', label: '检查依赖', detail: '等待开始', status: 'pending' },
-    { id: 'download', label: '下载 Hermes Agent', detail: '等待依赖检查完成', status: 'pending' },
-    { id: 'setup-runtime', label: '安装 Python 环境', detail: '等待源码就绪', status: 'pending' },
-    { id: 'verify-cli', label: '创建 Hermes CLI', detail: '等待 Python 环境完成', status: 'pending' },
-    { id: 'write-config', label: '写入基础配置', detail: '等待 CLI 检测完成', status: 'pending' },
-    { id: 'detect', label: '重新检测', detail: '等待配置写入完成', status: 'pending' },
-  ];
-}
-
-function installStepSuccessDetail(stepId: string, data: any) {
-  if (stepId === 'check-tools') {
-    const tools = data?.tools || {};
-    return `git ${tools.git ? 'ok' : 'missing'} · python3 ${tools.python3 ? 'ok' : 'missing'} · uv ${tools.uv ? 'ok' : '由官方脚本处理'}`;
-  }
-  if (stepId === 'download') return data?.bootstrap?.sourcePath || '官方仓库已准备';
-  if (stepId === 'setup-runtime') return '官方 setup-hermes.sh 已完成';
-  if (stepId === 'verify-cli') return data?.tools?.hermes || 'hermes CLI 可执行';
-  if (stepId === 'write-config') return '已保留现有 Hermes 配置，Runtime 使用 Frakio Work 独立配置';
-  return data?.bootstrap?.status === 'connected' ? '本地 Hermes 已连接' : '已完成安装后检测';
-}
-
-function installLogSummary(logs?: string[]) {
-  if (!Array.isArray(logs) || !logs.length) return '';
-  const clean = logs
-    .map((line) => String(line || '').replace(/\u001b\[[0-9;]*m/g, '').trim())
-    .filter(Boolean);
-  return clean.slice(-3).join(' · ').slice(0, 260);
-}
-
-function markInstallFailure(steps: FirstUseGuideStep[], message: string, phase?: string) {
-  const failedPhase = phase === 'start-runtime' ? 'detect' : phase;
-  let failed = false;
-  return steps.map((step) => {
-    if (failedPhase && step.id === failedPhase) {
-      failed = true;
-      return { ...step, status: 'failed' as const, detail: message };
-    }
-    if (failed) return step;
-    if (step.status === 'running' || step.status === 'pending') {
-      failed = true;
-      return { ...step, status: 'failed' as const, detail: message };
-    }
-    return step;
-  });
-}
-
-function createFirstUseGuideState(): FirstUseGuideState {
-  return {
-    status: 'idle',
-    title: '初次使用引导',
-    detail: '检测并连接本机 Hermes Agent。',
-    error: '',
-    steps: createFirstUseGuideSteps(),
-  };
-}
-
 function writeLaunchUserAvatarSnapshot(avatarUrl: string | null) {
   if (typeof window === 'undefined') return;
   try {
@@ -10470,6 +12767,37 @@ function writeLaunchUserAvatarSnapshot(avatarUrl: string | null) {
     else window.localStorage.removeItem(launchUserAvatarSnapshotKey);
   } catch {
     // localStorage can be disabled; the launch screen still renders from live profile data.
+  }
+}
+
+function readLaunchMaterialSnapshot(nativeMaterial: boolean): LaunchMaterialSnapshot {
+  const fallbackDark = typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches;
+  const fallbackTheme = normalizeSpaceTheme({
+    ...defaultProductSpaceTheme,
+    colorMode: nativeMaterial ? 'native' : 'custom',
+    appearance: fallbackDark ? 'dark' : 'light',
+  });
+  const fallback = { activeSpaceId: 'space_default', theme: fallbackTheme, dark: fallbackDark };
+  if (typeof window === 'undefined') return fallback;
+  try {
+    const value = JSON.parse(window.localStorage.getItem(launchMaterialSnapshotKey) || 'null');
+    if (!value || typeof value !== 'object') return fallback;
+    return {
+      activeSpaceId: String(value.activeSpaceId || 'space_default'),
+      theme: normalizeSpaceTheme(value.theme),
+      dark: Boolean(value.dark),
+    };
+  } catch {
+    return fallback;
+  }
+}
+
+function writeLaunchMaterialSnapshot(snapshot: LaunchMaterialSnapshot) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(launchMaterialSnapshotKey, JSON.stringify(snapshot));
+  } catch {
+    // The live theme still takes over as soon as workspace data is available.
   }
 }
 
@@ -10840,94 +13168,75 @@ function RailContextMenu({ target, canShowInFinder, onClose, onToggleWorkspacePi
   const thread = target.kind === 'thread' ? target.thread : null;
   const space = target.kind === 'space' ? target.space : null;
   const rootPath = workspace?.rootPath || thread?.workspaceRootPath || '';
-  const menuWidth = space ? 206 : 230;
-  const menuHeight = space ? 104 : 310;
-  const clamp = (value: number, min: number, max: number) => Math.min(Math.max(value, min), max);
-  const menuStyle = (() => {
-    if (space && target.anchorRect) {
-      const sidebarLeft = target.sidebarRect?.left ?? 8;
-      const sidebarRight = target.sidebarRect?.right ?? window.innerWidth - 8;
-      const minLeft = Math.max(8, sidebarLeft + 8);
-      const maxLeft = Math.max(minLeft, Math.min(window.innerWidth - menuWidth - 8, sidebarRight - menuWidth - 8));
-      const anchoredLeft = target.anchorRect.left + (target.anchorRect.width / 2) - (menuWidth / 2);
-      const aboveTop = target.anchorRect.top - menuHeight - 10;
-      const fallbackTop = target.anchorRect.bottom + 10;
-      return {
-        left: clamp(anchoredLeft, minLeft, maxLeft),
-        top: aboveTop >= 8 ? aboveTop : clamp(fallbackTop, 8, window.innerHeight - menuHeight - 8),
-      } as React.CSSProperties;
-    }
-    return {
-      left: clamp(target.x, 8, window.innerWidth - menuWidth - 8),
-      top: clamp(target.y, 8, window.innerHeight - menuHeight - 8),
-    } as React.CSSProperties;
-  })();
+  const anchorStyle = {
+    left: Math.max(8, Math.min(target.x, window.innerWidth - 8)),
+    top: Math.max(8, Math.min(target.y, window.innerHeight - 8)),
+  } as React.CSSProperties;
   async function run(action: () => void | Promise<void>) {
     onClose();
     await action();
   }
   return (
-    <div className={space ? 'rail-context-menu space-context-menu' : 'rail-context-menu'} style={menuStyle} onPointerDown={(event) => event.stopPropagation()} onContextMenu={(event) => event.preventDefault()}>
-      {space ? (
-        <>
-          <button onClick={() => void run(() => onEditSpace(space))}>编辑工作区</button>
-          <i />
-          <button onClick={() => void run(() => onCopyText(space.id))}>复制工作区 ID</button>
-        </>
-      ) : workspace ? (
-        <>
-          <button onClick={() => void run(() => onToggleWorkspacePinned(workspace))}>{workspace.pinnedAt ? '取消置顶项目' : '置顶项目'}</button>
-          <button onClick={() => void run(() => onRenameWorkspace(workspace))}>重命名项目</button>
-          <button onClick={() => void run(() => onArchiveWorkspace(workspace))}>归档项目</button>
-          <i />
-          <button disabled={!canShowInFinder || !rootPath} onClick={() => void run(() => onShowInFinder(rootPath))}>在 Finder 中显示</button>
-          <button disabled={!rootPath} onClick={() => void run(() => onCopyText(rootPath))}>复制项目路径</button>
-          <button onClick={() => void run(() => onCopyText(workspace.id))}>复制项目 ID</button>
-          <i />
-          <button className="danger" onClick={() => void run(() => onDeleteWorkspace(workspace))}>删除项目</button>
-        </>
-      ) : thread ? (
-        <>
-          <button onClick={() => void run(() => onToggleThreadPinned(thread))}>{thread.pinnedAt ? '取消置顶对话' : '置顶对话'}</button>
-          <button onClick={() => void run(() => onRenameThread(thread))}>重命名对话</button>
-          <button onClick={() => void run(() => onArchiveThread(thread))}>归档对话</button>
-          <i />
-          <button disabled={!canShowInFinder || !rootPath} onClick={() => void run(() => onShowInFinder(rootPath))}>在 Finder 中显示</button>
-          <button disabled={!rootPath} onClick={() => void run(() => onCopyText(rootPath))}>复制项目路径</button>
-          <button onClick={() => void run(() => onCopyText(thread.id))}>复制会话 ID</button>
-          <i />
-          <button className="danger" onClick={() => void run(() => onDeleteThread(thread))}>删除对话</button>
-        </>
-      ) : null}
-    </div>
+    <AppMenu open modal={false} onOpenChange={(open) => { if (!open) onClose(); }}>
+      <AppMenuTrigger asChild>
+        <span className="rail-menu-virtual-anchor" style={anchorStyle} aria-hidden="true" />
+      </AppMenuTrigger>
+      <AppMenuContent className={space ? 'rail-menu-content compact' : 'rail-menu-content'} side="bottom" align="start" sideOffset={0}>
+        {space ? (
+          <>
+            <AppMenuItem onSelect={() => void run(() => onEditSpace(space))}><Settings /><span>编辑工作区</span></AppMenuItem>
+            <AppMenuSeparator />
+            <AppMenuItem onSelect={() => void run(() => onCopyText(space.id))}><Copy /><span>复制工作区 ID</span></AppMenuItem>
+          </>
+        ) : workspace ? (
+          <>
+            <AppMenuItem onSelect={() => void run(() => onToggleWorkspacePinned(workspace))}><Pin /><span>{workspace.pinnedAt ? '取消置顶项目' : '置顶项目'}</span></AppMenuItem>
+            <AppMenuItem onSelect={() => void run(() => onRenameWorkspace(workspace))}><Pencil /><span>重命名项目</span></AppMenuItem>
+            <AppMenuItem onSelect={() => void run(() => onArchiveWorkspace(workspace))}><Archive /><span>归档项目</span></AppMenuItem>
+            <AppMenuSeparator />
+            <AppMenuItem disabled={!canShowInFinder || !rootPath} onSelect={() => void run(() => onShowInFinder(rootPath))}><FolderOpen /><span>在 Finder 中显示</span></AppMenuItem>
+            <AppMenuItem disabled={!rootPath} onSelect={() => void run(() => onCopyText(rootPath))}><Copy /><span>复制项目路径</span></AppMenuItem>
+            <AppMenuItem onSelect={() => void run(() => onCopyText(workspace.id))}><Copy /><span>复制项目 ID</span></AppMenuItem>
+            <AppMenuSeparator />
+            <AppMenuItem variant="destructive" onSelect={() => void run(() => onDeleteWorkspace(workspace))}><Trash2 /><span>删除项目</span></AppMenuItem>
+          </>
+        ) : thread ? (
+          <>
+            <AppMenuItem onSelect={() => void run(() => onToggleThreadPinned(thread))}><Pin /><span>{thread.pinnedAt ? '取消置顶对话' : '置顶对话'}</span></AppMenuItem>
+            <AppMenuItem onSelect={() => void run(() => onRenameThread(thread))}><Pencil /><span>重命名对话</span></AppMenuItem>
+            <AppMenuItem onSelect={() => void run(() => onArchiveThread(thread))}><Archive /><span>归档对话</span></AppMenuItem>
+            <AppMenuSeparator />
+            <AppMenuItem disabled={!canShowInFinder || !rootPath} onSelect={() => void run(() => onShowInFinder(rootPath))}><FolderOpen /><span>在 Finder 中显示</span></AppMenuItem>
+            <AppMenuItem disabled={!rootPath} onSelect={() => void run(() => onCopyText(rootPath))}><Copy /><span>复制项目路径</span></AppMenuItem>
+            <AppMenuItem onSelect={() => void run(() => onCopyText(thread.id))}><Copy /><span>复制会话 ID</span></AppMenuItem>
+            <AppMenuSeparator />
+            <AppMenuItem variant="destructive" onSelect={() => void run(() => onDeleteThread(thread))}><Trash2 /><span>删除对话</span></AppMenuItem>
+          </>
+        ) : null}
+      </AppMenuContent>
+    </AppMenu>
   );
 }
 
-function RailConfirmPopover({ target, onCancel, onConfirm }: { target: Exclude<RailConfirm, null>; onCancel: () => void; onConfirm: () => void }) {
+function RailConfirmDialog({ target, onCancel, onConfirm }: { target: Exclude<RailConfirm, null>; onCancel: () => void; onConfirm: () => void }) {
   const noun = target.kind === 'workspace' ? '项目' : '对话';
   const hint = target.kind === 'workspace'
     ? '只移除 Frakio Work 记录，不删除本地文件夹。'
     : '删除后会从侧栏移除，不进入归档。';
-  const style = {
-    left: Math.min(target.x, window.innerWidth - 230),
-    top: Math.min(Math.max(8, target.y), window.innerHeight - 128),
-  } as React.CSSProperties;
   return (
-    <div
-      className="rail-confirm-popover"
-      style={style}
-      onPointerDown={(event) => event.stopPropagation()}
-      onClick={(event) => event.stopPropagation()}
-      onContextMenu={(event) => event.preventDefault()}
-    >
-      <strong>删除{noun}？</strong>
-      <span>{target.title}</span>
-      <small>{hint}</small>
-      <div>
-        <button className="secondary-btn compact" onClick={onCancel}>取消</button>
-        <button className="secondary-btn compact danger" onClick={onConfirm}>删除</button>
-      </div>
-    </div>
+    <AppAlertDialog open onOpenChange={(open) => { if (!open) onCancel(); }}>
+      <AppAlertDialogContent>
+        <AppAlertDialogTitle className="app-alert-title">删除{noun}？</AppAlertDialogTitle>
+        <AppAlertDialogDescription className="app-alert-description">
+          <strong>{target.title}</strong>
+          <span>{hint}</span>
+        </AppAlertDialogDescription>
+        <div className="app-alert-actions">
+          <AppAlertDialogCancel className="cancel" autoFocus onClick={onCancel}>取消</AppAlertDialogCancel>
+          <AppAlertDialogAction className="danger" onClick={onConfirm}>删除</AppAlertDialogAction>
+        </div>
+      </AppAlertDialogContent>
+    </AppAlertDialog>
   );
 }
 
@@ -10935,12 +13244,177 @@ function trimMessageStart(content: string) {
   return String(content || '').replace(/^\s*\n+/, '').trimStart();
 }
 
-function MarkdownMessage({ content, streaming }: { content: string; streaming?: boolean }) {
-  return (
-    <div className={streaming ? 'message-text markdown-message streaming-text' : 'message-text markdown-message'}>
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{trimMessageStart(content)}</ReactMarkdown>
-    </div>
-  );
+type StreamRevealFrame = {
+  rawContent: string;
+  displayedContent: string;
+  appendedGraphemes: number;
+  revision: number;
+  settled: boolean;
+};
+
+function useStreamRevealFrame(rawContent: string, enabled: boolean, reduceMotion: boolean): StreamRevealFrame {
+  const rawRef = useRef('');
+  const displayedRef = useRef('');
+  const queueStartedAtRef = useRef(0);
+  const lastCommitAtRef = useRef(0);
+  const timerRef = useRef<number | null>(null);
+  const revisionRef = useRef(0);
+  const [frame, setFrame] = useState<StreamRevealFrame>({
+    rawContent: '',
+    displayedContent: '',
+    appendedGraphemes: 0,
+    revision: 0,
+    settled: true,
+  });
+
+  useEffect(() => {
+    rawRef.current = String(rawContent || '');
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+
+    if (!enabled) {
+      displayedRef.current = '';
+      queueStartedAtRef.current = 0;
+      lastCommitAtRef.current = 0;
+      setFrame((current) => ({
+        rawContent: rawRef.current,
+        displayedContent: '',
+        appendedGraphemes: 0,
+        revision: current.revision,
+        settled: !rawRef.current,
+      }));
+      return undefined;
+    }
+
+    if (reduceMotion) {
+      displayedRef.current = rawRef.current;
+      queueStartedAtRef.current = 0;
+      lastCommitAtRef.current = performance.now();
+      setFrame((current) => ({
+        rawContent: rawRef.current,
+        displayedContent: rawRef.current,
+        appendedGraphemes: 0,
+        revision: current.revision,
+        settled: true,
+      }));
+      return undefined;
+    }
+
+    if (!rawRef.current) {
+      displayedRef.current = '';
+      queueStartedAtRef.current = 0;
+      lastCommitAtRef.current = 0;
+      setFrame((current) => ({
+        rawContent: '',
+        displayedContent: '',
+        appendedGraphemes: 0,
+        revision: current.revision,
+        settled: true,
+      }));
+      return undefined;
+    }
+
+    const now = performance.now();
+    if (!rawRef.current.startsWith(displayedRef.current)) {
+      displayedRef.current = rawRef.current;
+      queueStartedAtRef.current = 0;
+      lastCommitAtRef.current = now;
+      setFrame((current) => ({
+        rawContent: rawRef.current,
+        displayedContent: rawRef.current,
+        appendedGraphemes: 0,
+        revision: current.revision,
+        settled: true,
+      }));
+      return undefined;
+    }
+    if (rawRef.current !== displayedRef.current && queueStartedAtRef.current === 0) queueStartedAtRef.current = now;
+    setFrame((current) => ({
+      ...current,
+      rawContent: rawRef.current,
+      appendedGraphemes: 0,
+      settled: rawRef.current === displayedRef.current,
+    }));
+
+    const schedule = (delay: number) => {
+      timerRef.current = window.setTimeout(tick, delay);
+    };
+    const tick = () => {
+      timerRef.current = null;
+      const tickNow = performance.now();
+      const queuedAt = queueStartedAtRef.current || tickNow;
+      const force = tickNow - queuedAt >= STREAM_REVEAL_MAX_LAG_MS;
+      const next = streamRevealTransition({
+        displayedContent: displayedRef.current,
+        rawContent: rawRef.current,
+        queueStartedAt: queuedAt,
+        lastCommitAt: lastCommitAtRef.current,
+        now: tickNow,
+        force,
+      });
+      if (next.kind === 'append' || next.kind === 'reset') {
+        displayedRef.current = next.displayedContent;
+        lastCommitAtRef.current = tickNow;
+        if (next.appendedGraphemes > 0) revisionRef.current += 1;
+        if (next.settled) queueStartedAtRef.current = 0;
+        setFrame({
+          rawContent: rawRef.current,
+          displayedContent: next.displayedContent,
+          appendedGraphemes: next.appendedGraphemes,
+          revision: revisionRef.current,
+          settled: next.settled,
+        });
+      }
+      if (displayedRef.current !== rawRef.current) schedule(Math.min(12, STREAM_REVEAL_MIN_COMMIT_MS));
+      else setFrame((current) => current.settled && current.rawContent === rawRef.current
+        ? current
+        : { ...current, rawContent: rawRef.current, appendedGraphemes: 0, settled: true });
+    };
+
+    schedule(0);
+    return () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    };
+  }, [enabled, rawContent, reduceMotion]);
+
+  return frame;
+}
+
+function MarkdownMessage({ content, streaming, streamReveal, threadId, workspaceId }: { content: string; streaming?: boolean; streamReveal?: StreamRevealFrame; threadId?: string | null; workspaceId?: string | null }) {
+  return <RichMarkdown content={trimMessageStart(content)} streaming={streaming} streamReveal={streamReveal} threadId={threadId} workspaceId={workspaceId} />;
+}
+
+function useReplyPresenceHandoff(hasVisibleDraft: boolean, reduceMotion: boolean) {
+  const seenVisibleDraftRef = useRef(false);
+  const timerRef = useRef<number | null>(null);
+  const [exiting, setExiting] = useState(false);
+
+  useLayoutEffect(() => {
+    if (!hasVisibleDraft) {
+      seenVisibleDraftRef.current = false;
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+      setExiting(false);
+      return undefined;
+    }
+    if (seenVisibleDraftRef.current) return undefined;
+    seenVisibleDraftRef.current = true;
+    if (reduceMotion) return undefined;
+    setExiting(true);
+    timerRef.current = window.setTimeout(() => {
+      timerRef.current = null;
+      setExiting(false);
+    }, STREAM_REVEAL_ANIMATION_MS);
+    return () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    };
+  }, [hasVisibleDraft, reduceMotion]);
+
+  return exiting;
 }
 
 const activityKindCopy: Record<RunActivityItem['kind'], { running: string; completed: string; unit: string }> = {
@@ -10965,6 +13439,18 @@ function activityGroupSummary(group: RunActivityGroup) {
   }).join(' · ') || group.summary;
 }
 
+function semanticActivityPreview(group: RunActivityGroup) {
+  const running = [...group.items].reverse().find((item) => item.status === 'running');
+  const latest = group.items.at(-1);
+  return String(
+    latest?.intent
+    || running?.intent
+    || latest?.displayName
+    || activityGroupPreview(group)
+    || activityGroupSummary(group),
+  ).replace(/\s+/g, ' ').trim();
+}
+
 function compactActivityTarget(item: RunActivityItem) {
   const source = String(item.target || '').replace(/\s+/g, ' ').trim();
   if (!source) return '';
@@ -10981,92 +13467,119 @@ function compactActivityTarget(item: RunActivityItem) {
   return target.length > limit ? `${target.slice(0, limit).trimEnd()}…` : target;
 }
 
-function RunActivityIcon({ kind, size = 14 }: { kind: RunActivityItem['kind']; size?: number }) {
-  const Icon = kind === 'read' ? FileText
-    : kind === 'search' ? Search
-      : kind === 'edit' || kind === 'write' ? Pencil
-        : kind === 'command' ? Code2
-          : kind === 'web' ? ExternalLink
-            : kind === 'collaboration' ? Network
-              : kind === 'skill' ? Sparkles : Activity;
-  return <Icon size={size} aria-hidden="true" />;
+function RunActivityStatusIcon({ item }: { item: RunActivityItem }) {
+  const reduceMotion = useReducedMotion();
+  const icon = item.status === 'running' ? <LoaderCircle size={12} /> : item.status === 'failed' ? <X size={12} /> : item.status === 'cancelled' ? <PauseCircle size={12} /> : <CheckCircle2 size={12} />;
+  return (
+    <span className="run-activity-item-status" aria-label={item.status === 'failed' ? '失败' : item.status === 'cancelled' ? '已取消' : item.status === 'running' ? '进行中' : '完成'}>
+      <AnimatePresence initial={false} mode="popLayout">
+        <motion.span
+          key={item.status}
+          initial={reduceMotion ? false : { opacity: 0, scale: .8 }}
+          animate={{ opacity: 1, scale: 1 }}
+          exit={reduceMotion ? undefined : { opacity: 0, scale: .8 }}
+          transition={{ duration: reduceMotion ? 0 : .2 }}
+        >{icon}</motion.span>
+      </AnimatePresence>
+    </span>
+  );
 }
 
-function RunActivityItemRow({ item }: { item: RunActivityItem }) {
+function RunActivityItemRow({ item, rowIndex }: { item: RunActivityItem; rowIndex: number }) {
   const [resultOpen, setResultOpen] = useState(false);
-  const label = item.status === 'running' ? item.activeLabel : item.completedLabel;
-  const duration = item.durationMs > 0 ? (item.durationMs < 1000 ? `${Math.round(item.durationMs)}ms` : `${(item.durationMs / 1000).toFixed(item.durationMs < 10000 ? 1 : 0)}s`) : '';
+  const reduceMotion = useReducedMotion();
+  const label = item.displayName || (item.status === 'running' ? item.activeLabel : item.completedLabel);
+  const duration = formatActivityDuration(activityElapsedMs(item));
   return (
-    <div className={`run-activity-item is-${item.status}`}>
-      <span className="run-activity-item-icon"><RunActivityIcon kind={item.kind} /></span>
-      <span className="run-activity-item-copy"><strong>{label}</strong>{item.target && <code title={item.target}>{compactActivityTarget(item)}</code>}</span>
-      {duration && <time>{duration}</time>}
-      <span className="run-activity-item-status" aria-label={item.status === 'failed' ? '失败' : item.status === 'cancelled' ? '已取消' : item.status === 'running' ? '进行中' : '完成'}>
-        {item.status === 'running' ? <LoaderCircle size={13} /> : item.status === 'failed' ? <X size={13} /> : item.status === 'cancelled' ? <PauseCircle size={13} /> : null}
+    <motion.div
+      className={`run-activity-item is-${item.status}`}
+      initial={reduceMotion ? false : { x: -8, opacity: 0 }}
+      animate={{ x: 0, opacity: 1 }}
+      transition={{ duration: reduceMotion ? 0 : .15, delay: reduceMotion ? 0 : Math.min(rowIndex, 9) * .03 }}
+    >
+      <RunActivityStatusIcon item={item} />
+      <span className="run-activity-item-copy">
+        <span className="run-activity-action">{label}</span>
+        {item.intent && <span className="run-activity-intent">{item.intent}</span>}
+        {item.target && <span className="run-activity-target" title={item.target}>{compactActivityTarget(item)}</span>}
       </span>
+      {duration && <time>{duration}</time>}
       {item.resultPreview && (
-        <div className="run-activity-result">
-          <button type="button" aria-expanded={resultOpen} onClick={() => setResultOpen((current) => !current)}><ChevronRight size={13} />结果摘要</button>
-          {resultOpen && <pre>{item.resultPreview}</pre>}
-        </div>
+        <>
+          <button className="run-activity-result-toggle" type="button" aria-label="查看结果摘要" title="查看结果摘要" aria-expanded={resultOpen} onClick={() => setResultOpen((current) => !current)}><ArrowUpRight size={13} /></button>
+          {resultOpen && <div className="run-activity-result"><pre>{item.resultPreview}</pre></div>}
+        </>
       )}
-    </div>
+    </motion.div>
   );
 }
 
-function RunActivityLiveLine({ group }: { group: RunActivityGroup }) {
-  const current = group.items.at(-1);
-  if (!current) return null;
-  const target = compactActivityTarget(current);
-  const label = current.status === 'running' ? current.activeLabel : current.completedLabel;
-  return (
-    <div className={`run-activity-live is-${current.status}`} aria-live="polite" aria-atomic="true">
-      <div className="run-activity-live-current" key={`${current.id}:${current.status}`}>
-        <span className="run-activity-live-icon"><RunActivityIcon kind={current.kind} size={13} /></span>
-        <span className="run-activity-live-copy"><strong>{label}</strong>{target && <code title={current.target}>{target}</code>}</span>
-      </div>
-    </div>
-  );
-}
-
-function RunActivityGroupView({ group, hasFollowingText, runFinished, isCurrentGroup }: { group: RunActivityGroup; hasFollowingText: boolean; runFinished: boolean; isCurrentGroup: boolean }) {
+function RunActivityGroupView({ group, hasFollowingText, runFinished, isCurrentGroup, showAwaiting }: { group: RunActivityGroup; hasFollowingText: boolean; runFinished: boolean; isCurrentGroup: boolean; showAwaiting: boolean }) {
   const live = isCurrentGroup && !hasFollowingText && !runFinished;
   const [expanded, setExpanded] = useState(false);
-  const userControlled = useRef(false);
-  useEffect(() => {
-    if (!userControlled.current && live) setExpanded(false);
-  }, [live]);
-  if (live) return <RunActivityLiveLine group={group} />;
+  const reduceMotion = useReducedMotion();
+  const regionId = useId();
+  const entries = activityTimelineEntries(group);
+  const failedCount = group.items.filter((item) => item.status === 'failed').length;
+  const awaitingNextStep = live && showAwaiting && !group.items.some((item) => item.status === 'running');
+  const preview = semanticActivityPreview(group);
   return (
-    <section className={`run-activity-group is-${group.status}`}>
+    <section className={`run-activity-group is-${group.status} ${live ? 'is-live' : ''}`} aria-busy={live && group.status === 'running'}>
       <button
         className="run-activity-summary"
         type="button"
         aria-expanded={expanded}
-        onClick={() => { userControlled.current = true; setExpanded((current) => !current); }}
+        aria-controls={regionId}
+        onClick={() => setExpanded((current) => nextActivityExpanded(current, 'user.toggle'))}
       >
-        <ChevronRight size={15} />
-        <span>{activityGroupSummary(group)}</span>
+        <motion.span className="run-activity-chevron" animate={{ rotate: expanded ? 90 : 0 }} transition={{ duration: reduceMotion ? 0 : .15, ease: 'easeOut' }}><ChevronRight size={13} /></motion.span>
+        <span className="run-activity-count">{entries.length}</span>
+        <span className="run-activity-preview-frame" aria-live={live ? 'polite' : undefined}>
+          <AnimatePresence initial={false} mode="popLayout">
+            <motion.span className="run-activity-preview" key={preview} initial={reduceMotion ? false : { opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: reduceMotion ? 0 : .2 }}>{preview}</motion.span>
+          </AnimatePresence>
+        </span>
+        {failedCount > 0 && <span className="run-activity-failures">{failedCount} 失败</span>}
       </button>
-      {expanded && <div className="run-activity-items">{group.items.map((item) => <RunActivityItemRow item={item} key={item.id} />)}</div>}
+      <AnimatePresence initial={false}>
+        {expanded && <motion.div
+          className="run-activity-collapse"
+          id={regionId}
+          role="region"
+          initial={reduceMotion ? false : { height: 0, opacity: 0 }}
+          animate={{ height: 'auto', opacity: 1 }}
+          exit={{ height: 0, opacity: 0 }}
+          transition={{ height: { duration: reduceMotion ? 0 : .25, ease: [.4, 0, .2, 1] }, opacity: { duration: reduceMotion ? 0 : .15 } }}
+        >
+          <div className="run-activity-collapse-inner">
+          <div className="run-activity-items">
+            {entries.map((entry, index) => <RunActivityItemRow item={entry.item} rowIndex={index} key={entry.id} />)}
+            {awaitingNextStep && (
+              <div className="run-activity-awaiting" role="status">
+                <LoaderCircle size={13} aria-hidden="true" />
+                <span>正在思考下一步…</span>
+              </div>
+            )}
+          </div>
+        </div>
+        </motion.div>}
+      </AnimatePresence>
     </section>
   );
 }
 
-function RunTranscriptContent({ content, groups, streaming = false, runFinished = true }: { content: string; groups: RunActivityGroup[]; streaming?: boolean; runFinished?: boolean }) {
-  const ordered = [...groups].sort((left, right) => left.contentOffset - right.contentOffset || left.createdAt.localeCompare(right.createdAt));
+function RunTranscriptContent({ content, groups, streaming = false, streamReveal, runFinished = true, showAwaiting = false, threadId, workspaceId }: { content: string; groups: RunActivityGroup[]; streaming?: boolean; streamReveal?: StreamRevealFrame; runFinished?: boolean; showAwaiting?: boolean; threadId?: string | null; workspaceId?: string | null }) {
+  const visibleGroups = streaming
+    ? groups.filter((group) => Number(group.contentOffset || 0) <= content.length)
+    : groups;
+  const timeline = buildRunActivityTimeline(content, visibleGroups);
   const nodes: React.ReactNode[] = [];
-  let cursor = 0;
-  ordered.forEach((group, index) => {
-    const offset = Math.max(cursor, Math.min(content.length, group.contentOffset));
-    const segment = content.slice(cursor, offset);
-    if (segment) nodes.push(<MarkdownMessage content={segment} key={`text-${group.id}`} />);
-    const hasFollowingText = content.length > offset;
-    nodes.push(<RunActivityGroupView group={group} hasFollowingText={hasFollowingText} runFinished={runFinished} isCurrentGroup={index === ordered.length - 1} key={group.id || `group-${index}`} />);
-    cursor = offset;
+  timeline.groups.forEach(({ group, commentary, hasFollowingText }, index) => {
+    if (commentary) nodes.push(<MarkdownMessage content={commentary} threadId={threadId} workspaceId={workspaceId} key={`text-${group.id || index}`} />);
+    nodes.push(<RunActivityGroupView group={group} hasFollowingText={hasFollowingText} runFinished={runFinished} isCurrentGroup={index === timeline.groups.length - 1} showAwaiting={showAwaiting} key={group.id || `group-${index}`} />);
   });
-  const tail = content.slice(cursor);
-  if (tail || streaming) nodes.push(<MarkdownMessage content={tail} streaming={streaming} key="text-tail" />);
+  const tail = timeline.tail;
+  if (tail || streaming) nodes.push(<MarkdownMessage content={tail} streaming={streaming} streamReveal={streamReveal} threadId={threadId} workspaceId={workspaceId} key="text-tail" />);
   return <>{nodes}</>;
 }
 
@@ -11080,7 +13593,7 @@ function PersistedInterruptedRuns({ thread, agents }: { thread: Thread | null; a
         {agent ? <AgentAvatar agent={agent} /> : <span className="agent-avatar" style={{ background: '#0f766e' }}>@</span>}
         <div className="message-body run-status-body">
           <div className="message-meta"><strong>{agent?.name || 'Agent'}</strong><span>{transcript.status === 'failed' ? '执行失败' : '已取消'}</span></div>
-          <RunTranscriptContent content={transcript.partialContent || ''} groups={transcript.groups} />
+          <RunTranscriptContent content={transcript.partialContent || ''} groups={transcript.groups} threadId={thread?.id} workspaceId={thread?.workspaceId} />
         </div>
       </article>
     );
@@ -11138,49 +13651,84 @@ function ChatRunStatus({
   tick,
   draft,
   activityGroups,
+  presentationPhase,
   error,
+  streamingResponses,
+  threadId,
+  workspaceId,
 }: {
   target: ChatRunTarget | null;
   startedAt: number | null;
   tick: number;
   draft: string;
   activityGroups: RunActivityGroup[];
+  presentationPhase: RunPresentationPhase;
   error: string;
+  streamingResponses: boolean;
+  threadId?: string | null;
+  workspaceId?: string | null;
 }) {
+  const reduceMotion = Boolean(useReducedMotion());
+  const revealFrame = useStreamRevealFrame(draft, streamingResponses, reduceMotion);
+  const visibleDraft = streamingResponses ? revealFrame.displayedContent : '';
   const elapsed = startedAt ? Math.max(0, Math.floor((Date.now() - startedAt) / 1000)) : 0;
   const agent = target?.agent || null;
   const isAll = target?.kind === 'all';
   const title = isAll ? '团队' : agent?.name || 'Agent';
-  const thinkingText = isAll ? '团队正在思考' : `${agent?.name || 'Agent'} 正在思考`;
+  const processingText = processingMessageAt(startedAt, elapsed, title);
+  const streamingDraft = streamingResponses && Boolean(draft);
+  const hasVisibleDraft = Boolean(visibleDraft);
+  const waitingForFirstVisibleDraft = streamingResponses
+    && Boolean(draft)
+    && !hasVisibleDraft
+    && (presentationPhase === 'responding' || presentationPhase === 'finished');
+  const showPresence = shouldShowRunPresence(presentationPhase) || (!streamingResponses && presentationPhase === 'responding') || waitingForFirstVisibleDraft;
+  const exitingInitialPresence = useReplyPresenceHandoff(hasVisibleDraft, reduceMotion);
+  const useInitialReplySlot = activityGroups.length === 0 && (showPresence || hasVisibleDraft || exitingInitialPresence);
+  const draftTranscript = hasVisibleDraft
+    ? <RunTranscriptContent content={visibleDraft} groups={activityGroups} streaming={streamingDraft} streamReveal={reduceMotion ? undefined : revealFrame} runFinished={false} showAwaiting={presentationPhase === 'activity'} threadId={threadId} workspaceId={workspaceId} />
+    : null;
+  const presence = showPresence || exitingInitialPresence ? (
+    <div className={`processing-presence ${hasVisibleDraft || activityGroups.length ? 'after-activity' : ''} ${exitingInitialPresence ? 'is-exiting' : ''}`} data-testid="run-presence" aria-live="polite" aria-atomic="true">
+      <LoaderCircle className="processing-presence-spinner" size={13} aria-hidden="true" />
+      <span className="processing-presence-message" key={processingText}>{processingText}</span>
+      {elapsed >= 1 && <time>{formatRunElapsed(elapsed)}</time>}
+    </div>
+  ) : null;
   void tick;
   return (
-    <article className="message run-status-message">
+    <article className="message run-status-message incoming-agent-message" aria-busy={presentationPhase !== 'waiting-input' && presentationPhase !== 'finished'}>
       {isAll || !agent ? <span className="agent-avatar" style={{ background: agent?.color || '#0f766e' }}>@</span> : <AgentAvatar agent={agent} />}
       <div className="message-body run-status-body">
         <div className="message-meta">
           <strong>{title}</strong>
-          <span>{elapsed}s</span>
         </div>
-        {!draft && <div className="thinking-line" aria-live="polite">
-          <span className="thinking-text">{thinkingText}</span>
-        </div>}
-        {draft
-          ? <RunTranscriptContent content={draft} groups={activityGroups} streaming runFinished={false} />
-          : activityGroups.length > 0 && <div className="run-activity-before-text"><RunTranscriptContent content="" groups={activityGroups} runFinished={false} /></div>}
+        {useInitialReplySlot ? (
+          <div className={`run-reply-transition-slot ${hasVisibleDraft ? 'has-visible-draft' : ''}`} data-testid="run-reply-transition-slot">
+            {draftTranscript}
+            {presence}
+          </div>
+        ) : (
+          <>
+            {draftTranscript || (activityGroups.length > 0 && <div className="run-activity-before-text"><RunTranscriptContent content="" groups={activityGroups} runFinished={false} showAwaiting={presentationPhase === 'activity'} threadId={threadId} workspaceId={workspaceId} /></div>)}
+            {presence}
+          </>
+        )}
         {error && <div className="inline-error run-error">{error}</div>}
       </div>
     </article>
   );
 }
 
-function RunDecisionPanel({ clarification, approval, submitting, error, onAnswer, onSkip, onApprove }: {
+function RunDecisionPanel({ clarification, approval, submitting, error, onAnswer, onSkip, onInterrupt, onApprove }: {
   clarification: HermesRunClarification | null;
   approval: HermesRunApproval | null;
   submitting: boolean;
   error: string;
   onAnswer: (answer: string) => void;
   onSkip: () => void;
-  onApprove: (choice: 'once' | 'session' | 'always' | 'deny') => void;
+  onInterrupt: () => void;
+  onApprove: (choice: HermesApprovalChoice) => void;
 }) {
   const isClarification = Boolean(clarification);
   const requestKey = clarification?.id || approval?.id || 'decision';
@@ -11188,12 +13736,19 @@ function RunDecisionPanel({ clarification, approval, submitting, error, onAnswer
   const [customOpen, setCustomOpen] = useState(Boolean(clarification && !clarification.choices.length));
   const [customAnswer, setCustomAnswer] = useState('');
   const panelRef = useRef<HTMLElement | null>(null);
-  const approvalChoices = [
+  const allApprovalChoices = [
     { value: 'once' as const, label: '允许一次', description: '只允许当前这一次操作' },
     { value: 'session' as const, label: '本会话允许', description: '当前对话中允许同类操作' },
     { value: 'always' as const, label: '始终允许', description: '以后自动允许同类操作' },
     { value: 'deny' as const, label: '拒绝', description: '不执行这项操作' },
   ];
+  const requestedApprovalChoices = approval?.smartDenied
+    ? ['once', 'deny']
+    : (approval?.choices?.length ? approval.choices : allApprovalChoices.map((choice) => choice.value));
+  const approvalChoices = allApprovalChoices.filter((choice) => (
+    requestedApprovalChoices.includes(choice.value)
+    && (choice.value !== 'always' || approval?.allowPermanent !== false)
+  ));
   const optionCount = clarification?.choices.length || approvalChoices.length;
 
   useEffect(() => {
@@ -11201,7 +13756,7 @@ function RunDecisionPanel({ clarification, approval, submitting, error, onAnswer
     setCustomOpen(Boolean(clarification && !clarification.choices.length));
     setCustomAnswer('');
     const frame = window.requestAnimationFrame(() => {
-      panelRef.current?.querySelector<HTMLButtonElement>('.run-decision-option')?.focus();
+      panelRef.current?.querySelector<HTMLButtonElement>('.decision-option-row, .decision-other-trigger')?.focus();
     });
     return () => window.cancelAnimationFrame(frame);
   }, [requestKey, clarification]);
@@ -11217,7 +13772,7 @@ function RunDecisionPanel({ clarification, approval, submitting, error, onAnswer
     if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
     if (event.key === 'Escape') {
       event.preventDefault();
-      if (clarification && !submitting) onSkip();
+      if (clarification && !submitting) onInterrupt();
       return;
     }
     if (/^[1-9]$/.test(event.key)) {
@@ -11234,75 +13789,129 @@ function RunDecisionPanel({ clarification, approval, submitting, error, onAnswer
       const direction = event.key === 'ArrowDown' ? 1 : -1;
       const nextIndex = (activeIndex + direction + optionCount) % optionCount;
       setActiveIndex(nextIndex);
-      panelRef.current?.querySelectorAll<HTMLButtonElement>('.run-decision-option')[nextIndex]?.focus();
+      panelRef.current?.querySelectorAll<HTMLButtonElement>('.decision-option-row')[nextIndex]?.focus();
       return;
-    }
-    if (event.key === 'Enter') {
-      event.preventDefault();
-      chooseActive(activeIndex);
     }
   };
 
   return (
-    <section className={`run-decision-panel ${isClarification ? 'clarification' : 'approval'}`} ref={panelRef} onKeyDown={onKeyDown} aria-labelledby="run-decision-title">
-      <header className="run-decision-head">
-        {clarification && <button className="run-decision-close" onClick={onSkip} disabled={submitting} aria-label="跳过此问题"><X size={17} /></button>}
-        <div>
-          <span>{clarification ? '需要你的选择' : '此操作需要你的允许'}</span>
-          <strong id="run-decision-title">{clarification?.question || approval?.title || '请选择如何执行'}</strong>
-          <small>{clarification ? '选择一项后，Agent 会继续处理。' : '请选择本次操作的允许范围。'}</small>
-        </div>
-      </header>
-
-      {approval && (approval.tool || approval.command || approval.cwd) && (
-        <div className="run-decision-command">
-          {approval.tool && <span>{approval.tool}</span>}
-          {approval.command && <code>{approval.command}</code>}
-          {approval.cwd && <small>{approval.cwd}</small>}
-        </div>
-      )}
-
-      <div className="run-decision-options" role="group" aria-label={clarification ? '回答选项' : '权限选项'}>
-        {clarification ? clarification.choices.map((choice, index) => (
-          <button className={`run-decision-option ${activeIndex === index ? 'active' : ''}`} key={`${index}-${choice}`} disabled={submitting} onClick={() => chooseActive(index)} onFocus={() => setActiveIndex(index)}>
-            <span className="run-decision-number">{index + 1}</span>
-            <strong>{choice}</strong>
-            <ChevronRight size={16} />
-          </button>
-        )) : approvalChoices.map((choice, index) => (
-          <button className={`run-decision-option ${choice.value === 'deny' ? 'danger' : ''} ${activeIndex === index ? 'active' : ''}`} key={choice.value} disabled={submitting} onClick={() => chooseActive(index)} onFocus={() => setActiveIndex(index)}>
-            <span className="run-decision-number">{index + 1}</span>
-            <span><strong>{choice.label}</strong><small>{choice.description}</small></span>
-            <ChevronRight size={16} />
-          </button>
-        ))}
-      </div>
-
+    <DecisionTray
+      className={`run-decision-panel ${isClarification ? 'clarification' : 'approval'}`}
+      trayRef={panelRef}
+      label={clarification ? undefined : '权限选项'}
+      title={clarification?.question}
+      titleId={clarification ? `run-decision-${requestKey}` : undefined}
+      optionsLabel={clarification ? '回答选项' : '权限选项'}
+      onKeyDown={onKeyDown}
+      error={error}
+      actions={clarification ? (
+        <button type="button" className="decision-close" onClick={onInterrupt} disabled={submitting} aria-label="中断当前提问"><X size={15} /></button>
+      ) : undefined}
+      footer={clarification ? <button type="button" className="decision-skip" onClick={onSkip} disabled={submitting}>{submitting ? '提交中…' : '跳过'}</button> : undefined}
+    >
+      {clarification ? clarification.choices.map((choice, index) => (
+        <DecisionOptionRow
+          key={`${index}-${choice}`}
+          number={index + 1}
+          label={choice}
+          active={activeIndex === index}
+          disabled={submitting}
+          onClick={() => chooseActive(index)}
+          onFocus={() => setActiveIndex(index)}
+        />
+      )) : approvalChoices.map((choice, index) => (
+        <DecisionOptionRow
+          key={choice.value}
+          number={index + 1}
+          label={choice.label}
+          description={choice.description}
+          active={activeIndex === index}
+          danger={choice.value === 'deny'}
+          disabled={submitting}
+          onClick={() => chooseActive(index)}
+          onFocus={() => setActiveIndex(index)}
+        />
+      ))}
       {clarification && (
-        <div className="run-decision-custom">
-          {!customOpen && <button onClick={() => setCustomOpen(true)} disabled={submitting}>其他</button>}
-          {customOpen && (
-            <div>
-              <input value={customAnswer} onChange={(event) => setCustomAnswer(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && customAnswer.trim() && !submitting) onAnswer(customAnswer.trim()); }} placeholder="输入自己的回答" aria-label="自定义回答" autoFocus={!clarification.choices.length} />
-              <button className="run-decision-send" onClick={() => onAnswer(customAnswer.trim())} disabled={submitting || !customAnswer.trim()} aria-label="发送自定义回答"><Send size={16} /></button>
-            </div>
-          )}
-        </div>
+        <DecisionOtherRow
+          open={customOpen}
+          value={customAnswer}
+          disabled={submitting}
+          placeholder="输入自己的回答"
+          onOpen={() => setCustomOpen(true)}
+          onChange={setCustomAnswer}
+          onSubmit={() => {
+            const answer = customAnswer.trim();
+            if (answer) onAnswer(answer);
+          }}
+          onClose={() => setCustomOpen(false)}
+        />
       )}
-
-      <footer className="run-decision-footer">
-        {error ? <span className="run-decision-error" role="alert">{error}</span> : <span>{submitting ? '正在提交…' : '可使用方向键、数字键或鼠标选择'}</span>}
-        {clarification && <button onClick={onSkip} disabled={submitting}>跳过</button>}
-      </footer>
-    </section>
+    </DecisionTray>
   );
 }
 
-function CompletedRunStatus({ summary }: { summary: CompletedRunSummary }) {
+function MessageActions({ message, copied, feedbackBusy, branching, error, onCopy, onFeedback, onBranch }: {
+  message: ChatEvent;
+  copied: boolean;
+  feedbackBusy: boolean;
+  branching: boolean;
+  error?: string;
+  onCopy: () => void;
+  onFeedback: (value: 'up' | 'down') => void;
+  onBranch: () => void;
+}) {
+  const duration = Number(message.processingDurationMs || 0);
   return (
-    <div className="run-complete-summary">
-      <span>已处理 {formatDuration(summary.elapsedSeconds)}</span>
-      <ChevronDown size={15} />
+    <div className="message-actions-wrap">
+      <div className="message-actions" aria-label="回复操作">
+        <IconTooltipButton
+          ariaLabel={copied ? '已复制回复' : '复制回复'}
+          hoverDelayMs={180}
+          placement="top"
+          tooltip={copied ? '已复制' : '复制'}
+          onClick={onCopy}
+        >
+          {copied ? <Check size={15} aria-hidden="true" /> : <Copy size={15} aria-hidden="true" />}
+        </IconTooltipButton>
+        <IconTooltipButton
+          active={message.feedback === 'up'}
+          ariaLabel={message.feedback === 'up' ? '取消喜欢' : '喜欢'}
+          disabled={feedbackBusy}
+          aria-pressed={message.feedback === 'up'}
+          hoverDelayMs={180}
+          placement="top"
+          tooltip={message.feedback === 'up' ? '取消喜欢' : '喜欢'}
+          onClick={() => onFeedback('up')}
+        >
+          <ThumbsUp size={15} aria-hidden="true" />
+        </IconTooltipButton>
+        <IconTooltipButton
+          active={message.feedback === 'down'}
+          ariaLabel={message.feedback === 'down' ? '取消不喜欢' : '不喜欢'}
+          disabled={feedbackBusy}
+          aria-pressed={message.feedback === 'down'}
+          hoverDelayMs={180}
+          placement="top"
+          tooltip={message.feedback === 'down' ? '取消不喜欢' : '不喜欢'}
+          onClick={() => onFeedback('down')}
+        >
+          <ThumbsDown size={15} aria-hidden="true" />
+        </IconTooltipButton>
+        <IconTooltipButton
+          ariaLabel="在新对话中继续"
+          disabled={branching}
+          aria-busy={branching || undefined}
+          hoverDelayMs={180}
+          placement="top"
+          tooltip={branching ? '正在创建新对话' : '在新对话中继续'}
+          onClick={onBranch}
+        >
+          {branching ? <LoaderCircle className="spin" size={15} aria-hidden="true" /> : <GitBranch size={15} aria-hidden="true" />}
+        </IconTooltipButton>
+        {duration > 0 && <span className="message-processing-duration">已处理 {formatDuration(duration / 1000)}</span>}
+      </div>
+      {error && <span className="message-actions-error" role="alert">{error}</span>}
     </div>
   );
 }
@@ -11357,13 +13966,13 @@ function permissionCopy(mode: string) {
 function permissionLabel(mode: string) {
   if (mode === 'manual') return '请求批准';
   if (mode === 'smart') return '替我审批';
-  return '完全访问权限';
+  return '完全访问';
 }
 
 function permissionDescription(mode: string) {
   if (mode === 'manual') return '编辑外部文件、执行命令和使用联网能力前先询问';
   if (mode === 'smart') return '仅对检测到的风险操作请求批准';
-  return '允许 Hermes 直接访问互联网和本机文件，仍保留运行记录';
+  return '跳过普通审批，硬性安全阻止和拒绝规则仍然生效';
 }
 
 function permissionTone(mode: string) {
@@ -11383,7 +13992,7 @@ function isVisibleChatMessage(message: ChatEvent) {
   if (message.agentId === 'system') return false;
   if (message.agentName === 'Hermes Bridge') return false;
   if (/Local Fallback|检测到 Hermes Studio|没有可用的模型 API Key|已回退到本地模拟/.test(`${message.role} ${content}`)) return false;
-  if (/^(已开启普通对话|已开启与 .+ 的单 Agent 对话|项目已创建|新项目对话已创建|Workspace 已开启)/.test(content)) return false;
+  if (/^(已开启普通对话|已开启与 .+ 的单 Agent 对话|已开启临时对话|项目已创建|新项目对话已创建|Workspace 已开启)/.test(content)) return false;
   return true;
 }
 
@@ -11423,12 +14032,13 @@ function deriveDarkThemePalette(theme: SpaceThemePalette): SpaceThemePalette {
 }
 
 function normalizeSpaceTheme(theme?: Partial<SpaceTheme>): SpaceTheme {
+  const colorMode: SpaceThemeColorMode = theme?.colorMode === 'native' ? 'native' : 'custom';
   const appearance: SpaceThemeAppearance = theme?.appearance === 'auto' || theme?.appearance === 'dark' || theme?.appearance === 'light' ? theme.appearance : 'light';
   const legacyPalette = normalizeSpaceThemePalette(theme as Partial<SpaceThemePalette> | undefined);
   const lightTheme = normalizeSpaceThemePalette(theme?.lightTheme || legacyPalette, legacyPalette);
   const darkTheme = normalizeSpaceThemePalette(theme?.darkTheme || deriveDarkThemePalette(lightTheme), deriveDarkThemePalette(lightTheme));
   const activePalette = appearance === 'dark' ? darkTheme : legacyPalette;
-  return { ...activePalette, appearance, lightTheme, darkTheme };
+  return { ...activePalette, colorMode, appearance, lightTheme, darkTheme, renderVersion: Math.max(3, Number(theme?.renderVersion) || 0) };
 }
 
 function isThemeNightTime(date = new Date()) {
@@ -11436,11 +14046,17 @@ function isThemeNightTime(date = new Date()) {
   return hour >= 18 || hour < 6;
 }
 
-function resolveEffectiveSpaceTheme(theme?: Partial<SpaceTheme>) {
+function resolveEffectiveSpaceTheme(theme?: Partial<SpaceTheme>): SpaceTheme {
   const normalized = normalizeSpaceTheme(theme);
-  if (normalized.appearance === 'dark') return { ...normalized.darkTheme!, appearance: normalized.appearance, lightTheme: normalized.lightTheme, darkTheme: normalized.darkTheme };
-  if (normalized.appearance === 'auto' && isThemeNightTime()) return { ...normalized.darkTheme!, appearance: normalized.appearance, lightTheme: normalized.lightTheme, darkTheme: normalized.darkTheme };
-  return { ...normalized.lightTheme!, appearance: normalized.appearance, lightTheme: normalized.lightTheme, darkTheme: normalized.darkTheme };
+  if (normalized.appearance === 'dark') return { ...normalized.darkTheme!, colorMode: normalized.colorMode, appearance: normalized.appearance, lightTheme: normalized.lightTheme, darkTheme: normalized.darkTheme, renderVersion: normalized.renderVersion };
+  if (normalized.appearance === 'auto' && isThemeNightTime()) return { ...normalized.darkTheme!, colorMode: normalized.colorMode, appearance: normalized.appearance, lightTheme: normalized.lightTheme, darkTheme: normalized.darkTheme, renderVersion: normalized.renderVersion };
+  return { ...normalized.lightTheme!, colorMode: normalized.colorMode, appearance: normalized.appearance, lightTheme: normalized.lightTheme, darkTheme: normalized.darkTheme, renderVersion: normalized.renderVersion };
+}
+
+function resolveSpaceThemeForAppearance(theme: Partial<SpaceTheme> | undefined, dark: boolean): SpaceTheme {
+  const normalized = normalizeSpaceTheme(theme);
+  const palette = normalizeSpaceThemePalette(theme as Partial<SpaceThemePalette> | undefined);
+  return { ...palette, colorMode: normalized.colorMode, appearance: dark ? 'dark' as const : 'light' as const, lightTheme: normalized.lightTheme, darkTheme: normalized.darkTheme, renderVersion: normalized.renderVersion };
 }
 
 function withDraftThemePalette(theme: SpaceTheme, palette: SpaceThemePalette): SpaceTheme {
@@ -11448,7 +14064,7 @@ function withDraftThemePalette(theme: SpaceTheme, palette: SpaceThemePalette): S
   const editsDark = normalized.appearance === 'dark' || (normalized.appearance === 'auto' && isThemeNightTime());
   const lightTheme = editsDark ? normalized.lightTheme! : palette;
   const darkTheme = editsDark ? palette : normalized.darkTheme || deriveDarkThemePalette(palette);
-  return { ...palette, appearance: normalized.appearance, lightTheme, darkTheme };
+  return { ...palette, colorMode: normalized.colorMode, appearance: normalized.appearance, lightTheme, darkTheme, renderVersion: normalized.renderVersion };
 }
 
 function normalizeGradientColors(theme?: Partial<SpaceTheme>): SpaceGradientColor[] {
@@ -11514,11 +14130,13 @@ function buildSpaceThemeFromPoint(x: number, y: number, color = colorFromThemePo
   return {
     accentColor: color,
     sidebarBg: mixHexWithWhite(color, mode === 'crisp' ? 0.66 : 0.78),
-    opacity: 0.9,
+    opacity: 0.5,
     noise: 0,
     texture: 0,
     mode,
     gradientColors: [{ id: 'primary', color, x, y, isPrimary: true }],
+    colorMode: 'custom',
+    renderVersion: 3,
   };
 }
 
@@ -11627,6 +14245,30 @@ function themeStageBackground(theme: SpaceTheme) {
 
 function themeShellBackground(theme: SpaceTheme) {
   return themeZenGradientBackground(theme, 'shell');
+}
+
+function macThemeBackground(theme: SpaceTheme) {
+  const colors = normalizeGradientColors(theme);
+  const strength = Math.round(workspaceTintAlpha(theme.opacity) * 100);
+  const tint = (color: string) => `color-mix(in srgb, ${color} ${strength}%, transparent)`;
+  if (colors.length <= 1) return `linear-gradient(${tint(colors[0]?.color || theme.accentColor)}, ${tint(colors[0]?.color || theme.accentColor)})`;
+  if (colors.length === 2) {
+    return `linear-gradient(-45deg, ${tint(colors[1].color)} 0%, transparent 100%), linear-gradient(135deg, ${tint(colors[0].color)} 0%, transparent 100%)`;
+  }
+  return `linear-gradient(-5deg, ${tint(colors[2].color)} 10%, transparent 80%), radial-gradient(circle at 95% 0%, ${tint(colors[1].color)} 0%, transparent 75%), radial-gradient(circle at 0% 0%, ${tint(colors[0].color)} 10%, transparent 70%)`;
+}
+
+function spaceRailContrastTokens(theme: SpaceTheme, dark: boolean) {
+  if (theme.colorMode === 'native') {
+    return dark
+      ? { text: '#f1f1f1', muted: 'rgb(241 241 241 / 66%)' }
+      : { text: '#202124', muted: 'rgb(32 33 36 / 60%)' };
+  }
+  const primary = primaryGradientColor(theme).color;
+  const foreground = contrastForegroundForTint(primary, workspaceTintAlpha(theme.opacity), dark);
+  return foreground === 'light'
+    ? { text: '#ffffff', muted: 'rgb(255 255 255 / 70%)' }
+    : { text: '#111214', muted: 'rgb(17 18 20 / 64%)' };
 }
 
 function themeZenGradientBackground(theme: SpaceTheme, surface: 'picker' | 'stage' | 'shell') {
@@ -11993,46 +14635,6 @@ function resolveRunTarget(message: string, agents: Agent[], fallbackAgent: Agent
   return fallbackAgent ? { kind: 'agent', agent: fallbackAgent } : null;
 }
 
-function resolveMentionedRunAgents(message: string, agents: Agent[], selectedAgentIds: string[], senderAgentId = ''): Agent[] {
-  const raw = String(message || '');
-  const lower = raw.toLowerCase();
-  const selectedSet = new Set(selectedAgentIds);
-  const candidates = agents.flatMap((agent) => [agent.name, agent.id, agent.profileName]
-    .filter((alias): alias is string => Boolean(alias))
-    .map((alias) => ({ agent, alias, lower: alias.toLowerCase() })))
-    .sort((a, b) => b.alias.length - a.alias.length);
-  const result: Agent[] = [];
-  const seen = new Set<string>();
-  for (let atIndex = lower.indexOf('@'); atIndex >= 0; atIndex = lower.indexOf('@', atIndex + 1)) {
-    if (!isMentionBeforeBoundary(raw[atIndex - 1])) continue;
-    const tail = lower.slice(atIndex + 1);
-    if (tail.startsWith('all') && !(/[A-Za-z0-9_]/.test(raw[atIndex + 4] || ''))) {
-      for (const agent of agents) {
-        if (agent.id === senderAgentId || seen.has(agent.id)) continue;
-        seen.add(agent.id);
-        result.push(agent);
-      }
-      continue;
-    }
-    const match = candidates.find(({ alias, lower: aliasLower }) => {
-      if (!tail.startsWith(aliasLower)) return false;
-      const after = raw[atIndex + alias.length + 1];
-      return after === undefined || !(/[A-Za-z0-9_]/.test(alias[alias.length - 1] || '') && /[A-Za-z0-9_]/.test(after));
-    });
-    if (!match || match.agent.id === senderAgentId || seen.has(match.agent.id)) continue;
-    seen.add(match.agent.id);
-    result.push(match.agent);
-  }
-  return result;
-}
-
-function stripAgentMentionTokens(message: string, agent: Agent) {
-  const aliases = [agent.name, agent.id, agent.profileName].filter((alias): alias is string => Boolean(alias)).sort((a, b) => b.length - a.length);
-  let result = String(message || '');
-  for (const alias of ['all', ...aliases]) result = result.replace(new RegExp(`@${String(alias).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}`, 'ig'), '');
-  return result.replace(/^[\s,\uff0c:\uff1a;\uff1b.!?\u3002\uff01\uff1f]+/, '').replace(/[\s,\uff0c:\uff1a;\uff1b]+$/g, '').trim();
-}
-
 function pruneAgentModelOverrides(overrides: AgentModelOverrides, agents: Agent[], models: ModelProfile[]) {
   const agentIds = new Set(agents.map((agent) => agent.id));
   return Object.fromEntries(Object.entries(overrides).filter(([agentId, modelId]) => agentIds.has(agentId) && Boolean(resolveModelChoice(modelId, models).model)));
@@ -12145,38 +14747,370 @@ function clampNumber(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
 }
 
-function ResizeHandle({ side, disabled, onResize, onCommit }: { side: 'left' | 'right'; disabled?: boolean; onResize: (width: number) => void; onCommit: (width: number) => void }) {
-  const latestWidthRef = useRef(0);
+function ResizeHandle({
+  side,
+  currentWidth,
+  minWidth,
+  maxWidth,
+  edgeAligned = false,
+  disabled,
+  onResize,
+  onCommit,
+}: {
+  side: 'left' | 'right';
+  currentWidth: number;
+  minWidth: number;
+  maxWidth: number;
+  edgeAligned?: boolean;
+  disabled?: boolean;
+  onResize: (width: number) => void;
+  onCommit: (width: number) => void;
+}) {
+  const latestWidthRef = useRef(currentWidth);
+  const keyboardWidthRef = useRef<number | null>(null);
+  const dragCleanupRef = useRef<(() => void) | null>(null);
+  const effectiveMaxWidth = Math.max(minWidth, maxWidth);
+
+  useEffect(() => () => {
+    dragCleanupRef.current?.();
+    document.body.classList.remove('resizing-columns');
+  }, []);
+
   function startDrag(event: React.PointerEvent<HTMLDivElement>) {
     if (disabled) return;
     event.preventDefault();
     const startX = event.clientX;
-    const app = event.currentTarget.closest('.app') as HTMLElement | null;
-    const sidebar = app?.querySelector('.sidebar, .settings-rail-sidebar') as HTMLElement | null;
-    const context = app?.querySelector('.context') as HTMLElement | null;
-    const startWidth = side === 'left'
-      ? sidebar?.getBoundingClientRect().width || defaultSidebarWidth
-      : context?.getBoundingClientRect().width || defaultContextWidth;
-    const bounds = side === 'left' ? sidebarWidthBounds : contextWidthBounds;
+    const pointerId = event.pointerId;
+    const target = event.currentTarget;
+    const startWidth = clampNumber(currentWidth, minWidth, effectiveMaxWidth);
     latestWidthRef.current = startWidth;
     document.body.classList.add('resizing-columns');
+    target.classList.add('is-resizing');
+    try {
+      target.setPointerCapture(pointerId);
+    } catch {
+      // Pointer capture is best-effort; window listeners still keep the drag stable.
+    }
     const onMove = (moveEvent: PointerEvent) => {
-      const delta = moveEvent.clientX - startX;
-      const nextWidth = side === 'left' ? startWidth + delta : startWidth - delta;
-      const clamped = clampNumber(nextWidth, bounds.min, bounds.max);
-      latestWidthRef.current = clamped;
-      onResize(clamped);
+      const nextWidth = paneWidthFromPointer({ side, startWidth, startX, currentX: moveEvent.clientX, minWidth, maxWidth: effectiveMaxWidth });
+      latestWidthRef.current = nextWidth;
+      onResize(nextWidth);
     };
-    const onUp = () => {
+    let finished = false;
+    const cleanup = () => {
       document.body.classList.remove('resizing-columns');
+      target.classList.remove('is-resizing');
       window.removeEventListener('pointermove', onMove);
-      window.removeEventListener('pointerup', onUp);
+      window.removeEventListener('pointerup', finish);
+      window.removeEventListener('pointercancel', finish);
+      window.removeEventListener('blur', finish);
+      try {
+        if (target.hasPointerCapture(pointerId)) target.releasePointerCapture(pointerId);
+      } catch {
+        // The pointer may already have been released by the operating system.
+      }
+      if (dragCleanupRef.current === cleanup) dragCleanupRef.current = null;
+    };
+    const finish = () => {
+      if (finished) return;
+      finished = true;
+      cleanup();
       onCommit(latestWidthRef.current);
     };
+    dragCleanupRef.current?.();
+    dragCleanupRef.current = cleanup;
     window.addEventListener('pointermove', onMove);
-    window.addEventListener('pointerup', onUp, { once: true });
+    window.addEventListener('pointerup', finish, { once: true });
+    window.addEventListener('pointercancel', finish, { once: true });
+    window.addEventListener('blur', finish, { once: true });
   }
-  return <div className={`resize-handle ${side} ${disabled ? 'disabled' : ''}`} onPointerDown={startDrag} aria-hidden="true" />;
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (disabled || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return;
+    event.preventDefault();
+    const nextWidth = paneWidthFromKey({
+      side,
+      currentWidth: keyboardWidthRef.current ?? currentWidth,
+      key: event.key,
+      shiftKey: event.shiftKey,
+      minWidth,
+      maxWidth: effectiveMaxWidth,
+    });
+    keyboardWidthRef.current = nextWidth;
+    latestWidthRef.current = nextWidth;
+    onResize(nextWidth);
+  }
+
+  function commitKeyboardWidth() {
+    if (keyboardWidthRef.current === null) return;
+    const width = keyboardWidthRef.current;
+    keyboardWidthRef.current = null;
+    onCommit(width);
+  }
+
+  return (
+    <div
+      className={`resize-handle ${side} ${edgeAligned ? 'card-edge' : ''} ${disabled ? 'disabled' : ''}`}
+      role="separator"
+      aria-label={side === 'left' ? '调整左侧栏宽度' : '调整右侧栏宽度'}
+      aria-orientation="vertical"
+      aria-valuemin={minWidth}
+      aria-valuemax={effectiveMaxWidth}
+      aria-valuenow={clampNumber(currentWidth, minWidth, effectiveMaxWidth)}
+      tabIndex={disabled ? -1 : 0}
+      onPointerDown={startDrag}
+      onKeyDown={handleKeyDown}
+      onKeyUp={(event) => {
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') commitKeyboardWidth();
+      }}
+      onBlur={commitKeyboardWidth}
+    />
+  );
 }
 
-createRoot(document.getElementById('root')!).render(<React.StrictMode><App /></React.StrictMode>);
+function RichContentQaPage() {
+  const params = new URLSearchParams(window.location.search);
+  const qaRoot = params.get('qaRoot') || '/tmp/frakio-rich-content-qa';
+  const file = (name: string) => `${qaRoot.replace(/\/$/, '')}/${name}`;
+  const content = [
+    '# Frakio 富内容验收',
+    '',
+    '- **今天（7/26）**是 CJK 相邻粗体测试',
+    '- [x] GFM 任务列表 ~~删除线~~',
+    '',
+    '| 中文列 | 很长的英文列 | 状态 |',
+    '| --- | --- | --- |',
+    '| 金沙洲 | SupercalifragilisticexpialidociousWithoutBreak | 正常 |',
+    '',
+    '```typescript',
+    'const greeting: string = "Frakio Work rich content";',
+    '```',
+    '',
+    '```diff',
+    '--- a/example.ts',
+    '+++ b/example.ts',
+    '@@ -1 +1 @@',
+    '-const ready = false;',
+    '+const ready = true;',
+    '```',
+    '',
+    '```json',
+    '{"workspace":{"name":"Frakio","features":["markdown","mermaid"]}}',
+    '```',
+    '',
+    '```mermaid',
+    'graph LR',
+    '  A["用户提出任务"] --> B["Frakio 路由"] --> C["Agent 执行"] --> D["富内容结果"]',
+    '```',
+    '',
+    '$$E = mc^2$$',
+    '',
+    '```datatable',
+    JSON.stringify({ title: 'Craft 协议数据表', columns: [{ key: 'city', label: '城市', type: 'text' }, { key: 'revenue', label: '营收', type: 'currency' }, { key: 'growth', label: '增长', type: 'percent' }, { key: 'tier', label: '等级', type: 'badge' }], rows: [{ city: '佛山', revenue: 4200, growth: 0.152, tier: 'A' }, { city: '广州', revenue: 3600, growth: -0.03, tier: 'B' }] }, null, 2),
+    '```',
+    '',
+    '```spreadsheet',
+    JSON.stringify({ filename: 'qa.xlsx', sheetName: 'Sheet 1', columns: [{ key: 'month', label: '月份', type: 'text' }, { key: 'value', label: '数值', type: 'number' }], rows: [{ month: '7月', value: 1280 }, { month: '8月', value: 1530 }] }, null, 2),
+    '```',
+    '',
+    '```html-preview',
+    JSON.stringify({ title: 'HTML 标签', items: [{ src: file('one.html'), label: '报告一' }, { src: file('two.html'), label: '报告二' }] }, null, 2),
+    '```',
+    '',
+    '```image-preview',
+    JSON.stringify({ title: '图片标签', items: [{ src: file('one.svg'), label: '图片一' }, { src: file('two.svg'), label: '图片二' }] }, null, 2),
+    '```',
+    '',
+    '```pdf-preview',
+    JSON.stringify({ src: file('sample.pdf'), title: 'PDF 阅读器' }, null, 2),
+    '```',
+    '',
+    '```markdown-preview',
+    JSON.stringify({ title: 'Markdown 标签', items: [{ src: file('one.md'), label: '文档一' }, { src: file('two.md'), label: '文档二' }] }, null, 2),
+    '```',
+  ].join('\n');
+  return <main className="app desktop-shell mac-desktop-shell mac-conversation-shell rich-qa-shell" data-appearance="light"><article className="rich-qa-page"><RichMarkdown content={content} threadId="rich-content-qa" /></article></main>;
+}
+
+function StreamRevealQaPage() {
+  const params = new URLSearchParams(window.location.search);
+  const streamingResponses = params.get('streaming') !== 'off';
+  const appearance = params.get('appearance') === 'dark' ? 'dark' : 'light';
+  const startDelay = Math.max(0, Math.min(2_000, Number(params.get('startDelay') || 120) || 120));
+  const handoffDelay = Math.max(0, Math.min(2_000, Number(params.get('handoffDelay') || 150) || 150));
+  const [draft, setDraft] = useState('');
+  const [groups, setGroups] = useState<RunActivityGroup[]>([]);
+  const [phase, setPhase] = useState<RunPresentationPhase>('thinking');
+  const [running, setRunning] = useState(true);
+  const [persisted, setPersisted] = useState('');
+  const finalContent = '先确认当前状态。工具调用完成后，继续补充 Markdown **结论**，以及一段突发到达但仍需柔和呈现的正文。';
+  const agent = useMemo<Agent>(() => ({
+    id: 'iris',
+    name: 'Iris',
+    role: '助理',
+    model: 'qa',
+    color: '#0f766e',
+    soul: '',
+    scope: 'qa',
+  }), []);
+
+  useEffect(() => {
+    setDraft('');
+    setGroups([]);
+    setPhase('thinking');
+    setRunning(true);
+    setPersisted('');
+    const timers = [
+      window.setTimeout(() => { setDraft('先'); setPhase('responding'); }, startDelay),
+      window.setTimeout(() => setDraft('先确认当前状态。'), startDelay + 52),
+      window.setTimeout(() => {
+        const now = new Date().toISOString();
+        setGroups([{
+          id: 'qa-tool',
+          contentOffset: '先确认当前状态。'.length,
+          status: 'completed',
+          summary: '读取了当前状态',
+          items: [{
+            id: 'qa-tool-item',
+            kind: 'read',
+            status: 'completed',
+            toolName: 'qa_read',
+            displayName: '读取当前状态',
+            intent: '确认工具摘要与正文保持时间线顺序。',
+            activeLabel: '正在读取',
+            completedLabel: '读取完成',
+            target: '/tmp/qa',
+            durationMs: 42,
+            resultPreview: 'ok',
+            createdAt: now,
+            updatedAt: now,
+          }],
+          createdAt: now,
+          updatedAt: now,
+        }]);
+        setPhase('activity');
+      }, startDelay + 102),
+      window.setTimeout(() => { setDraft('先确认当前状态。工具调用完成后，继续补充'); setPhase('responding'); }, startDelay + 156),
+      window.setTimeout(() => setDraft(finalContent), startDelay + 194),
+      window.setTimeout(() => setPhase('finished'), startDelay + 256),
+      window.setTimeout(() => {
+        setPersisted(finalContent);
+        setDraft('');
+        setRunning(false);
+      }, startDelay + 256 + handoffDelay),
+    ];
+    return () => timers.forEach((timer) => window.clearTimeout(timer));
+  }, [finalContent, handoffDelay, startDelay]);
+
+  return (
+    <main className="app desktop-shell mac-desktop-shell mac-conversation-shell rich-qa-shell" data-appearance={appearance}>
+      <section className="rich-qa-page" data-testid="stream-output">
+        {persisted ? (
+          <article className="message" data-testid="persisted-message">
+            <span className="agent-avatar" style={{ background: agent.color }}>I</span>
+            <div className="message-body"><div className="message-meta"><strong>Iris</strong></div><MarkdownMessage content={persisted} /></div>
+          </article>
+        ) : running ? (
+          <div data-testid="run-status">
+            <ChatRunStatus
+              target={{ kind: 'agent', agent }}
+              startedAt={Date.now()}
+              tick={0}
+              draft={draft}
+              activityGroups={groups}
+              presentationPhase={phase}
+              error=""
+              streamingResponses={streamingResponses}
+            />
+          </div>
+        ) : null}
+        <textarea aria-label="QA 输入框" defaultValue="" />
+      </section>
+    </main>
+  );
+}
+
+function ManagedWebAuthGate({ children }: { children: React.ReactNode }) {
+  const [state, setState] = useState<'loading' | 'ready' | 'login'>('loading');
+  const [password, setPassword] = useState('');
+  const [error, setError] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    void fetch('/api/auth/status')
+      .then(async (response) => {
+        if (!response.ok) throw new Error('无法读取 Web 服务登录状态。');
+        const status = await response.json();
+        if (!cancelled) setState(status.managed && !status.authenticated ? 'login' : 'ready');
+      })
+      .catch((reason) => {
+        if (!cancelled) {
+          setError(reason instanceof Error ? reason.message : String(reason));
+          setState('login');
+        }
+      });
+    return () => { cancelled = true; };
+  }, []);
+
+  const submit = async (event: React.FormEvent) => {
+    event.preventDefault();
+    if (!password || submitting) return;
+    setSubmitting(true);
+    setError('');
+    try {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || '登录失败。');
+      setPassword('');
+      setState('ready');
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  if (state === 'ready') return <>{children}</>;
+  if (state === 'loading') return <main className="managed-web-auth-shell" aria-label="正在连接 Frakio Work" />;
+  return (
+    <main className="managed-web-auth-shell">
+      <form className="managed-web-auth-card" onSubmit={submit}>
+        <img src={frakioBrandLogoUrl} alt="" />
+        <div>
+          <h1>Frakio Work</h1>
+          <p>输入这台工作台的管理员密码。</p>
+        </div>
+        <label>
+          <span>管理员密码</span>
+          <input
+            autoFocus
+            type="password"
+            autoComplete="current-password"
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+          />
+        </label>
+        {error ? <p className="managed-web-auth-error" role="alert">{error}</p> : null}
+        <button type="submit" disabled={!password || submitting}>{submitting ? '正在登录…' : '进入工作台'}</button>
+        <small>仅限可信局域网使用。不要把此 HTTP 地址直接暴露到公网。</small>
+      </form>
+    </main>
+  );
+}
+
+const richContentQa = new URLSearchParams(window.location.search).get('rich-content-qa') === '1';
+const streamRevealQa = new URLSearchParams(window.location.search).get('stream-reveal-qa') === '1';
+createRoot(document.getElementById('root')!).render(
+  <React.StrictMode>
+    {streamRevealQa
+      ? <StreamRevealQaPage />
+      : richContentQa
+        ? <RichContentQaPage />
+        : <ManagedWebAuthGate><App /></ManagedWebAuthGate>}
+  </React.StrictMode>,
+);

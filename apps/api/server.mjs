@@ -2,8 +2,9 @@ import cors from 'cors';
 import express from 'express';
 import { execFile, execFileSync, spawn } from 'node:child_process';
 import { createServer } from 'node:http';
+import { createServer as createHttpsServer } from 'node:https';
 import { createReadStream, createWriteStream, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
-import { access, appendFile, cp, mkdir, readdir, readFile, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
+import { access, appendFile, cp, lstat, mkdir, readlink, readdir, readFile, rename, rm, stat, symlink, unlink, writeFile } from 'node:fs/promises';
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import net from 'node:net';
 import os from 'node:os';
@@ -19,18 +20,47 @@ import { createAttachmentStore, MAX_ATTACHMENT_BYTES } from './lib/attachment-st
 import { createSerialJsonWriter, readJsonWithRecovery } from './lib/atomic-json-store.mjs';
 import { probeResponsesCapabilities } from './lib/capability-probe.mjs';
 import { createLocalSecurity } from './lib/local-security.mjs';
+import { createManagedWebAuth } from './lib/managed-web-auth.mjs';
+import { acquireManagedServiceLock, FRAKIO_SERVICE_PROTOCOL, removeServiceDescriptor, writeServiceDescriptor } from './lib/service-discovery.mjs';
 import { isSystemHermesProfile, resolveDeletableHermesProfileDir, userVisibleHermesProfiles } from './lib/hermes-profile-safety.mjs';
+import { isOfficialHermesReleaseTag, parseOfficialHermesReleaseTags } from './lib/hermes-runtime-releases.mjs';
 import { resolveInsideRoot } from './lib/path-boundary.mjs';
 import { resolveCommand as resolvePlatformCommand, runtimeNodeCandidate, runtimePlatformDir, runtimePythonCandidates, runtimePythonSitePackagesCandidates } from './lib/platform.mjs';
 import { capabilitiesForModels, mapRunSettings, normalizeCapabilityOverrides, resolveModelCapability } from './lib/model-capabilities.mjs';
 import { createModelRunDiagnostic, finishModelRunDiagnostic, markModelRunSent } from './lib/model-run-diagnostics.mjs';
 import { isMentionNamePresent, mentionDepthAllows, normalizeAgentMentionMaxDepth, registerMentionEdge, resolveMentionedAgents, stripMentionRoutingTokens } from './lib/mention-routing.mjs';
-import { CHAT_THINKING_FORMATS, candidateModelUrls, directHttpRequestOverrides } from './lib/provider-adapters.mjs';
+import {
+  CHAT_THINKING_FORMATS,
+  candidateModelUrls,
+  candidateProviderBaseUrls,
+  directHttpRequestOverrides,
+  isAnthropicLikeBaseUrl,
+  normalizeProviderBaseUrl,
+  providerInferenceUrl,
+} from './lib/provider-adapters.mjs';
 import { catalogStatus, flattenProviderCatalog, parseCatalogResponse, parseModelIds, readCatalogCache, recordActiveProbeCapability, recordCatalogError, updateProviderCatalog, verificationKey, writeCatalogCache } from './lib/model-catalog-store.mjs';
 import { extractChatGptAccountId, fetchCodexOAuthCatalog } from './lib/oauth-provider-catalog.mjs';
 import { runtimeStep, summarizeRuntimeAutoStart } from './lib/runtime-autostart.mjs';
 import { appendCollaborationEvent, boardLifecycle, collaborationEventsAfter, diffCollaborationPlans, normalizeThreadCollaboration, taskStatusEvent, validateCollaborationPlan } from './lib/collaboration.mjs';
 import { applyRunActivityToTranscript, normalizeRunActivityItem, normalizeRunTranscripts, summarizeActivityItems, upsertRunTranscript } from './lib/run-activity.mjs';
+import { migrateSpaceTheme, SPACE_THEME_RENDER_VERSION } from './lib/space-theme.mjs';
+import { normalizeWorkbenchSidebarPatch, normalizeWorkbenchSidebarSettings } from './lib/sidebar-width.mjs';
+import { resolveRichPreviewFile } from './lib/rich-preview.mjs';
+import { normalizeRepairedOutput, richContentRepairPrompt, validateRichContentOutput } from './lib/rich-content-output.mjs';
+import { sanitizeGeneratedTitle, titleGenerationTranscript } from './lib/title-generation.mjs';
+import {
+  activePlanSession,
+  autoResolvePlanQuestionBatch,
+  cancelPlanQuestionBatch,
+  cancelPlanSession,
+  createPlanQuestionBatch,
+  createPlanSession,
+  latestPlanDraft,
+  normalizeThreadPlans,
+  publicPlanSession,
+  resolvePlanQuestionBatch,
+  submitPlanDraft,
+} from './lib/plan-mode.mjs';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
@@ -40,12 +70,17 @@ const projectRoot = path.resolve(__dirname, '../..');
 const homeDir = os.homedir();
 const frakioWorkHome = process.env.FRAKIO_WORK_HOME || path.join(homeDir, '.frakio-work');
 const isDesktopMode = process.env.FRAKIO_WORK_DESKTOP === '1';
+const isManagedWebMode = process.env.FRAKIO_WORK_DEPLOYMENT_MODE === 'managed-web';
+const tlsCertPath = String(process.env.FRAKIO_WORK_TLS_CERT || '').trim();
+const tlsKeyPath = String(process.env.FRAKIO_WORK_TLS_KEY || '').trim();
+const tlsEnabled = Boolean(tlsCertPath && tlsKeyPath);
 const appRoot = process.env.FRAKIO_WORK_APP_ROOT || projectRoot;
 const statePath = process.env.FRAKIO_WORK_STATE_PATH || path.join(frakioWorkHome, 'data/workbench-state.json');
 const secretsPath = process.env.FRAKIO_WORK_SECRETS_PATH || path.join(frakioWorkHome, 'data/model-secrets.json');
 const telemetryPath = process.env.FRAKIO_WORK_TELEMETRY_PATH || path.join(frakioWorkHome, 'data/telemetry.json');
 const modelCatalogCachePath = process.env.FRAKIO_WORK_MODEL_CATALOG_PATH || path.join(frakioWorkHome, 'data/model-catalog-cache.json');
 const defaultProjectsRoot = process.env.FRAKIO_WORK_PROJECTS_ROOT || path.join(frakioWorkHome, 'projects');
+const serverDirectoryRoot = process.env.FRAKIO_WORK_PROJECTS_ROOT || homeDir;
 const webDistPath = process.env.FRAKIO_WORK_WEB_DIST || path.join(appRoot, 'dist');
 const hermesWebUiHome = String(process.env.HERMES_WEB_UI_HOME || '').trim();
 const hermesHome = process.env.HERMES_HOME || path.join(homeDir, '.hermes');
@@ -57,14 +92,21 @@ const frakioBundledBridgeRoot = path.join(frakioBundledRuntimeHome, 'agent-bridg
 const frakioManagedHermesRuntimeRoot = path.join(frakioWorkHome, 'runtimes', 'hermes');
 const frakioRuntimeStagingRoot = path.join(frakioWorkHome, 'runtimes', '.staging');
 const frakioRuntimeRegistryPath = path.join(frakioWorkHome, 'runtime', 'runtime-registry.json');
+const sharedHermesModulesRoot = path.join(frakioWorkHome, 'shared');
+const sharedHermesSkillsRoot = path.join(sharedHermesModulesRoot, 'skills');
+const sharedHermesPluginsRoot = path.join(sharedHermesModulesRoot, 'plugins');
+const hermesModuleProvenancePath = path.join(frakioWorkHome, 'module-provenance.json');
+const hermesModuleArchiveRoot = path.join(frakioWorkHome, 'archive', 'modules');
 const hermesAgentSourcePath = process.env.HERMES_AGENT_SOURCE || path.join(frakioWorkHome, 'sources', 'hermes-agent');
 const hermesAgentBackupRoot = path.join(frakioWorkHome, 'backups', 'hermes-agent');
 const attachmentRoot = path.join(frakioWorkHome, 'attachments');
 const officialHermesAgentRepo = 'https://github.com/NousResearch/hermes-agent.git';
-const frakioBridgeProtocolVersion = 2;
-const workbenchCollaborationProtocolVersion = 2;
+const frakioBridgeProtocolVersion = 3;
+const workbenchCollaborationProtocolVersion = 3;
 const requiredWorkbenchCollaborationTools = [
   'hermes_workbench_protocol_get',
+  'hermes_workbench_plan_user_input_request',
+  'hermes_workbench_plan_submit',
   'hermes_workbench_collaboration_plan_get',
   'hermes_workbench_collaboration_plan_publish',
   'hermes_workbench_collaboration_dependency_request',
@@ -72,9 +114,15 @@ const requiredWorkbenchCollaborationTools = [
   'hermes_workbench_collaboration_artifact_publish',
   'hermes_workbench_collaboration_task_complete',
 ];
+const requiredWorkbenchPlanTools = [
+  'hermes_workbench_protocol_get',
+  'hermes_workbench_plan_user_input_request',
+  'hermes_workbench_plan_submit',
+];
 const requiredAiohttpVersion = '3.14.1';
 const requiredMcpVersion = '1.26.0';
 const requiredStarletteVersion = '1.0.1';
+const requiredDdgsVersion = '9.14.4';
 const hermesDbPath = hermesWebUiHome ? path.join(hermesWebUiHome, 'hermes-web-ui.db') : '';
 const telemetry = createTelemetryClient({
   filePath: telemetryPath,
@@ -103,6 +151,15 @@ let hermesAutoStartState = {
   error: '',
   warnings: [],
 };
+let pendingHermes019UpgradeRollback = null;
+const hermesBootstrapInstallSteps = [
+  { id: 'verify-runtime', label: '验证内置运行环境' },
+  { id: 'write-config', label: '初始化 Hermes 配置' },
+  { id: 'start-runtime', label: '启动 Hermes Runtime' },
+  { id: 'detect', label: '验证本地连接' },
+];
+let hermesBootstrapInstallJob = null;
+const hermesBootstrapInstallListeners = new Set();
 const providerEnvMap = {
   openai: { apiKey: 'OPENAI_API_KEY', baseUrl: 'OPENAI_BASE_URL' },
   anthropic: { apiKey: 'ANTHROPIC_API_KEY', baseUrl: 'ANTHROPIC_BASE_URL' },
@@ -171,11 +228,6 @@ const auxiliaryModelTasks = [
 ];
 const auxiliaryModelTaskByKey = new Map(auxiliaryModelTasks.map((task) => [task.key, task]));
 const auxiliaryEditableFields = ['provider', 'model', 'timeout', 'download_timeout', 'extra_body'];
-const defaultMoaReferenceModels = [
-  { provider: 'openai-codex', model: 'gpt-5.5' },
-  { provider: 'openrouter', model: 'deepseek/deepseek-v4-pro' },
-];
-const defaultMoaAggregator = { provider: 'openrouter', model: 'anthropic/claude-opus-4.8' };
 const kanbanStatuses = new Set(['triage', 'todo', 'scheduled', 'ready', 'running', 'blocked', 'review', 'done', 'archived']);
 const gatewayManagementModes = new Set(['auto', 'per_profile', 'unified']);
 const externalProviderPresetSource = process.env.FRAKIO_WORK_PROVIDER_PRESETS || '';
@@ -206,12 +258,14 @@ const fallbackProviderPresets = [
 const defaultSpaceTheme = {
   accentColor: '#dce8e3',
   sidebarBg: '#f3f7f5',
-  opacity: 0.74,
+  opacity: 0.5,
   noise: 0.01,
   texture: 0.03,
   mode: 'soft',
   gradientColors: [{ id: 'primary', color: '#dce8e3', x: 0.5, y: 0.5, isPrimary: true }],
+  colorMode: 'native',
   appearance: 'light',
+  renderVersion: SPACE_THEME_RENDER_VERSION,
 };
 function normalizeProviderPreset(raw = {}) {
   const value = String(raw.value || '').trim();
@@ -288,11 +342,22 @@ const defaultVaultPath =
   process.env.OBSIDIAN_VAULT ||
   defaultProjectsRoot;
 
-const localSecurity = createLocalSecurity({ port, development: process.env.FRAKIO_WORK_PACKAGED !== '1' });
+const localSecurity = createLocalSecurity({ port, development: process.env.FRAKIO_WORK_PACKAGED !== '1', managedWeb: isManagedWebMode });
+const managedWebAuth = createManagedWebAuth({
+  enabled: isManagedWebMode,
+  home: frakioWorkHome,
+  secureCookies: tlsEnabled,
+});
 app.use(cors(localSecurity.corsOptions));
 app.use(express.json({ limit: '10mb' }));
+app.get('/api/auth/status', managedWebAuth.statusRoute);
+app.post('/api/auth/login', managedWebAuth.loginRoute);
+app.post('/api/auth/desktop-session', managedWebAuth.desktopSessionRoute);
+app.use('/api', managedWebAuth.protect);
 app.get('/api/session', localSecurity.sessionRoute);
 app.use('/api', localSecurity.protect);
+app.post('/api/auth/logout', managedWebAuth.logoutRoute);
+app.put('/api/auth/password', (req, res) => void managedWebAuth.passwordRoute(req, res));
 
 app.post('/api/attachments', express.raw({ type: () => true, limit: MAX_ATTACHMENT_BYTES }), async (req, res) => {
   try {
@@ -329,6 +394,28 @@ app.delete('/api/attachments/:id', async (req, res) => {
     res.json({ ok: true, deletedAttachmentId: req.params.id });
   } catch (error) {
     res.status(error.status || 500).json({ error: String(error?.message || error), code: error.code || '' });
+  }
+});
+
+app.get('/api/filesystem/directories', async (req, res) => {
+  try {
+    const requested = String(req.query.path || serverDirectoryRoot).trim() || serverDirectoryRoot;
+    const current = resolveInsideRoot(serverDirectoryRoot, requested);
+    const info = await stat(current);
+    if (!info.isDirectory()) return res.status(400).json({ error: '目标路径不是文件夹。' });
+    const entries = (await readdir(current, { withFileTypes: true }))
+      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
+      .map((entry) => ({ name: entry.name, path: path.join(current, entry.name) }))
+      .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
+    const parentCandidate = path.dirname(current);
+    res.json({
+      root: serverDirectoryRoot,
+      current,
+      parent: current === serverDirectoryRoot ? '' : resolveInsideRoot(serverDirectoryRoot, parentCandidate),
+      entries,
+    });
+  } catch (error) {
+    res.status(error.status || 400).json({ error: error.message || '无法读取文件夹。' });
   }
 });
 
@@ -538,6 +625,8 @@ function findFrakioHermesRuntimeSync() {
     const candidates = uniquePathEntries([
       registered?.runtimeDir,
       path.join(frakioManagedHermesRuntimeRoot, registry.activeVersion, hermesRuntimePlatformDir()),
+      path.join(frakioBundledHermesRuntimeRoot, registry.activeVersion, hermesRuntimePlatformDir()),
+      path.join(projectRoot, 'runtime', 'hermes', registry.activeVersion, hermesRuntimePlatformDir()),
     ]);
     for (const runtimeDir of candidates) {
       const runtime = inspectHermesRuntimeDir(runtimeDir, 'managed');
@@ -776,7 +865,7 @@ function runTelemetryProperties(thread) {
 function defaultState() {
   return {
     version: 2,
-    ui: { libraryCollapsed: false, pinnedNav: defaultPinnedNav, defaultAgentId: '', fallbackDecisionAgentId: '', defaultModel: '', density: 'comfortable', streamingResponses: true, showReasoning: true, telemetryEnabled: false, telemetryNoticeSeenAt: '', agentMentionMaxDepth: 2 },
+    ui: { libraryCollapsed: false, pinnedNav: defaultPinnedNav, defaultAgentId: '', fallbackDecisionAgentId: '', defaultModel: '', density: 'comfortable', appearance: 'system', streamingResponses: true, showReasoning: true, richToolDescriptions: true, telemetryEnabled: false, telemetryNoticeSeenAt: '', agentMentionMaxDepth: 2, ...normalizeWorkbenchSidebarSettings() },
     userProfile: { avatarUrl: '', nickname: '', bio: '', age: '', hobbies: '', occupation: '', defaultAgentAddress: '', otherAgentAddress: '', completedAt: '', updatedAt: '' },
     observability: { modelUsage: [], modelRuns: [], systemEvents: [] },
     integrations: {
@@ -794,7 +883,7 @@ function defaultState() {
         apiStatus: 'unknown',
         selectedProfile: 'default',
         lastCheckedAt: null,
-        approvalMode: 'manual',
+        approvalMode: 'smart',
         gatewayAutoStart: { enabled: true, management: 'per_profile', include: [], exclude: [] },
       },
     },
@@ -812,10 +901,17 @@ async function readState() {
   const stored = await readJsonWithRecovery(statePath, () => null);
   if (!stored) {
     const state = defaultState();
+    await migrateHermes019ApprovalDefaults(state);
     await writeState(state);
     return state;
   }
-  return normalizeState(stored);
+  const state = normalizeState(stored);
+  const sidebarSettingsChanged = ['sidebarWidth', 'macSidebarWidth', 'macSidebarWidthVersion']
+    .some((key) => stored.ui?.[key] !== state.ui?.[key]);
+  const removedConversationTransition = Object.prototype.hasOwnProperty.call(stored.ui || {}, 'conversationTransition');
+  const approvalDefaultsChanged = await migrateHermes019ApprovalDefaults(state);
+  if (sidebarSettingsChanged || removedConversationTransition || approvalDefaultsChanged || (stored.spaces || []).some((space) => (Number(space?.theme?.renderVersion) || 0) < SPACE_THEME_RENDER_VERSION)) await writeState(state);
+  return state;
 }
 
 async function readSecrets() {
@@ -920,6 +1016,8 @@ function deriveDarkSpaceThemePalette(theme = defaultSpaceTheme) {
 }
 
 function normalizeSpaceTheme(theme = {}) {
+  theme = migrateSpaceTheme(theme);
+  const colorMode = theme.colorMode === 'native' ? 'native' : 'custom';
   const appearance = theme.appearance === 'auto' || theme.appearance === 'dark' || theme.appearance === 'light' ? theme.appearance : 'light';
   const legacyPalette = normalizeSpaceThemePalette(theme);
   const lightTheme = normalizeSpaceThemePalette(theme.lightTheme || legacyPalette, legacyPalette);
@@ -927,9 +1025,11 @@ function normalizeSpaceTheme(theme = {}) {
   const activePalette = appearance === 'dark' ? darkTheme : legacyPalette;
   return {
     ...activePalette,
+    colorMode,
     appearance,
     lightTheme,
     darkTheme,
+    renderVersion: SPACE_THEME_RENDER_VERSION,
   };
 }
 
@@ -950,6 +1050,8 @@ function normalizeSpace(space = {}, fallbackName = 'Frakio Work') {
 
 function normalizeState(state) {
   const base = defaultState();
+  const sidebarSettings = normalizeWorkbenchSidebarSettings(state?.ui || {});
+  const { conversationTransition: _removedConversationTransition, ...uiWithoutConversationTransition } = state?.ui || {};
   const { divisions: _legacyDivisions, orgEdges: _legacyOrgEdges, ...stateWithoutDivisions } = state || {};
   const sourceAgents = Array.isArray(state.agents) ? state.agents : base.agents;
   const agents = sourceAgents.filter((agent) => !isSystemHermesProfile(agent.profileName, agent.id));
@@ -1010,11 +1112,13 @@ function normalizeState(state) {
     },
     ui: {
       ...base.ui,
-      ...(state.ui || {}),
+      ...uiWithoutConversationTransition,
       activeSpaceId,
       defaultAgentId,
       fallbackDecisionAgentId: agentIds.has(state.ui?.fallbackDecisionAgentId) ? state.ui.fallbackDecisionAgentId : (agentIds.has('iris') ? 'iris' : defaultAgentId),
+      ...sidebarSettings,
       defaultModel,
+      appearance: ['system', 'light', 'dark'].includes(state.ui?.appearance) ? state.ui.appearance : 'system',
       agentMentionMaxDepth: normalizeAgentMentionMaxDepth(state.ui?.agentMentionMaxDepth, 2),
       pinnedNav: { ...defaultPinnedNav, ...(state.ui?.pinnedNav || {}) },
     },
@@ -1053,6 +1157,7 @@ function normalizeState(state) {
         : (workspaceById.get(thread.workspaceId)?.spaceId || activeSpaceId || fallbackSpaceId),
       mode: thread.mode || 'workspace',
       executionMode: thread.executionMode === 'work' ? 'work' : 'chat',
+      ...normalizeThreadPlans(thread),
       workerOutputMode: thread.workerOutputMode === 'all' ? 'all' : 'summary',
       workspaceId: thread.mode === 'direct' ? null : (workspaceById.has(thread.workspaceId) ? thread.workspaceId : normalizedWorkspaces[0]?.id || null),
       primaryAgentId: agentIds.has(thread.primaryAgentId) ? thread.primaryAgentId : defaultAgentId,
@@ -1064,7 +1169,7 @@ function normalizeState(state) {
         : hasVaultId
           ? (sourceVaults.some((item) => item.id === thread.vaultId) ? thread.vaultId : null)
           : (workspaceById.get(thread.workspaceId)?.vaultId || normalizedWorkspaces[0]?.vaultId || null),
-      permissionMode: ['manual', 'smart', 'off'].includes(thread.permissionMode) ? thread.permissionMode : 'manual',
+      permissionMode: ['manual', 'smart', 'off'].includes(thread.permissionMode) ? thread.permissionMode : 'smart',
       selectedAgents: Array.isArray(thread.selectedAgents) ? thread.selectedAgents.filter((agentId) => agentIds.has(agentId)) : [],
       agentModelOverrides: normalizeAgentModelOverrides(thread.agentModelOverrides, agents, normalizedModels),
       agentRunOverrides: normalizeAgentRunOverrides(thread.agentRunOverrides, agents),
@@ -1183,6 +1288,41 @@ function customProviderBaseName(model) {
   }
 }
 
+function normalizeApiModePreference(value, fallbackApiMode = '') {
+  const clean = String(value || '').trim();
+  if (['auto', 'chat_completions', 'openai_responses', 'anthropic_messages'].includes(clean)) return clean;
+  const legacy = normalizeApiMode(fallbackApiMode);
+  if (legacy === 'codex_responses' || legacy === 'openai_responses') return 'openai_responses';
+  if (legacy === 'anthropic_messages') return 'anthropic_messages';
+  return 'chat_completions';
+}
+
+function runtimeApiMode(value) {
+  const clean = String(value || '').trim();
+  return clean === 'openai_responses' ? 'codex_responses' : normalizeApiMode(clean);
+}
+
+function modelRuntimeRevision(model = {}) {
+  const existing = String(model.runtimeRevision || '').trim();
+  if (existing) return existing.slice(0, 100);
+  return createHash('sha256').update(JSON.stringify({
+    providerKey: model.providerKey || '',
+    baseUrl: comparableBaseUrl(model.baseUrl),
+    apiMode: runtimeApiMode(model.apiMode),
+    apiModePreference: normalizeApiModePreference(model.apiModePreference, model.apiMode),
+    model: model.model || '',
+    modelApiModes: normalizeModelApiModes(model.modelApiModes),
+    compat: normalizeModelCompat(model.compat),
+    modelCompat: normalizeModelCompatMap(model.modelCompat),
+    capabilityMode: model.capabilityMode === 'manual' ? 'manual' : 'auto',
+    capabilityOverrides: normalizeCapabilityOverrides(model.capabilityOverrides),
+  })).digest('hex').slice(0, 20);
+}
+
+function newRuntimeRevision() {
+  return `${Date.now().toString(36)}-${randomUUID().slice(0, 8)}`;
+}
+
 function normalizeModels(models) {
   const normalized = models.map((model) => ({
     id: model.id || id('model'),
@@ -1198,7 +1338,8 @@ function normalizeModels(models) {
     source: ['demo', 'hermes-studio', 'hermes-profile', 'manual'].includes(model.source) ? model.source : 'manual',
     profileName: String(model.profileName || '').trim().slice(0, 80),
     providerKey: String(model.providerKey || '').trim().slice(0, 120),
-    apiMode: normalizeApiMode(model.apiMode),
+    apiMode: runtimeApiMode(model.apiMode),
+    apiModePreference: normalizeApiModePreference(model.apiModePreference, model.apiMode),
     modelsUrl: String(model.modelsUrl || '').trim().slice(0, 300),
     modelApiModes: normalizeModelApiModes(model.modelApiModes),
     compat: normalizeModelCompat(model.compat),
@@ -1207,6 +1348,7 @@ function normalizeModels(models) {
     capabilityMode: model.capabilityMode === 'manual' ? 'manual' : 'auto',
     capabilityOverrides: normalizeCapabilityOverrides(model.capabilityOverrides),
     pricing: normalizeModelPricing(model.pricing),
+    runtimeRevision: '',
   }));
   const usedKeys = new Map();
   const presets = loadProviderPresets();
@@ -1230,6 +1372,7 @@ function normalizeModels(models) {
       usedKeys.set(providerKey, signature);
     }
     model.providerKey = providerKey.slice(0, 120);
+    model.runtimeRevision = modelRuntimeRevision({ ...model, runtimeRevision: models.find((item) => item?.id === model.id)?.runtimeRevision });
   }
   return normalized;
 }
@@ -1294,6 +1437,7 @@ function publicModel(model) {
     profileName: model.profileName || '',
     providerKey: model.providerKey || '',
     apiMode: model.apiMode || '',
+    apiModePreference: normalizeApiModePreference(model.apiModePreference, model.apiMode),
     modelsUrl: model.modelsUrl || '',
     modelApiModes: normalizeModelApiModes(model.modelApiModes),
     compat: normalizeModelCompat(model.compat),
@@ -1302,6 +1446,7 @@ function publicModel(model) {
     capabilityMode: model.capabilityMode === 'manual' ? 'manual' : 'auto',
     capabilityOverrides: model.capabilityMode === 'manual' ? normalizeCapabilityOverrides(model.capabilityOverrides) : {},
     pricing: normalizeModelPricing(model.pricing),
+    runtimeRevision: modelRuntimeRevision(model),
   };
 }
 
@@ -1544,6 +1689,652 @@ async function editablePluginEntries(dir, profileName, config = {}) {
     .filter((row, index, arr) => arr.findIndex((item) => item.name === row.name) === index)
     .sort((a, b) => a.name.localeCompare(b.name))
     .slice(0, 80);
+}
+
+let hermesModuleMutationQueue = Promise.resolve();
+
+function managedModuleKind(value) {
+  const kind = String(value || '').trim();
+  if (!['skill', 'plugin'].includes(kind)) {
+    const error = new Error('模块类型必须是 skill 或 plugin。');
+    error.status = 400;
+    throw error;
+  }
+  return kind;
+}
+
+function managedModuleScope(value) {
+  const scope = String(value || '').trim();
+  if (!['global', 'profile'].includes(scope)) {
+    const error = new Error('模块范围必须是 global 或 profile。');
+    error.status = 400;
+    throw error;
+  }
+  return scope;
+}
+
+function sharedModuleRoot(kind) {
+  return managedModuleKind(kind) === 'skill' ? sharedHermesSkillsRoot : sharedHermesPluginsRoot;
+}
+
+function profileModuleRoot(profileDir, kind) {
+  return path.join(profileDir, managedModuleKind(kind) === 'skill' ? 'skills' : 'plugins');
+}
+
+function emptyModuleProvenance() {
+  return { version: 1, skills: {}, plugins: {}, archives: [] };
+}
+
+function provenanceBucket(kind) {
+  return managedModuleKind(kind) === 'skill' ? 'skills' : 'plugins';
+}
+
+async function readManagedModuleProvenance() {
+  const raw = await readJsonFile(hermesModuleProvenancePath);
+  return {
+    version: 1,
+    skills: raw?.skills && typeof raw.skills === 'object' ? raw.skills : {},
+    plugins: raw?.plugins && typeof raw.plugins === 'object' ? raw.plugins : {},
+    archives: Array.isArray(raw?.archives) ? raw.archives : [],
+  };
+}
+
+async function writeJsonAtomic(filePath, value) {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const temporaryPath = `${filePath}.${process.pid}.${randomBytes(5).toString('hex')}.tmp`;
+  await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
+  await rename(temporaryPath, filePath);
+}
+
+async function writeYamlAtomic(filePath, value) {
+  await mkdir(path.dirname(filePath), { recursive: true });
+  const temporaryPath = `${filePath}.${process.pid}.${randomBytes(5).toString('hex')}.tmp`;
+  await writeFile(temporaryPath, YAML.stringify(value), { encoding: 'utf8', mode: 0o600 });
+  await rename(temporaryPath, filePath);
+}
+
+async function moveDirectory(source, destination) {
+  await mkdir(path.dirname(destination), { recursive: true });
+  try {
+    await rename(source, destination);
+  } catch (error) {
+    if (error?.code !== 'EXDEV') throw error;
+    await cp(source, destination, { recursive: true, force: false, errorOnExist: true });
+    await rm(source, { recursive: true, force: true });
+  }
+}
+
+async function managedModuleEntries(root, kind) {
+  const cleanKind = managedModuleKind(kind);
+  if (!(await exists(root))) return [];
+  const manifestFiles = cleanKind === 'skill'
+    ? await findFilesByName(root, 'SKILL.md', 5)
+    : [
+        ...(await findFilesByName(root, 'plugin.yaml', 5)),
+        ...(await findFilesByName(root, 'plugin.json', 5)),
+      ];
+  const rows = [];
+  const seenDirs = new Set();
+  for (const manifestPath of manifestFiles.sort()) {
+    const moduleDir = path.dirname(manifestPath);
+    if (seenDirs.has(moduleDir)) continue;
+    seenDirs.add(moduleDir);
+    const relativeDir = path.relative(root, moduleDir);
+    if (!relativeDir || relativeDir.startsWith('..') || relativeDir.split(path.sep).some((part) => part.startsWith('.'))) continue;
+    const moduleStat = await lstat(moduleDir).catch(() => null);
+    if (!moduleStat || moduleStat.isSymbolicLink()) continue;
+    const raw = await readFile(manifestPath, 'utf8').catch(() => '');
+    let metadata = {};
+    if (cleanKind === 'skill') {
+      metadata = splitSkillMarkdown(raw).meta;
+    } else if (path.extname(manifestPath).toLowerCase() === '.json') {
+      try {
+        metadata = JSON.parse(raw) || {};
+      } catch {
+        metadata = {};
+      }
+    } else {
+      try {
+        metadata = YAML.parse(raw) || {};
+      } catch {
+        metadata = {};
+      }
+    }
+    const fallbackName = path.basename(moduleDir);
+    const name = assertSafeModuleName(cleanKind === 'skill' ? skillNameFromMarkdown(raw, fallbackName) : metadata.name || fallbackName);
+    rows.push({
+      name,
+      dir: moduleDir,
+      manifestPath,
+      relativeDir: relativeDir.split(path.sep).join('/'),
+      file: `${relativeDir.split(path.sep).join('/')}/${path.basename(manifestPath)}`,
+      description: cleanKind === 'skill'
+        ? skillDescriptionFromMarkdown(raw)
+        : compactOneLine(metadata.description || metadata.summary || ''),
+      category: relativeDir.split(path.sep).length > 1 ? relativeDir.split(path.sep)[0] : 'local',
+      hash: await hashDirectory(moduleDir),
+    });
+  }
+  return rows
+    .filter((row, index, all) => all.findIndex((item) => item.name === row.name) === index)
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+async function managedModuleOwnerRows() {
+  const [configs, state] = await Promise.all([readHermesProfileConfigs(), readState()]);
+  const agentByProfile = new Map((state.agents || []).map((agent) => [agent.profileName || agent.id, agent]));
+  const rows = [];
+  for (const row of configs) {
+    const agent = agentByProfile.get(row.name) || null;
+    const profileYaml = await readYamlFile(path.join(row.dir, 'profile.yaml'));
+    rows.push({
+      ...row,
+      agentId: agent?.id || '',
+      displayName: agent?.name || String(profileYaml?.name || profileYaml?.display_name || titleCaseProfile(row.name)),
+      role: agent?.role || String(profileYaml?.role || ''),
+      avatarUrl: agent?.avatarUrl || await findProfileAvatar(row.dir, row.name),
+      color: agent?.color || profileColor(row.name),
+      visible: Boolean(agent) || row.name !== 'default',
+    });
+  }
+  return rows;
+}
+
+function managedAgentOwners(owners) {
+  return owners.filter((owner) => owner.name !== 'default');
+}
+
+function managedModuleEnabled(kind, config, name) {
+  if (managedModuleKind(kind) === 'skill') return !disabledSkillsFromConfig(config).has(name);
+  return pluginStatusFromConfig(config, name).enabled;
+}
+
+async function readManagedHermesModules(kind) {
+  const cleanKind = managedModuleKind(kind);
+  const [owners, provenance, globalEntries] = await Promise.all([
+    managedModuleOwnerRows(),
+    readManagedModuleProvenance(),
+    managedModuleEntries(sharedModuleRoot(cleanKind), cleanKind),
+  ]);
+  const agentOwners = managedAgentOwners(owners);
+  const bucket = provenance[provenanceBucket(cleanKind)] || {};
+  const ownerByName = new Map(owners.map((owner) => [owner.name, owner]));
+  const profileItems = [];
+  for (const owner of agentOwners) {
+    const entries = await managedModuleEntries(profileModuleRoot(owner.dir, cleanKind), cleanKind);
+    for (const entry of entries) {
+      profileItems.push({
+        kind: cleanKind,
+        scope: 'profile',
+        name: entry.name,
+        profileName: owner.name,
+        agentId: owner.agentId,
+        agentName: owner.displayName,
+        avatarUrl: owner.avatarUrl,
+        color: owner.color,
+        description: entry.description,
+        category: entry.category,
+        file: entry.file,
+        hash: entry.hash,
+        enabled: managedModuleEnabled(cleanKind, owner.config, entry.name),
+        duplicateProfileNames: [],
+      });
+    }
+  }
+  for (const item of profileItems) {
+    item.duplicateProfileNames = profileItems
+      .filter((candidate) => candidate.name === item.name && candidate.hash === item.hash && candidate.profileName !== item.profileName)
+      .map((candidate) => candidate.profileName);
+  }
+  const globalItems = globalEntries.map((entry) => {
+    const origin = bucket[entry.name] || {};
+    const owner = ownerByName.get(origin.originProfileName) || null;
+    return {
+      kind: cleanKind,
+      scope: 'global',
+      name: entry.name,
+      profileName: '',
+      originProfileName: String(origin.originProfileName || ''),
+      originAgentId: owner?.agentId || '',
+      originAgentName: owner?.displayName || '',
+      originAvatarUrl: owner?.avatarUrl || '',
+      originColor: owner?.color || '',
+      description: entry.description,
+      category: entry.category,
+      file: entry.file,
+      hash: entry.hash,
+      enabled: true,
+      promotedAt: origin.promotedAt || null,
+      nativeGlobal: !origin.originProfileName,
+      archivedDuplicateProfiles: Array.isArray(origin.archivedDuplicateProfiles) ? origin.archivedDuplicateProfiles : [],
+    };
+  });
+  const visibleOwners = agentOwners.filter((owner) => owner.visible);
+  return {
+    kind: cleanKind,
+    profiles: visibleOwners.map((owner) => ({
+      profileName: owner.name,
+      agentId: owner.agentId,
+      name: owner.displayName,
+      role: owner.role,
+      avatarUrl: owner.avatarUrl,
+      color: owner.color,
+      inheritedGlobalCount: globalItems.length,
+    })),
+    global: globalItems,
+    profile: profileItems.filter((item) => visibleOwners.some((owner) => owner.name === item.profileName)),
+  };
+}
+
+async function findManagedProfileModule(owner, kind, name) {
+  const cleanName = assertSafeModuleName(name);
+  const entries = await managedModuleEntries(profileModuleRoot(owner.dir, kind), kind);
+  return entries.find((entry) => entry.name === cleanName) || null;
+}
+
+async function findManagedGlobalModule(kind, name) {
+  const cleanName = assertSafeModuleName(name);
+  const entries = await managedModuleEntries(sharedModuleRoot(kind), kind);
+  return entries.find((entry) => entry.name === cleanName) || null;
+}
+
+function nextModuleConfig(config, kind, name, enabled, { ensureSharedSkills = false } = {}) {
+  const cleanKind = managedModuleKind(kind);
+  const next = { ...(config || {}) };
+  if (cleanKind === 'skill') {
+    const skills = next.skills && typeof next.skills === 'object' && !Array.isArray(next.skills) ? { ...next.skills } : {};
+    const disabled = new Set(Array.isArray(skills.disabled) ? skills.disabled.map(String) : []);
+    if (enabled) disabled.delete(name);
+    else disabled.add(name);
+    skills.disabled = Array.from(disabled).sort();
+    if (ensureSharedSkills) {
+      const externalDirs = Array.isArray(skills.external_dirs)
+        ? skills.external_dirs.map(String)
+        : skills.external_dirs ? [String(skills.external_dirs)] : [];
+      const sharedPath = path.resolve(sharedHermesSkillsRoot);
+      if (!externalDirs.some((entry) => path.resolve(String(entry).replace(/^~/, homeDir)) === sharedPath)) externalDirs.push(sharedHermesSkillsRoot);
+      skills.external_dirs = externalDirs;
+    }
+    next.skills = skills;
+    return next;
+  }
+  const plugins = next.plugins && typeof next.plugins === 'object' && !Array.isArray(next.plugins) ? { ...next.plugins } : {};
+  const enabledSet = new Set(Array.isArray(plugins.enabled) ? plugins.enabled.map(String) : []);
+  const disabledSet = new Set(Array.isArray(plugins.disabled) ? plugins.disabled.map(String) : []);
+  if (enabled) {
+    enabledSet.add(name);
+    disabledSet.delete(name);
+  } else {
+    enabledSet.delete(name);
+    disabledSet.add(name);
+  }
+  plugins.enabled = Array.from(enabledSet).sort();
+  plugins.disabled = Array.from(disabledSet).sort();
+  next.plugins = plugins;
+  return next;
+}
+
+function removeManagedModuleConfig(config, kind, name) {
+  const cleanKind = managedModuleKind(kind);
+  const next = { ...(config || {}) };
+  if (cleanKind === 'skill') {
+    const skills = next.skills && typeof next.skills === 'object' && !Array.isArray(next.skills) ? { ...next.skills } : {};
+    skills.disabled = (Array.isArray(skills.disabled) ? skills.disabled : []).map(String).filter((item) => item !== name);
+    next.skills = skills;
+  } else {
+    const plugins = next.plugins && typeof next.plugins === 'object' && !Array.isArray(next.plugins) ? { ...next.plugins } : {};
+    plugins.enabled = (Array.isArray(plugins.enabled) ? plugins.enabled : []).map(String).filter((item) => item !== name);
+    plugins.disabled = (Array.isArray(plugins.disabled) ? plugins.disabled : []).map(String).filter((item) => item !== name);
+    next.plugins = plugins;
+  }
+  return next;
+}
+
+async function writeOwnerConfigs(owners, transform) {
+  for (const owner of owners) {
+    const configPath = path.join(owner.dir, 'config.yaml');
+    const next = transform(owner.config, owner);
+    await writeYamlAtomic(configPath, next);
+    owner.config = next;
+  }
+}
+
+async function isManagedPluginProjection(linkPath, expectedTarget = '') {
+  const linkStat = await lstat(linkPath).catch(() => null);
+  if (!linkStat?.isSymbolicLink()) return false;
+  const rawTarget = await readlink(linkPath).catch(() => '');
+  const resolvedTarget = path.resolve(path.dirname(linkPath), rawTarget);
+  if (!isInside(sharedHermesPluginsRoot, resolvedTarget)) return false;
+  return !expectedTarget || resolvedTarget === path.resolve(expectedTarget);
+}
+
+async function createManagedPluginProjection(owner, name, targetDir) {
+  const pluginsRoot = profileModuleRoot(owner.dir, 'plugin');
+  const linkPath = path.join(pluginsRoot, name);
+  await mkdir(pluginsRoot, { recursive: true });
+  if (await exists(linkPath)) {
+    if (await isManagedPluginProjection(linkPath, targetDir)) return linkPath;
+    const error = new Error(`Profile「${owner.displayName}」已经存在同名插件。`);
+    error.status = 409;
+    error.details = { profileName: owner.name, name };
+    throw error;
+  }
+  await symlink(targetDir, linkPath, process.platform === 'win32' ? 'junction' : 'dir');
+  return linkPath;
+}
+
+async function removeManagedPluginProjection(owner, name, targetDir = '') {
+  const linkPath = path.join(profileModuleRoot(owner.dir, 'plugin'), name);
+  if (await isManagedPluginProjection(linkPath, targetDir)) await unlink(linkPath);
+}
+
+async function runningManagedProfiles(owners) {
+  if (process.env.FRAKIO_WORK_DISABLE_AUTOSTART === '1') return [];
+  const running = [];
+  for (const owner of owners) {
+    const status = await profileGatewayStatus(owner.name).catch(() => null);
+    if (status?.running) running.push(owner.name);
+  }
+  return running;
+}
+
+async function reloadManagedSkills(profileNames) {
+  if (process.env.FRAKIO_WORK_DISABLE_AUTOSTART === '1') return profileNames.map((profileName) => ({ profileName, ok: true, skipped: true }));
+  const results = [];
+  for (const profileName of profileNames) {
+    try {
+      const result = await requestHermesBridge({ action: 'skills_reload', profile: profileName }, { timeoutMs: 10000, retryMs: 500 });
+      results.push({ profileName, ok: result?.ok !== false });
+    } catch (error) {
+      results.push({ profileName, ok: false, error: String(error?.message || error) });
+    }
+  }
+  return results;
+}
+
+async function ensureManagedGlobalModulesForProfile(profileName) {
+  const ownerDir = await profileDirForName(profileName);
+  if (!ownerDir) return;
+  const configPath = path.join(ownerDir, 'config.yaml');
+  let config = await readYamlFile(configPath);
+  if ((await managedModuleEntries(sharedHermesSkillsRoot, 'skill')).length) {
+    config = nextModuleConfig(config, 'skill', '__frakio_shared_registration__', true, { ensureSharedSkills: true });
+    config = removeManagedModuleConfig(config, 'skill', '__frakio_shared_registration__');
+  }
+  const globalPlugins = await managedModuleEntries(sharedHermesPluginsRoot, 'plugin');
+  for (const plugin of globalPlugins) {
+    config = nextModuleConfig(config, 'plugin', plugin.name, true);
+    await createManagedPluginProjection({ name: profileName, displayName: profileName, dir: ownerDir }, plugin.name, plugin.dir);
+  }
+  await writeYamlAtomic(configPath, config);
+}
+
+async function promoteManagedModule(kind, name, sourceProfileName) {
+  const cleanKind = managedModuleKind(kind);
+  const cleanName = assertSafeModuleName(name);
+  const owners = await managedModuleOwnerRows();
+  const agentOwners = managedAgentOwners(owners);
+  const sourceOwner = agentOwners.find((owner) => owner.name === slug(sourceProfileName || ''));
+  if (!sourceOwner) {
+    const error = new Error('来源 Agent 不存在。');
+    error.status = 404;
+    throw error;
+  }
+  const source = await findManagedProfileModule(sourceOwner, cleanKind, cleanName);
+  if (!source) {
+    const error = new Error('来源模块不存在。');
+    error.status = 404;
+    throw error;
+  }
+  if (await findManagedGlobalModule(cleanKind, cleanName)) {
+    const error = new Error('已经存在同名全局模块。');
+    error.status = 409;
+    throw error;
+  }
+  const duplicates = [];
+  const conflicts = [];
+  for (const owner of agentOwners) {
+    if (owner.name === sourceOwner.name) continue;
+    const candidate = await findManagedProfileModule(owner, cleanKind, cleanName);
+    if (!candidate) continue;
+    if (candidate.hash === source.hash) duplicates.push({ owner, module: candidate });
+    else conflicts.push({ profileName: owner.name, agentName: owner.displayName, hash: candidate.hash });
+  }
+  if (conflicts.length) {
+    const error = new Error('其他 Agent 存在内容不同的同名模块，不能自动合并。');
+    error.status = 409;
+    error.details = { conflicts };
+    throw error;
+  }
+  const operationId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomBytes(4).toString('hex')}`;
+  const archiveDir = path.join(hermesModuleArchiveRoot, operationId);
+  const destination = path.join(sharedModuleRoot(cleanKind), cleanName);
+  const provenance = await readManagedModuleProvenance();
+  const previousConfigs = new Map();
+  const createdLinks = [];
+  const moved = [];
+  try {
+    for (const owner of owners) {
+      const configPath = path.join(owner.dir, 'config.yaml');
+      previousConfigs.set(configPath, await readFile(configPath, 'utf8').catch(() => ''));
+    }
+    for (const duplicate of duplicates) {
+      const relative = path.relative(profileModuleRoot(duplicate.owner.dir, cleanKind), duplicate.module.dir);
+      const archived = path.join(archiveDir, 'duplicates', duplicate.owner.name, relative);
+      await moveDirectory(duplicate.module.dir, archived);
+      moved.push({ from: archived, to: duplicate.module.dir });
+    }
+    await mkdir(sharedModuleRoot(cleanKind), { recursive: true });
+    await moveDirectory(source.dir, destination);
+    moved.push({ from: destination, to: source.dir });
+    if (cleanKind === 'plugin') {
+      for (const owner of owners) createdLinks.push(await createManagedPluginProjection(owner, cleanName, destination));
+    }
+    await writeOwnerConfigs(owners, (config) => nextModuleConfig(config, cleanKind, cleanName, true, { ensureSharedSkills: cleanKind === 'skill' }));
+    const bucketName = provenanceBucket(cleanKind);
+    provenance[bucketName][cleanName] = {
+      originProfileName: sourceOwner.name,
+      promotedAt: now(),
+      archivedDuplicateProfiles: duplicates.map((item) => item.owner.name),
+      archiveDir: duplicates.length ? archiveDir : '',
+    };
+    if (duplicates.length) {
+      provenance.archives.push({
+        id: operationId,
+        kind: cleanKind,
+        name: cleanName,
+        reason: 'identical-duplicates',
+        profiles: duplicates.map((item) => item.owner.name),
+        path: archiveDir,
+        createdAt: now(),
+      });
+    }
+    await writeJsonAtomic(hermesModuleProvenancePath, provenance);
+  } catch (error) {
+    for (const linkPath of createdLinks.reverse()) await unlink(linkPath).catch(() => null);
+    for (const move of moved.reverse()) {
+      if (await exists(move.from)) await moveDirectory(move.from, move.to).catch(() => null);
+    }
+    for (const [configPath, raw] of previousConfigs) {
+      if (raw) await writeFile(configPath, raw, 'utf8').catch(() => null);
+    }
+    throw error;
+  }
+  const affectedProfiles = owners.map((owner) => owner.name);
+  const reloads = cleanKind === 'skill' ? await reloadManagedSkills(affectedProfiles) : [];
+  const restartRequiredProfiles = cleanKind === 'plugin' ? await runningManagedProfiles(owners) : [];
+  return {
+    modules: await readManagedHermesModules(cleanKind),
+    originProfileName: sourceOwner.name,
+    archivedDuplicateProfiles: duplicates.map((item) => item.owner.name),
+    reloads,
+    restartRequiredProfiles,
+  };
+}
+
+async function demoteManagedModule(kind, name, targetProfileName = '') {
+  const cleanKind = managedModuleKind(kind);
+  const cleanName = assertSafeModuleName(name);
+  const owners = await managedModuleOwnerRows();
+  const agentOwners = managedAgentOwners(owners);
+  const provenance = await readManagedModuleProvenance();
+  const bucketName = provenanceBucket(cleanKind);
+  const origin = provenance[bucketName][cleanName] || {};
+  const destinationProfileName = slug(targetProfileName || origin.originProfileName || '');
+  const targetOwner = agentOwners.find((owner) => owner.name === destinationProfileName);
+  if (!targetOwner) {
+    const error = new Error('需要选择接收该模块的 Agent。');
+    error.status = 400;
+    error.code = 'target_profile_required';
+    throw error;
+  }
+  const source = await findManagedGlobalModule(cleanKind, cleanName);
+  if (!source) {
+    const error = new Error('全局模块不存在。');
+    error.status = 404;
+    throw error;
+  }
+  const existing = [];
+  for (const owner of agentOwners) {
+    const candidate = await findManagedProfileModule(owner, cleanKind, cleanName);
+    if (candidate) existing.push(owner.displayName);
+  }
+  if (existing.length) {
+    const error = new Error('Agent 中已经存在同名模块，不能取消全局。');
+    error.status = 409;
+    error.details = { conflicts: existing };
+    throw error;
+  }
+  const destination = path.join(profileModuleRoot(targetOwner.dir, cleanKind), cleanName);
+  if (cleanKind === 'plugin') {
+    for (const owner of owners) await removeManagedPluginProjection(owner, cleanName, source.dir);
+  }
+  await moveDirectory(source.dir, destination);
+  await writeOwnerConfigs(owners, (config, owner) => {
+    if (cleanKind === 'plugin' && owner.name !== targetOwner.name) return removeManagedModuleConfig(config, cleanKind, cleanName);
+    return nextModuleConfig(config, cleanKind, cleanName, true, { ensureSharedSkills: cleanKind === 'skill' });
+  });
+  delete provenance[bucketName][cleanName];
+  await writeJsonAtomic(hermesModuleProvenancePath, provenance);
+  const affectedProfiles = owners.map((owner) => owner.name);
+  const reloads = cleanKind === 'skill' ? await reloadManagedSkills(affectedProfiles) : [];
+  const restartRequiredProfiles = cleanKind === 'plugin' ? await runningManagedProfiles(owners) : [];
+  return {
+    modules: await readManagedHermesModules(cleanKind),
+    targetProfileName: targetOwner.name,
+    reloads,
+    restartRequiredProfiles,
+  };
+}
+
+async function deleteManagedModule(kind, name, scope, profileName = '') {
+  const cleanKind = managedModuleKind(kind);
+  const cleanScope = managedModuleScope(scope);
+  const cleanName = assertSafeModuleName(name);
+  const owners = await managedModuleOwnerRows();
+  const agentOwners = managedAgentOwners(owners);
+  const provenance = await readManagedModuleProvenance();
+  let moduleEntry = null;
+  let owner = null;
+  if (cleanScope === 'global') moduleEntry = await findManagedGlobalModule(cleanKind, cleanName);
+  else {
+    owner = agentOwners.find((item) => item.name === slug(profileName || ''));
+    if (owner) moduleEntry = await findManagedProfileModule(owner, cleanKind, cleanName);
+  }
+  if (!moduleEntry) {
+    const error = new Error('模块不存在。');
+    error.status = 404;
+    throw error;
+  }
+  const operationId = `${new Date().toISOString().replace(/[:.]/g, '-')}-${randomBytes(4).toString('hex')}`;
+  const destination = path.join(hermesModuleArchiveRoot, operationId, cleanScope, owner?.name || 'global', cleanName);
+  if (cleanScope === 'global' && cleanKind === 'plugin') {
+    for (const item of owners) await removeManagedPluginProjection(item, cleanName, moduleEntry.dir);
+  }
+  await moveDirectory(moduleEntry.dir, destination);
+  await writeOwnerConfigs(owners, (config, item) => {
+    if (cleanScope === 'profile' && item.name !== owner.name) return config;
+    return removeManagedModuleConfig(config, cleanKind, cleanName);
+  });
+  if (cleanScope === 'global') delete provenance[provenanceBucket(cleanKind)][cleanName];
+  provenance.archives.push({
+    id: operationId,
+    kind: cleanKind,
+    name: cleanName,
+    scope: cleanScope,
+    profileName: owner?.name || '',
+    reason: 'deleted',
+    path: destination,
+    createdAt: now(),
+  });
+  await writeJsonAtomic(hermesModuleProvenancePath, provenance);
+  const affectedOwners = cleanScope === 'global' ? owners : [owner];
+  const affectedProfiles = affectedOwners.map((item) => item.name);
+  const reloads = cleanKind === 'skill' ? await reloadManagedSkills(affectedProfiles) : [];
+  const restartRequiredProfiles = cleanKind === 'plugin' ? await runningManagedProfiles(affectedOwners) : [];
+  return {
+    modules: await readManagedHermesModules(cleanKind),
+    archivePath: destination,
+    reloads,
+    restartRequiredProfiles,
+  };
+}
+
+async function updateManagedModuleState(kind, name, profileName, enabled) {
+  const cleanKind = managedModuleKind(kind);
+  const cleanName = assertSafeModuleName(name);
+  const owners = managedAgentOwners(await managedModuleOwnerRows());
+  const owner = owners.find((item) => item.name === slug(profileName || ''));
+  if (!owner) {
+    const error = new Error('Agent 不存在。');
+    error.status = 404;
+    throw error;
+  }
+  const moduleEntry = await findManagedProfileModule(owner, cleanKind, cleanName);
+  if (!moduleEntry) {
+    const error = new Error('Agent 模块不存在。');
+    error.status = 404;
+    throw error;
+  }
+  const config = nextModuleConfig(owner.config, cleanKind, cleanName, Boolean(enabled));
+  await writeYamlAtomic(path.join(owner.dir, 'config.yaml'), config);
+  const reloads = cleanKind === 'skill' ? await reloadManagedSkills([owner.name]) : [];
+  const restartRequiredProfiles = cleanKind === 'plugin' ? await runningManagedProfiles([owner]) : [];
+  return { modules: await readManagedHermesModules(cleanKind), reloads, restartRequiredProfiles };
+}
+
+async function resolveManagedModuleFile(kind, scope, name, profileName = '') {
+  const cleanKind = managedModuleKind(kind);
+  const cleanScope = managedModuleScope(scope);
+  const cleanName = assertSafeModuleName(name);
+  let moduleEntry = null;
+  if (cleanScope === 'global') {
+    moduleEntry = await findManagedGlobalModule(cleanKind, cleanName);
+  } else {
+    const owners = managedAgentOwners(await managedModuleOwnerRows());
+    const owner = owners.find((item) => item.name === slug(profileName || ''));
+    if (owner) moduleEntry = await findManagedProfileModule(owner, cleanKind, cleanName);
+  }
+  if (!moduleEntry) {
+    const error = new Error('模块不存在。');
+    error.status = 404;
+    throw error;
+  }
+  const expectedRoot = cleanScope === 'global'
+    ? sharedModuleRoot(cleanKind)
+    : path.dirname(path.dirname(moduleEntry.manifestPath));
+  if (!isInside(expectedRoot, moduleEntry.manifestPath)) {
+    const error = new Error('模块文件路径不合法。');
+    error.status = 403;
+    throw error;
+  }
+  return moduleEntry;
+}
+
+function runHermesModuleMutation(operation) {
+  const transaction = hermesModuleMutationQueue.then(operation);
+  hermesModuleMutationQueue = transaction.catch(() => {});
+  return transaction;
 }
 
 async function readProfileModules(dir, name, config = {}) {
@@ -1815,112 +2606,6 @@ function normalizeAuxiliaryUpdate(raw, task) {
     if (Object.keys(raw.extra_body).length) settings.extra_body = raw.extra_body;
   }
   return settings;
-}
-
-function cleanMoaSlot(value, field, strict = false) {
-  if (!isPlainRecord(value)) {
-    if (strict) throw configValidationError(`${field}必须选择 Provider 和模型。`);
-    return null;
-  }
-  const provider = String(value.provider || '').trim();
-  const model = String(value.model || '').trim();
-  if (!provider || !model || provider.toLowerCase() === 'moa') {
-    if (strict) throw configValidationError(`${field}必须选择非 MoA Provider 和模型。`);
-    return null;
-  }
-  return { provider, model };
-}
-
-function defaultMoaPreset() {
-  return {
-    enabled: true,
-    reference_models: defaultMoaReferenceModels.map((slot) => ({ ...slot })),
-    aggregator: { ...defaultMoaAggregator },
-    reference_temperature: null,
-    aggregator_temperature: null,
-    max_tokens: 4096,
-    reference_max_tokens: null,
-    fanout: 'per_iteration',
-  };
-}
-
-function normalizeMoaPreset(value, strict = false) {
-  const raw = isPlainRecord(value) ? value : {};
-  const sourceReferences = Array.isArray(raw.reference_models) ? raw.reference_models : [];
-  const referenceModels = strict
-    ? sourceReferences.map((slot, index) => cleanMoaSlot(slot, `参考模型 ${index + 1}`, true))
-    : sourceReferences.map((slot) => cleanMoaSlot(slot, '参考模型')).filter(Boolean);
-  if (strict && !referenceModels.length) throw configValidationError('组合模型至少需要一个参考模型。');
-  const aggregator = cleanMoaSlot(raw.aggregator, '汇总模型', strict) || { ...defaultMoaAggregator };
-  const fanout = String(raw.fanout || 'per_iteration').trim();
-  if (!['per_iteration', 'user_turn'].includes(fanout)) {
-    if (strict) throw configValidationError('fanout 只能是 per_iteration 或 user_turn。');
-  }
-  const readNullableNumber = (input, field) => {
-    if (strict) return nullableNumber(input, field);
-    if (input === undefined || input === null || input === '') return null;
-    const number = Number(input);
-    return Number.isFinite(number) ? number : null;
-  };
-  const readPositiveInteger = (input, field, fallback) => {
-    if (strict) return positiveInteger(input, field, fallback);
-    const number = Number(input);
-    return Number.isFinite(number) && number > 0 ? Math.floor(number) : fallback;
-  };
-  return {
-    enabled: raw.enabled === undefined ? true : Boolean(raw.enabled),
-    reference_models: referenceModels.length ? referenceModels : defaultMoaReferenceModels.map((slot) => ({ ...slot })),
-    aggregator,
-    reference_temperature: readNullableNumber(raw.reference_temperature, '参考温度'),
-    aggregator_temperature: readNullableNumber(raw.aggregator_temperature, '汇总温度'),
-    max_tokens: readPositiveInteger(raw.max_tokens, '最终输出上限', 4096),
-    reference_max_tokens: readPositiveInteger(raw.reference_max_tokens, '参考模型输出上限', null),
-    fanout: ['per_iteration', 'user_turn'].includes(fanout) ? fanout : 'per_iteration',
-  };
-}
-
-function normalizeMoaConfig(value, strict = false) {
-  const raw = isPlainRecord(value) ? value : {};
-  const sourcePresets = isPlainRecord(raw.presets) ? raw.presets : {};
-  const presets = {};
-  for (const [name, preset] of Object.entries(sourcePresets)) {
-    const cleanName = String(name || '').trim();
-    if (!/^[A-Za-z0-9_.-]{1,80}$/.test(cleanName)) {
-      if (strict) throw configValidationError(`组合模型名称「${cleanName || name}」不合法。`);
-      continue;
-    }
-    presets[cleanName] = normalizeMoaPreset(preset, strict);
-  }
-  if (!Object.keys(presets).length) {
-    if (strict) throw configValidationError('至少需要保留一个组合模型。');
-    presets.default = normalizeMoaPreset(raw, false);
-  }
-  let defaultPreset = String(raw.default_preset || '').trim();
-  if (!presets[defaultPreset]) {
-    if (strict && defaultPreset) throw configValidationError('默认组合模型不存在。');
-    defaultPreset = Object.keys(presets)[0] || 'default';
-  }
-  let activePreset = String(raw.active_preset || '').trim();
-  if (activePreset && !presets[activePreset]) {
-    if (strict) throw configValidationError('当前组合模型不存在。');
-    activePreset = '';
-  }
-  const active = presets[defaultPreset] || defaultMoaPreset();
-  return {
-    default_preset: defaultPreset,
-    active_preset: activePreset,
-    save_traces: Boolean(raw.save_traces),
-    trace_dir: String(raw.trace_dir || '').trim(),
-    presets,
-    reference_models: active.reference_models.map((slot) => ({ ...slot })),
-    aggregator: { ...active.aggregator },
-    reference_temperature: active.reference_temperature,
-    aggregator_temperature: active.aggregator_temperature,
-    max_tokens: active.max_tokens,
-    reference_max_tokens: active.reference_max_tokens,
-    fanout: active.fanout,
-    enabled: active.enabled,
-  };
 }
 
 function modelProtocolFromApiMode(apiMode = '') {
@@ -2332,6 +3017,8 @@ function knownManagedMcpTools(serverName, config = {}) {
     'hermes_workbench_use_runtime_status',
     'hermes_workbench_use_mcp_servers_list',
     'hermes_workbench_use_user_profile_get',
+    'hermes_workbench_plan_user_input_request',
+    'hermes_workbench_plan_submit',
     'hermes_workbench_collaboration_workflow_create',
     'hermes_workbench_collaboration_context_resolve',
     'hermes_workbench_collaboration_root_create',
@@ -2905,11 +3592,163 @@ async function createCollaborationRoot(state, thread, workflow, input = {}) {
   return result;
 }
 
+async function publishApprovedWorkPlan(state, thread, planSession, draft) {
+  let workflow = workflowById(thread);
+  if (!workflow || workflow.status === 'cancelled' || workflow.status === 'archived') {
+    const created = await createCollaborationWorkflow(state, thread, {
+      name: draft.title || thread.title || '协作工作流',
+      coordinatorAgentId: planSession.authorAgentId,
+      idempotencyKey: `approved-plan-workflow:${planSession.id}`,
+    });
+    workflow = created.workflow;
+  }
+  const existingRootId = workflow.approvedPlanId === planSession.id ? workflow.currentRootTaskId : '';
+  let rootTask = existingRootId ? { id: existingRootId } : null;
+  if (!rootTask?.id) {
+    if (workflow.currentRootTaskId) {
+      const detail = await readKanbanTaskDetail(workflow.boardSlug, workflow.currentRootTaskId).catch(() => null);
+      const status = String(detail?.task?.status || detail?.status || '');
+      if (status && !['done', 'archived', 'cancelled', 'failed'].includes(status)) {
+        throw Object.assign(new Error('当前 Work 根任务仍未完成，不能发布新的批准计划。'), { status: 409, code: 'WORK_ROOT_ACTIVE' });
+      }
+    }
+    workflow.coordinatorAgentId = planSession.authorAgentId || workflow.coordinatorAgentId;
+    workflow.status = 'active';
+    workflow.completedAt = null;
+    workflow.plan = null;
+    workflow.planRevision = 0;
+    workflow.executionBindings = {};
+    const rootResult = await createCollaborationRoot(state, thread, workflow, {
+      title: draft.title,
+      body: draft.summary,
+      assigneeAgentId: workflow.coordinatorAgentId,
+      actorAgentId: 'user',
+      idempotencyKey: `approved-plan-root:${planSession.id}:${draft.revision}`,
+    });
+    rootTask = rootResult.task;
+    workflow.approvedPlanId = planSession.id;
+  }
+  const rootTaskId = String(rootTask?.id || workflow.currentRootTaskId || '');
+  const plan = validateCollaborationPlan({
+    rootTaskId,
+    baseRevision: 0,
+    goal: draft.title,
+    summary: draft.summary,
+    tasks: draft.steps.map((step) => ({
+      key: step.key,
+      title: step.title,
+      description: step.description,
+      assigneeAgentId: step.assigneeAgentId,
+      expectedResult: step.expectedResult,
+      dependsOnKeys: step.dependsOnKeys,
+    })),
+  }, {
+    agentIds: state.agents.map((agent) => agent.id),
+    currentRevision: 0,
+    rootTaskId,
+  });
+  const taskByKey = new Map();
+  for (const task of plan.tasks) {
+    const assignee = agentProfileForId(state, task.assigneeAgentId);
+    const body = [
+      task.description,
+      task.expectedResult ? `预期结果：${task.expectedResult}` : '',
+      `已批准 Frakio Plan：planId=${planSession.id} revision=${draft.revision}`,
+      `Frakio 协作上下文：threadId=${thread.id} workflowId=${workflow.id} rootTaskId=${rootTaskId} taskKey=${task.key}`,
+    ].filter(Boolean).join('\n\n');
+    const args = [
+      'kanban', '--board', workflow.boardSlug, 'create', task.title, '--json', '--body', body,
+      '--idempotency-key', `approved-plan:${planSession.id}:${draft.revision}:${task.key}`,
+    ];
+    if (assignee) args.push('--assignee', assignee);
+    const created = parseHermesJson((await runHermesCommand(args)).stdout, {});
+    task.taskId = created.id;
+    taskByKey.set(task.key, task);
+    const alreadyRecorded = (thread.collaboration?.events || []).some((event) => event.type === 'task.created' && event.taskId === created.id);
+    if (!alreadyRecorded) {
+      appendThreadCollaborationEvent(thread, {
+        type: 'task.created',
+        workflowId: workflow.id,
+        taskId: created.id,
+        actorAgentId: workflow.coordinatorAgentId,
+        title: task.title,
+        detail: task.description || task.expectedResult,
+        payload: { rootTaskId, taskKey: task.key, assigneeAgentId: task.assigneeAgentId, approvedPlanId: planSession.id },
+      });
+    }
+  }
+  for (const task of plan.tasks) {
+    for (const dependencyKey of task.dependsOnKeys) {
+      const dependency = taskByKey.get(dependencyKey);
+      if (!dependency?.taskId || !task.taskId) continue;
+      await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'link', dependency.taskId, task.taskId]);
+      const alreadyRecorded = (thread.collaboration?.events || []).some((event) => event.type === 'dependency.created' && event.workflowId === workflow.id && event.taskId === task.taskId && event.payload?.parentTaskId === dependency.taskId);
+      if (!alreadyRecorded) {
+        appendThreadCollaborationEvent(thread, {
+          type: 'dependency.created',
+          workflowId: workflow.id,
+          taskId: task.taskId,
+          actorAgentId: workflow.coordinatorAgentId,
+          title: `${task.title} 等待 ${dependency.title}`,
+          detail: '已批准计划依赖',
+          payload: { parentTaskId: dependency.taskId, requesterTaskId: task.taskId, rootTaskId, approvedPlanId: planSession.id },
+        });
+      }
+    }
+  }
+  const activeTasks = plan.tasks.filter((task) => task.taskId);
+  for (const task of activeTasks) await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'link', task.taskId, rootTaskId]);
+  if (activeTasks.length) {
+    await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'comment', rootTaskId, '已批准计划已发布。所有父任务完成后，请读取父任务结果与交付物，生成面向用户的最终汇总，然后完成根任务。', '--author', 'Frakio Work']);
+    await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'block', rootTaskId, '等待已批准计划中的任务完成', '--kind', 'dependency']);
+  }
+  const storedPlan = {
+    ...plan,
+    revision: 1,
+    tasks: plan.tasks,
+    publishedAt: now(),
+    coordinatorAgentId: workflow.coordinatorAgentId,
+    approvedPlanId: planSession.id,
+    approvedPlanRevision: draft.revision,
+  };
+  workflow.plan = storedPlan;
+  workflow.planRevision = 1;
+  workflow.executionBindings = Object.fromEntries(plan.tasks.filter((task) => task.taskId).map((task) => [task.key, {
+    taskId: task.taskId,
+    agentId: task.assigneeAgentId,
+    revision: 1,
+    sessionId: `work-task-${task.taskId}-${task.assigneeAgentId}`,
+    runId: '',
+    status: 'ready',
+  }]));
+  workflow.updatedAt = now();
+  const existingPublishEvent = (thread.collaboration?.events || []).find((event) => event.type === 'plan.published' && event.payload?.approvedPlanId === planSession.id);
+  const event = existingPublishEvent || appendThreadCollaborationEvent(thread, {
+    type: 'plan.published',
+    workflowId: workflow.id,
+    taskId: rootTaskId,
+    actorAgentId: workflow.coordinatorAgentId,
+    title: '已批准计划已发布',
+    detail: draft.summary,
+    payload: { revision: 1, taskCount: activeTasks.length, approvedPlanId: planSession.id, approvedPlanRevision: draft.revision },
+  });
+  for (const agentId of [...new Set(activeTasks.map((task) => task.assigneeAgentId))]) {
+    const agent = state.agents.find((item) => item.id === agentId);
+    if (agent) await ensureWorkbenchMcpServers(await resolveHermesProfileNameForAgent(agent));
+  }
+  thread.updatedAt = now();
+  await writeState(state);
+  const dispatch = await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'dispatch', '--max', '32', '--json'])
+    .then(({ stdout }) => parseHermesJson(stdout, {}))
+    .catch((error) => ({ deferredToGateway: true, error: String(error?.message || error) }));
+  return { workflow, rootTaskId, plan: storedPlan, event, dispatch, snapshot: await collaborationSnapshot(state, thread, workflow.id) };
+}
+
 function workbenchToolNames(response = {}) {
   return (response.results || []).flatMap((entry) => (entry.tools || []).map((tool) => String(tool.name || tool))).filter(Boolean);
 }
 
-async function ensureCollaborationRuntimeCapability(profileName = 'default') {
+async function ensureCollaborationRuntimeCapability(profileName = 'default', requiredTools = requiredWorkbenchCollaborationTools) {
   await ensureWorkbenchMcpServers(profileName);
   if (process.env.FRAKIO_WORK_SKIP_MCP_RUNTIME_CHECK === '1') {
     return { status: 'ready', protocolVersion: workbenchCollaborationProtocolVersion, tools: knownManagedMcpTools('hermes-workbench-use', workbenchMcpServerConfig('use', profileName)), reloaded: false };
@@ -2922,7 +3761,7 @@ async function ensureCollaborationRuntimeCapability(profileName = 'default') {
   const inspect = () => requestHermesBridge({ action: 'mcp_tools_list', profile: profileName, server: 'hermes-workbench-use', raw: true }, { timeoutMs: 10000, retryMs: 1000 });
   let runtime = await inspect().catch(() => ({ results: [] }));
   let tools = workbenchToolNames(runtime);
-  let missing = requiredWorkbenchCollaborationTools.filter((tool) => !tools.includes(tool));
+  let missing = requiredTools.filter((tool) => !tools.includes(tool));
   let reloaded = false;
   let reloadStatus = null;
   if (missing.length) {
@@ -2937,7 +3776,7 @@ async function ensureCollaborationRuntimeCapability(profileName = 'default') {
     }
     runtime = await inspect().catch(() => ({ results: [] }));
     tools = workbenchToolNames(runtime);
-    missing = requiredWorkbenchCollaborationTools.filter((tool) => !tools.includes(tool));
+    missing = requiredTools.filter((tool) => !tools.includes(tool));
     if (missing.length && !reloadStatus?.connected) {
       const sessions = await requestHermesBridge({ action: 'list' }, { timeoutMs: 5000, retryMs: 500 }).catch(() => ({ sessions: [] }));
       const hasActiveProfileRun = (sessions.sessions || []).some((session) => session.profile === profileName && (session.running === true || session.status === 'running'));
@@ -2946,7 +3785,7 @@ async function ensureCollaborationRuntimeCapability(profileName = 'default') {
         reloadStatus = await requestHermesBridge({ action: 'mcp_reload', profile: profileName, server: 'hermes-workbench-use' }, { timeoutMs: 130000, retryMs: 1000 }).catch((error) => ({ ok: false, connected: false, error: String(error?.message || error), connectionErrors: {} }));
         runtime = await inspect().catch(() => ({ results: [] }));
         tools = workbenchToolNames(runtime);
-        missing = requiredWorkbenchCollaborationTools.filter((tool) => !tools.includes(tool));
+        missing = requiredTools.filter((tool) => !tools.includes(tool));
       }
     }
   }
@@ -2958,6 +3797,10 @@ async function ensureCollaborationRuntimeCapability(profileName = 'default') {
     throw error;
   }
   return { status: 'ready', protocolVersion: workbenchCollaborationProtocolVersion, tools, reloaded, reloadStatus, bridge };
+}
+
+async function ensurePlanRuntimeCapability(profileName = 'default') {
+  return ensureCollaborationRuntimeCapability(profileName, requiredWorkbenchPlanTools);
 }
 
 async function initializeNewThreadWorkMode(state, thread, coordinatorAgentId, requestId = '') {
@@ -4138,7 +4981,17 @@ function normalizeBridgeEvent(event) {
     };
   }
   if (/approval.*request/i.test(eventName) || event?.approval_id) {
-    return { event: 'approval.request', approvalId: event.approval_id || event.id || '', title: event.title || event.description || '需要确认', command: event.command || event.command_preview || event.preview || '', cwd: event.cwd || '', tool: event.tool || event.tool_name || '' };
+    return {
+      event: 'approval.request',
+      approvalId: event.approval_id || event.id || '',
+      title: event.title || event.description || '需要确认',
+      command: event.command || event.command_preview || event.preview || '',
+      cwd: event.cwd || '',
+      tool: event.tool || event.tool_name || '',
+      choices: Array.isArray(event.choices) ? event.choices : undefined,
+      allowPermanent: event.allow_permanent,
+      smartDenied: Boolean(event.smart_denied),
+    };
   }
   if (/tool.*start|tool.*running/i.test(eventName)) {
     const display = toolDisplayFromEvent(event, '正在调用工具');
@@ -4153,7 +5006,7 @@ function normalizeBridgeEvent(event) {
 
 function approvalModeFromConfig(config) {
   const mode = String(config?.approvals?.mode || config?.approval?.mode || '').trim();
-  return ['manual', 'smart', 'off'].includes(mode) ? mode : 'manual';
+  return ['manual', 'smart', 'off'].includes(mode) ? mode : 'smart';
 }
 
 async function readApprovalConfig(profileName = 'default') {
@@ -4176,6 +5029,100 @@ async function writeApprovalMode(profileName, mode) {
   config.approvals = { ...(config.approvals || {}), mode };
   await writeFile(configPath, YAML.stringify(config), 'utf8');
   return { profileName: profileName || 'default', configPath, mode };
+}
+
+function activeHermesSupports019Defaults() {
+  const version = String(findFrakioHermesRuntimeSync()?.version || '');
+  const match = version.match(/^(\d+)\.(\d+)(?:\.(\d+))?/);
+  if (!match) return false;
+  const major = Number(match[1]);
+  const minor = Number(match[2]);
+  return major > 0 || minor >= 19;
+}
+
+function previousBundledHermesRuntime(currentVersion) {
+  const candidates = [];
+  for (const root of uniquePathEntries([
+    frakioBundledHermesRuntimeRoot,
+    path.join(projectRoot, 'runtime', 'hermes'),
+  ])) {
+    for (const runtimeDir of runtimeCandidateDirs(root)) {
+      const runtime = inspectHermesRuntimeDir(runtimeDir, 'bundled');
+      if (!runtime || runtime.bridgeProtocolVersion !== frakioBridgeProtocolVersion) continue;
+      if (runtime.version === currentVersion || compareVersionDesc(runtime.version, currentVersion) <= 0) continue;
+      candidates.push(runtime);
+    }
+  }
+  candidates.sort((left, right) => compareVersionDesc(left.version, right.version));
+  return candidates[0] || null;
+}
+
+async function migrateHermes019ApprovalDefaults(state) {
+  if (!activeHermesSupports019Defaults()) return false;
+  const migrationKey = 'hermes019ApprovalDefaults';
+  if (state.runtimeMigrations?.[migrationKey]) return false;
+  const activeRuntime = findFrakioHermesRuntimeSync();
+  const previousRuntime = previousBundledHermesRuntime(activeRuntime?.version || '');
+  if (
+    process.env.FRAKIO_WORK_DISABLE_AUTOSTART !== '1'
+    && existsSync(statePath)
+    && previousRuntime
+    && !pendingHermes019UpgradeRollback
+  ) {
+    const logs = [];
+    const manifest = await createHermesRollbackPoint('hermes-019-upgrade', logs);
+    pendingHermes019UpgradeRollback = {
+      manifest,
+      previousVersion: previousRuntime.version,
+      targetVersion: activeRuntime?.version || '0.19.0',
+      logs,
+    };
+    await updateHermesRollbackPoint(manifest, {
+      status: 'pending-runtime-verification',
+      beforeRuntimeVersion: previousRuntime.version,
+      targetRuntimeVersion: activeRuntime?.version || '0.19.0',
+    });
+  }
+
+  const agentProfiles = new Map((state.agents || []).map((agent) => [
+    agent.id,
+    String(agent.profileName || agent.id || 'default').trim() || 'default',
+  ]));
+  const profileNames = new Set(['default', ...agentProfiles.values()]);
+  const migratedProfiles = new Set();
+  const profileModes = new Map();
+
+  for (const profileName of profileNames) {
+    const targetDir = profileName === 'default' ? hermesHome : path.join(hermesHome, 'profiles', profileName);
+    const configPath = path.join(targetDir, 'config.yaml');
+    const config = await readYamlFile(configPath);
+    const configuredMode = String(config?.approvals?.mode || config?.approval?.mode || '').trim();
+    if (['manual', 'smart', 'off'].includes(configuredMode)) {
+      profileModes.set(profileName, configuredMode);
+    } else {
+      await mkdir(targetDir, { recursive: true });
+      config.approvals = { ...(config.approvals || {}), mode: 'smart' };
+      await writeFile(configPath, YAML.stringify(config), 'utf8');
+      migratedProfiles.add(profileName);
+      profileModes.set(profileName, 'smart');
+    }
+  }
+
+  for (const thread of state.threads || []) {
+    const agentId = thread.activeAgentId || thread.primaryAgentId || thread.defaultAgentId || '';
+    const profileName = agentProfiles.get(agentId) || 'default';
+    thread.permissionMode = profileModes.get(profileName) || 'smart';
+  }
+
+  state.runtimeMigrations = {
+    ...(state.runtimeMigrations || {}),
+    [migrationKey]: {
+      version: 1,
+      migratedAt: now(),
+      profiles: Array.from(migratedProfiles),
+    },
+  };
+  return true;
 }
 
 async function firstExistingDir(candidates) {
@@ -5876,6 +6823,7 @@ async function createHermesProfileFiles(profileName, payload) {
   const memory = String(payload.memory || '').trim();
   const config = {
     providers: {},
+    approvals: { mode: 'smart' },
     skills: { disabled: [] },
     plugins: { enabled: [], disabled: [] },
   };
@@ -5964,7 +6912,7 @@ async function ensureModelProviderForProfile(profileName, rawModel, requestedMod
       await mkdir(dir, { recursive: true });
       await writeFile(configPath, YAML.stringify(nextConfig), 'utf8');
     }
-    return { profileName: profileName || 'default', configPath, provider: selectedModel.providerKey, model: modelName, hasApiKey: Boolean(apiKey) };
+    return { profileName: profileName || 'default', configPath, provider: selectedModel.providerKey, model: modelName, hasApiKey: Boolean(apiKey), runtimeRevision: selectedModel.runtimeRevision };
   }
   const existingProvider = isPlainRecord(config.providers?.[storageKey]) ? config.providers[storageKey] : {};
   const providerConfig = selectedModel.baseUrl
@@ -5975,7 +6923,7 @@ async function ensureModelProviderForProfile(profileName, rawModel, requestedMod
         base_url: selectedModel.baseUrl,
         ...(reusableApiKey ? { api_key: reusableApiKey } : {}),
         model: modelName,
-        api_mode: selectedModel.modelApiModes?.[modelName] || selectedModel.apiMode || 'chat_completions',
+        api_mode: runtimeApiMode(selectedModel.modelApiModes?.[modelName] || selectedModel.apiMode) || 'chat_completions',
       }
     : existingProvider;
   const nextConfig = {
@@ -5991,7 +6939,7 @@ async function ensureModelProviderForProfile(profileName, rawModel, requestedMod
   }
   await mkdir(dir, { recursive: true });
   await writeFile(configPath, YAML.stringify(nextConfig), 'utf8');
-  return { profileName: profileName || 'default', configPath, provider: selectedModel.providerKey, model: modelName, hasApiKey: Boolean(reusableApiKey || existingProvider.api_key || existingProvider.apiKey) };
+  return { profileName: profileName || 'default', configPath, provider: selectedModel.providerKey, model: modelName, hasApiKey: Boolean(reusableApiKey || existingProvider.api_key || existingProvider.apiKey), runtimeRevision: selectedModel.runtimeRevision };
 }
 
 async function runModelScopeMigration() {
@@ -6386,8 +7334,91 @@ app.put('/api/hermes-profiles/:profileName/skill-state', async (req, res) => {
   }
 });
 
+app.get('/api/hermes-modules', async (req, res) => {
+  try {
+    res.json(await readManagedHermesModules(req.query.kind));
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || '模块读取失败。', ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) });
+  }
+});
+
+app.get('/api/hermes-modules/file', async (req, res) => {
+  try {
+    const moduleEntry = await resolveManagedModuleFile(req.query.kind, req.query.scope, req.query.name, req.query.profileName);
+    res.json({
+      content: await readFile(moduleEntry.manifestPath, 'utf8').catch(() => ''),
+      file: moduleEntry.file,
+      name: moduleEntry.name,
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || '模块文件读取失败。', ...(error.code ? { code: error.code } : {}) });
+  }
+});
+
+app.put('/api/hermes-modules/file', async (req, res) => {
+  try {
+    const result = await runHermesModuleMutation(async () => {
+      const cleanKind = managedModuleKind(req.body?.kind);
+      const moduleEntry = await resolveManagedModuleFile(cleanKind, req.body?.scope, req.body?.name, req.body?.profileName);
+      const content = String(req.body?.content || '').slice(0, 250000);
+      await writeFile(moduleEntry.manifestPath, content.endsWith('\n') ? content : `${content}\n`, 'utf8');
+      const reloads = cleanKind === 'skill'
+        ? await reloadManagedSkills(req.body?.scope === 'global'
+          ? (await managedModuleOwnerRows()).map((owner) => owner.name)
+          : [slug(req.body?.profileName || '')])
+        : [];
+      const restartRequiredProfiles = cleanKind === 'plugin'
+        ? await runningManagedProfiles(req.body?.scope === 'global'
+          ? await managedModuleOwnerRows()
+          : (await managedModuleOwnerRows()).filter((owner) => owner.name === slug(req.body?.profileName || '')))
+        : [];
+      return { modules: await readManagedHermesModules(cleanKind), reloads, restartRequiredProfiles };
+    });
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || '模块文件保存失败。', ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) });
+  }
+});
+
+app.put('/api/hermes-modules/state', async (req, res) => {
+  try {
+    const result = await runHermesModuleMutation(() => updateManagedModuleState(req.body?.kind, req.body?.name, req.body?.profileName, Boolean(req.body?.enabled)));
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || '模块状态保存失败。', ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) });
+  }
+});
+
+app.post('/api/hermes-modules/scope', async (req, res) => {
+  try {
+    const action = String(req.body?.action || '').trim();
+    if (!['promote', 'demote'].includes(action)) return res.status(400).json({ error: '范围操作必须是 promote 或 demote。' });
+    const result = await runHermesModuleMutation(() => action === 'promote'
+      ? promoteManagedModule(req.body?.kind, req.body?.name, req.body?.profileName)
+      : demoteManagedModule(req.body?.kind, req.body?.name, req.body?.targetProfileName));
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || '模块范围保存失败。', ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) });
+  }
+});
+
+app.delete('/api/hermes-modules', async (req, res) => {
+  try {
+    const result = await runHermesModuleMutation(() => deleteManagedModule(req.body?.kind, req.body?.name, req.body?.scope, req.body?.profileName));
+    res.json({ ok: true, ...result });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || '模块删除失败。', ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) });
+  }
+});
+
 app.get('/api/health', (_req, res) => {
-  res.json({ ok: true, service: 'frakio-work-api', port });
+  res.json({
+    ok: true,
+    service: 'frakio-work-api',
+    port,
+    deploymentMode: isManagedWebMode ? 'managed-web' : isDesktopMode ? 'desktop' : 'source',
+    apiProtocol: FRAKIO_SERVICE_PROTOCOL,
+  });
 });
 
 app.get('/api/hermes-local/status', async (_req, res) => {
@@ -6403,6 +7434,47 @@ app.get('/api/hermes-local/status', async (_req, res) => {
   res.json(discovery);
 });
 
+app.get('/api/hermes/network-status', async (req, res) => {
+  try {
+    const profile = requestedHermesProfile(req, 'default');
+    const profileDir = await profileDirForName(profile);
+    if (!profileDir) return res.status(404).json({ error: `Hermes Profile「${profile}」不存在。` });
+    const status = await requestHermesBridge(
+      { action: 'network_status', profile },
+      { timeoutMs: 15000, retryMs: 1000 },
+    );
+    res.json({
+      profile: String(status.profile || profile),
+      onlineReadReady: Boolean(status.online_read_ready),
+      search: {
+        enabled: Boolean(status.search?.enabled),
+        ready: Boolean(status.search?.ready),
+        provider: status.search?.provider || null,
+        source: status.search?.source || 'unconfigured',
+        detail: status.search?.detail || 'provider_probe_failed',
+      },
+      extract: {
+        enabled: Boolean(status.extract?.enabled),
+        ready: Boolean(status.extract?.ready),
+        provider: status.extract?.provider || null,
+        detail: status.extract?.detail || 'provider_probe_failed',
+      },
+      browser: {
+        enabled: Boolean(status.browser?.enabled),
+        ready: Boolean(status.browser?.ready),
+        chromiumReady: Boolean(status.browser?.chromium_ready),
+        detail: status.browser?.detail || 'browser_cli_missing',
+      },
+      checkedAt: status.checked_at || now(),
+    });
+  } catch (error) {
+    res.status(error.status || 503).json({
+      error: error.message || 'Hermes 联网能力检测失败。',
+      code: 'hermes_network_status_unavailable',
+    });
+  }
+});
+
 app.post('/api/hermes-local/import', async (req, res) => {
   const discovery = await discoverHermesStudio();
   const requested = Array.isArray(req.body?.profiles) && req.body.profiles.length ? new Set(req.body.profiles.map(String)) : null;
@@ -6412,6 +7484,7 @@ app.post('/api/hermes-local/import', async (req, res) => {
   state.models = normalizeModels(state.models).filter((model) => !isBadHermesStudioModel(model) && model.source !== 'hermes-profile');
 
   for (const profile of profiles) {
+    await ensureManagedGlobalModulesForProfile(profile.name);
     const canonicalAgentId = profile.name === 'default' ? 'hermes-default' : slug(profile.name);
     const existingAgent = state.agents.find((agent) => agent.profileName === profile.name || agent.id === canonicalAgentId || agent.id === slug(profile.name));
     const nextAgent = agentFromProfile(profile, existingAgent);
@@ -6556,14 +7629,7 @@ async function latestHermesReleaseInfo(repoPath = hermesAgentSourcePath) {
   const info = { tag: '', version: '', releaseDate: '', label: '', url: '', commit: '' };
   try {
     const raw = await commandOutput('git', ['ls-remote', '--tags', '--sort=-version:refname', officialHermesAgentRepo], { timeout: 20000, maxBuffer: 1024 * 1024 });
-    const tags = new Map();
-    for (const line of raw.split('\n')) {
-      const match = line.match(/^([a-f0-9]+)\s+refs\/tags\/(v\d{4}\.\d{1,2}\.\d{1,2}(?:\.\d+)?)(\^\{\})?$/i);
-      if (!match) continue;
-      const previous = tags.get(match[2]);
-      if (!previous || match[3]) tags.set(match[2], { tag: match[2], commit: match[1] });
-    }
-    const latest = [...tags.values()].sort((a, b) => compareVersionDesc(a.tag, b.tag))[0];
+    const latest = parseOfficialHermesReleaseTags(raw, { limit: 1 })[0];
     if (latest) {
       info.tag = latest.tag;
       info.commit = latest.commit;
@@ -6587,6 +7653,7 @@ async function latestHermesReleaseInfo(repoPath = hermesAgentSourcePath) {
 }
 
 let officialHermesReleaseCache = { checkedAt: 0, value: null };
+let officialHermesReleasesCache = { checkedAt: 0, value: [] };
 
 async function cachedOfficialHermesRelease({ force = false } = {}) {
   if (!force && officialHermesReleaseCache.value && Date.now() - officialHermesReleaseCache.checkedAt < 5 * 60 * 1000) {
@@ -6595,6 +7662,34 @@ async function cachedOfficialHermesRelease({ force = false } = {}) {
   const value = await latestHermesReleaseInfo();
   officialHermesReleaseCache = { checkedAt: Date.now(), value };
   return value;
+}
+
+async function officialHermesReleases({ force = false, limit = 20 } = {}) {
+  if (!force && officialHermesReleasesCache.value.length && Date.now() - officialHermesReleasesCache.checkedAt < 5 * 60 * 1000) {
+    return officialHermesReleasesCache.value.slice(0, limit);
+  }
+  const raw = await commandOutput('git', ['ls-remote', '--tags', '--sort=-version:refname', officialHermesAgentRepo], {
+    timeout: 20000,
+    maxBuffer: 1024 * 1024,
+  });
+  const parsed = parseOfficialHermesReleaseTags(raw, { limit: 12 });
+  const value = await Promise.all(parsed.map(async (release) => {
+    try {
+      const response = await fetch(`https://raw.githubusercontent.com/NousResearch/hermes-agent/${encodeURIComponent(release.tag)}/pyproject.toml`, {
+        signal: AbortSignal.timeout(10000),
+      });
+      if (!response.ok) return release;
+      const remotePyproject = await response.text();
+      const version = remotePyproject.match(/^version\s*=\s*"([^"]+)"/m)?.[1] || '';
+      return version
+        ? { ...release, version, label: `v${version} · ${release.tag}` }
+        : release;
+    } catch {
+      return release;
+    }
+  }));
+  officialHermesReleasesCache = { checkedAt: Date.now(), value };
+  return value.slice(0, limit);
 }
 
 function findBundledHermesRuntimeSync() {
@@ -6702,6 +7797,19 @@ async function repairPortablePythonLinks(runtimeDir) {
   }
 }
 
+async function repairPortableNodeLinks(runtimeDir) {
+  if (process.platform === 'win32') return;
+  const binDir = path.join(runtimeDir, 'node', 'bin');
+  for (const [name, target] of [
+    ['npm', '../lib/node_modules/npm/bin/npm-cli.js'],
+    ['npx', '../lib/node_modules/npm/bin/npx-cli.js'],
+  ]) {
+    const entry = path.join(binDir, name);
+    await rm(entry, { force: true });
+    await symlink(target, entry);
+  }
+}
+
 async function rewritePortablePythonEntrypoints(runtimeDir) {
   if (process.platform === 'win32') return;
   const binDir = path.join(runtimeDir, 'python', 'bin');
@@ -6734,7 +7842,7 @@ async function verifyManagedRuntime(runtimeDir, expectedVersion, logs) {
   if (expectedVersion && !versionOutput.includes(expectedVersion)) {
     throw new Error(`Runtime 版本验证失败：期望 ${expectedVersion}，实际为 ${versionOutput || '未知'}。`);
   }
-  await requireLoggedCommand(runtime.python, ['-c', `import aiohttp, hermes_cli, hermes_cli.main, importlib.metadata as metadata, mcp, starlette; assert aiohttp.__version__ == "${requiredAiohttpVersion}"; assert metadata.version("mcp") == "${requiredMcpVersion}"; assert starlette.__version__ == "${requiredStarletteVersion}"; print("Hermes, aiohttp and MCP imports ready")`], {
+  await requireLoggedCommand(runtime.python, ['-c', `import aiohttp, ddgs, hermes_cli, hermes_cli.main, importlib.metadata as metadata, mcp, starlette; assert aiohttp.__version__ == "${requiredAiohttpVersion}"; assert metadata.version("mcp") == "${requiredMcpVersion}"; assert starlette.__version__ == "${requiredStarletteVersion}"; assert metadata.version("ddgs") == "${requiredDdgsVersion}"; from tools.web_tools import _ensure_web_plugins_loaded; _ensure_web_plugins_loaded(); from agent.web_search_registry import get_provider; provider = get_provider("ddgs"); assert provider is not None and provider.is_available() and provider.supports_search(); print("Hermes, aiohttp, MCP and DDGS imports ready")`], {
     cwd: runtimeDir,
     timeout: 30000,
     env: { HERMES_HOME: hermesHome, HERMES_AGENT_ROOT: runtime.pythonRoot },
@@ -6764,7 +7872,7 @@ async function verifyManagedRuntime(runtimeDir, expectedVersion, logs) {
 async function installManagedHermesRuntime({ tag = '' } = {}, logs = []) {
   const official = await cachedOfficialHermesRelease({ force: true });
   const targetTag = String(tag || official.tag || '').trim();
-  if (!targetTag || !/^v\d{4}\.\d{1,2}\.\d{1,2}(?:\.\d+)?$/.test(targetTag)) {
+  if (!targetTag || !isOfficialHermesReleaseTag(targetTag)) {
     const error = new Error('没有找到可安装的 Hermes Agent 官方稳定版本。');
     error.status = 409;
     throw error;
@@ -6789,8 +7897,9 @@ async function installManagedHermesRuntime({ tag = '' } = {}, logs = []) {
     logs.push(`creating isolated runtime from bundled base: ${bundled.runtimeDir}`);
     await cp(bundled.runtimeDir, staging, { recursive: true, dereference: true, preserveTimestamps: true });
     await repairPortablePythonLinks(staging);
+    await repairPortableNodeLinks(staging);
     const stagingRuntime = inspectHermesRuntimeDir(staging, 'managed');
-    await requireLoggedCommand(stagingRuntime.python, ['-m', 'pip', 'install', '--upgrade', '--force-reinstall', '--no-cache-dir', `${hermesAgentSourcePath}[mcp]`, `aiohttp==${requiredAiohttpVersion}`, `mcp==${requiredMcpVersion}`, `starlette==${requiredStarletteVersion}`], {
+    await requireLoggedCommand(stagingRuntime.python, ['-m', 'pip', 'install', '--upgrade', '--force-reinstall', '--no-cache-dir', `${hermesAgentSourcePath}[mcp]`, `aiohttp==${requiredAiohttpVersion}`, `mcp==${requiredMcpVersion}`, `starlette==${requiredStarletteVersion}`, `ddgs==${requiredDdgsVersion}`], {
       cwd: hermesAgentSourcePath,
       timeout: 30 * 60 * 1000,
       env: { HERMES_HOME: hermesHome, HERMES_AGENT_ROOT: stagingRuntime.pythonRoot },
@@ -6806,7 +7915,7 @@ async function installManagedHermesRuntime({ tag = '' } = {}, logs = []) {
       sourceRepo: officialHermesAgentRepo,
       sourceTag: targetTag,
       sourceCommit: commit,
-      pythonDependencies: { aiohttp: requiredAiohttpVersion, mcp: requiredMcpVersion, starlette: requiredStarletteVersion },
+      pythonDependencies: { aiohttp: requiredAiohttpVersion, mcp: requiredMcpVersion, starlette: requiredStarletteVersion, ddgs: requiredDdgsVersion },
       builtAt: now(),
       bridgeProtocolVersion: frakioBridgeProtocolVersion,
     };
@@ -6854,14 +7963,40 @@ async function activateManagedHermesRuntime(version, logs = []) {
   await verifyManagedRuntime(runtimeDir, cleanVersion, logs);
   const registry = readRuntimeRegistrySync();
   const previousVersion = registry.activeVersion || '';
-  await writeRuntimeRegistry({ ...registry, activeVersion: cleanVersion, previousVersion });
-  await stopOwnedHermesRuntime(logs);
-  const autoStart = await ensureHermesRuntimeReady({ force: true });
-  if (autoStart.status === 'failed') {
+  const rollbackPoint = await createHermesRollbackPoint('runtime-activation', logs);
+  try {
+    await stopOwnedRuntimeProcesses();
+    await writeRuntimeRegistry({ ...registry, activeVersion: cleanVersion, previousVersion });
+    await readState();
+    const autoStart = await ensureHermesRuntimeReady({ force: true });
+    if (autoStart.status === 'failed') {
+      throw new Error(autoStart.error || `Runtime ${cleanVersion} 启动失败。`);
+    }
+    await updateHermesRollbackPoint(rollbackPoint, {
+      status: 'ready',
+      after: {
+        version: cleanVersion,
+        sourceTag: runtime.manifest?.sourceTag || '',
+        sourceCommit: runtime.manifest?.sourceCommit || '',
+      },
+    });
+  } catch (activationError) {
+    await stopOwnedRuntimeProcesses().catch(() => null);
     await writeRuntimeRegistry({ ...readRuntimeRegistrySync(), activeVersion: previousVersion, previousVersion: cleanVersion });
-    await stopOwnedHermesRuntime(logs);
-    await ensureHermesRuntimeReady({ force: true });
-    const error = new Error(`Runtime ${cleanVersion} 启动失败，已恢复原 Runtime。${autoStart.error ? ` ${autoStart.error}` : ''}`);
+    await restoreHermesConfigSnapshot(rollbackPoint.path, {
+      profiles: true,
+      mcp: true,
+      channels: true,
+      models: true,
+    });
+    await restoreHermesDatabaseSnapshots(rollbackPoint.path, rollbackPoint.databaseFiles, logs);
+    const restored = await ensureHermesRuntimeReady({ force: true }).catch(() => null);
+    await updateHermesRollbackPoint(rollbackPoint, {
+      status: 'restored-after-failure',
+      note: String(activationError?.message || activationError),
+    });
+    const suffix = restored?.status === 'failed' ? ` 旧 Runtime 恢复后仍未就绪：${restored.error || '未知错误'}` : '';
+    const error = new Error(`Runtime ${cleanVersion} 启动失败，已恢复原 Runtime。${suffix}`);
     error.status = 500;
     throw error;
   }
@@ -6943,7 +8078,78 @@ async function copyHermesConfigSnapshot(snapshotDir) {
   for (const [relative, source] of candidates) {
     if (await copyIfExists(source, path.join(configDir, relative))) copied.push(relative);
   }
+  const copiedProfilesDir = path.join(configDir, 'hermes/profiles');
+  if (await exists(copiedProfilesDir)) {
+    const stack = [copiedProfilesDir];
+    while (stack.length) {
+      const current = stack.pop();
+      for (const entry of await readdir(current, { withFileTypes: true }).catch(() => [])) {
+        const target = path.join(current, entry.name);
+        if (entry.isDirectory()) stack.push(target);
+        else if (/^state\.db(?:-(?:wal|shm))?$/.test(entry.name)) await rm(target, { force: true });
+      }
+    }
+  }
   return copied;
+}
+
+async function hermesStateDatabases() {
+  const databases = [];
+  const rootDb = path.join(hermesHome, 'state.db');
+  if (await exists(rootDb)) databases.push({ profileName: 'default', source: rootDb, relative: 'default/state.db' });
+  const profilesRoot = path.join(hermesHome, 'profiles');
+  for (const entry of await readdir(profilesRoot, { withFileTypes: true }).catch(() => [])) {
+    if (!entry.isDirectory()) continue;
+    const source = path.join(profilesRoot, entry.name, 'state.db');
+    if (await exists(source)) databases.push({ profileName: entry.name, source, relative: `profiles/${entry.name}/state.db` });
+  }
+  return databases;
+}
+
+async function createHermesDatabaseSnapshots(snapshotDir, logs = []) {
+  const runtime = findFrakioHermesRuntimeSync() || findBundledHermesRuntimeSync();
+  if (!runtime?.python) throw new Error('缺少可用于数据库一致性备份的内置 Python Runtime。');
+  const databases = await hermesStateDatabases();
+  const snapshotRoot = path.join(snapshotDir, 'databases');
+  const script = [
+    'import sqlite3, sys',
+    'source_path, target_path = sys.argv[1], sys.argv[2]',
+    'source = sqlite3.connect(f"file:{source_path}?mode=ro", uri=True)',
+    'target = sqlite3.connect(target_path)',
+    'source.backup(target)',
+    'target.execute("PRAGMA wal_checkpoint(TRUNCATE)")',
+    'target.close()',
+    'source.close()',
+  ].join('; ');
+  const snapshots = [];
+  for (const database of databases) {
+    const target = path.join(snapshotRoot, database.relative);
+    await mkdir(path.dirname(target), { recursive: true });
+    await requireLoggedCommand(runtime.python, ['-c', script, database.source, target], {
+      timeout: 30000,
+      env: { HERMES_HOME: hermesHome, HERMES_AGENT_ROOT: runtime.pythonRoot },
+      errorMessage: `无法备份 ${database.profileName} 的 Hermes 会话数据库。`,
+    }, logs);
+    snapshots.push({ profileName: database.profileName, relative: database.relative });
+  }
+  return snapshots;
+}
+
+async function restoreHermesDatabaseSnapshots(snapshotDir, snapshots = [], logs = []) {
+  for (const snapshot of snapshots) {
+    const profileName = String(snapshot?.profileName || '').trim();
+    const source = path.join(snapshotDir, 'databases', String(snapshot?.relative || ''));
+    if (!profileName || !(await exists(source))) continue;
+    const target = profileName === 'default'
+      ? path.join(hermesHome, 'state.db')
+      : path.join(hermesHome, 'profiles', profileName, 'state.db');
+    if (!isInside(hermesHome, target)) throw new Error(`数据库恢复路径无效：${profileName}`);
+    await mkdir(path.dirname(target), { recursive: true });
+    await rm(`${target}-wal`, { force: true });
+    await rm(`${target}-shm`, { force: true });
+    await cp(source, target);
+    logs.push(`restored Hermes session database: ${profileName}`);
+  }
 }
 
 async function restoreHermesConfigSnapshot(snapshotDir, scopes = {}) {
@@ -7004,6 +8210,7 @@ async function createHermesRollbackPoint(reason = 'manual', logs = [], options =
     if (await copyIfExists(source, target)) copiedUntracked.push(relative);
   }
   const configFiles = await copyHermesConfigSnapshot(backupDir);
+  const databaseFiles = await createHermesDatabaseSnapshots(backupDir, logs);
   const manifest = {
     id: idValue,
     createdAt: now(),
@@ -7024,6 +8231,7 @@ async function createHermesRollbackPoint(reason = 'manual', logs = [], options =
     patchSaved,
     untrackedFiles: copiedUntracked,
     configFiles,
+    databaseFiles,
     scopes: ['runtime', 'profiles', 'mcp', 'channels', 'models'],
   };
   await writeFile(path.join(backupDir, 'manifest.json'), `${JSON.stringify(manifest, null, 2)}\n`, 'utf8');
@@ -7039,6 +8247,51 @@ async function updateHermesRollbackPoint(manifest, updates = {}) {
   next.size = await directorySize(manifest.path);
   await writeFile(path.join(manifest.path, 'manifest.json'), `${JSON.stringify(next, null, 2)}\n`, 'utf8');
   return next;
+}
+
+async function completePendingHermes019Upgrade() {
+  const pending = pendingHermes019UpgradeRollback;
+  if (!pending?.manifest) return;
+  await updateHermesRollbackPoint(pending.manifest, {
+    status: 'ready',
+    after: {
+      version: pending.targetVersion,
+      sourceTag: findFrakioHermesRuntimeSync()?.manifest?.sourceTag || '',
+      sourceCommit: findFrakioHermesRuntimeSync()?.manifest?.sourceCommit || '',
+    },
+  });
+  pendingHermes019UpgradeRollback = null;
+}
+
+async function rollbackPendingHermes019Upgrade(reason) {
+  const pending = pendingHermes019UpgradeRollback;
+  if (!pending?.manifest || !pending.previousVersion) return null;
+  const logs = pending.logs || [];
+  await stopOwnedRuntimeProcesses().catch(() => null);
+  const registry = readRuntimeRegistrySync();
+  await writeRuntimeRegistry({
+    ...registry,
+    activeVersion: pending.previousVersion,
+    previousVersion: pending.targetVersion,
+  });
+  await restoreHermesConfigSnapshot(pending.manifest.path, {
+    profiles: true,
+    mcp: true,
+    channels: true,
+    models: true,
+  });
+  await restoreHermesDatabaseSnapshots(pending.manifest.path, pending.manifest.databaseFiles, logs);
+  const restored = await ensureHermesRuntimeReady({ force: true }).catch((error) => ({
+    status: 'failed',
+    error: String(error?.message || error),
+  }));
+  await updateHermesRollbackPoint(pending.manifest, {
+    status: 'restored-after-failure',
+    note: String(reason?.message || reason || 'Hermes 0.19 startup verification failed.'),
+    restoredRuntimeVersion: pending.previousVersion,
+  });
+  pendingHermes019UpgradeRollback = null;
+  return restored;
 }
 
 async function listHermesBackups() {
@@ -7323,27 +8576,151 @@ app.get('/api/hermes-bootstrap/status', async (_req, res) => {
   }
 });
 
-app.post('/api/hermes-bootstrap/install', async (req, res) => {
+function publicHermesBootstrapInstallJob(job = hermesBootstrapInstallJob) {
+  if (!job) return null;
+  return {
+    id: job.id,
+    status: job.status,
+    currentStepId: job.currentStepId,
+    steps: job.steps.map((step) => ({ ...step })),
+    error: job.error,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    bootstrap: job.bootstrap || null,
+    runtime: job.runtime || null,
+  };
+}
+
+function emitHermesBootstrapInstallJob() {
+  const snapshot = publicHermesBootstrapInstallJob();
+  if (!snapshot) return;
+  for (const listener of hermesBootstrapInstallListeners) listener(snapshot);
+}
+
+function updateHermesBootstrapInstallStep(stepId, status, detail = '') {
+  if (!hermesBootstrapInstallJob) return;
+  hermesBootstrapInstallJob.currentStepId = stepId;
+  hermesBootstrapInstallJob.steps = hermesBootstrapInstallJob.steps.map((step) => (
+    step.id === stepId ? { ...step, status, detail: String(detail || '') } : step
+  ));
+  emitHermesBootstrapInstallJob();
+}
+
+async function runHermesBootstrapInstallJob(jobId) {
   const logs = [];
-  let phase = 'verify-runtime';
   try {
+    updateHermesBootstrapInstallStep('verify-runtime', 'running');
     const runtime = findFrakioHermesRuntimeSync();
-    if (!runtime) return res.status(409).json({ error: 'Frakio Work 安装包缺少内置 Hermes Runtime。', phase, logs });
+    if (!runtime) {
+      const error = new Error('Frakio Work 安装包缺少内置 Hermes Runtime。');
+      error.phase = 'verify-runtime';
+      throw error;
+    }
     logs.push(`using ${runtime.source} runtime ${runtime.version}: ${runtime.runtimeDir}`);
-    phase = 'write-config';
+    updateHermesBootstrapInstallStep('verify-runtime', 'ready', runtime.version ? `内置版本 ${runtime.version}` : '内置运行环境可用');
+
+    updateHermesBootstrapInstallStep('write-config', 'running');
     await ensureHermesBaseConfig(logs);
-    const moduleSync = { skipped: true, reason: 'Frakio Work does not mutate user Hermes skills or config during startup.' };
+    updateHermesBootstrapInstallStep('write-config', 'ready', 'Hermes Home 已准备');
 
-    phase = 'start-runtime';
-    await startHermesAgentApi(logs);
+    updateHermesBootstrapInstallStep('start-runtime', 'running');
+    const started = await startHermesAgentApi(logs);
+    if (!started?.ok) {
+      const error = new Error('Hermes Runtime 未能启动。');
+      error.phase = 'start-runtime';
+      throw error;
+    }
+    updateHermesBootstrapInstallStep('start-runtime', 'ready', '本地 Runtime 已启动');
 
-    phase = 'detect';
+    updateHermesBootstrapInstallStep('detect', 'running');
     const bootstrap = await discoverHermesBootstrap();
-    res.json({ ok: true, phase, logs: tailInstallLogs(logs), bootstrap, moduleSync, runtime: await hermesRuntimeStatus() });
+    if (!bootstrap.api?.online) {
+      const error = new Error('Hermes 本地连接尚未就绪。');
+      error.phase = 'detect';
+      throw error;
+    }
+    const runtimeStatus = await hermesRuntimeStatus();
+    updateHermesBootstrapInstallStep('detect', 'ready', '本地连接正常');
+    if (!hermesBootstrapInstallJob || hermesBootstrapInstallJob.id !== jobId) return;
+    hermesBootstrapInstallJob = {
+      ...hermesBootstrapInstallJob,
+      status: 'ready',
+      currentStepId: '',
+      error: '',
+      finishedAt: now(),
+      bootstrap,
+      runtime: runtimeStatus,
+    };
+    emitHermesBootstrapInstallJob();
   } catch (error) {
-    logs.push(String(error?.message || error));
-    res.status(500).json({ error: error.message || 'Hermes bootstrap install failed.', phase, logs: tailInstallLogs(logs) });
+    if (!hermesBootstrapInstallJob || hermesBootstrapInstallJob.id !== jobId) return;
+    const phase = hermesBootstrapInstallSteps.some((step) => step.id === error?.phase)
+      ? error.phase
+      : hermesBootstrapInstallJob.currentStepId || 'verify-runtime';
+    const message = String(error?.message || 'Hermes Agent 安装失败。').slice(0, 500);
+    updateHermesBootstrapInstallStep(phase, 'failed', message);
+    hermesBootstrapInstallJob = {
+      ...hermesBootstrapInstallJob,
+      status: 'failed',
+      currentStepId: phase,
+      error: message,
+      finishedAt: now(),
+    };
+    emitHermesBootstrapInstallJob();
   }
+}
+
+function startHermesBootstrapInstallJob() {
+  if (hermesBootstrapInstallJob?.status === 'running') {
+    return { job: publicHermesBootstrapInstallJob(), reused: true };
+  }
+  const startedAt = now();
+  hermesBootstrapInstallJob = {
+    id: randomUUID(),
+    status: 'running',
+    currentStepId: 'verify-runtime',
+    steps: hermesBootstrapInstallSteps.map((step) => ({ ...step, status: 'pending', detail: '' })),
+    error: '',
+    startedAt,
+    finishedAt: null,
+    bootstrap: null,
+    runtime: null,
+  };
+  const jobId = hermesBootstrapInstallJob.id;
+  queueMicrotask(() => void runHermesBootstrapInstallJob(jobId));
+  return { job: publicHermesBootstrapInstallJob(), reused: false };
+}
+
+app.post('/api/hermes-bootstrap/install', async (_req, res) => {
+  const result = startHermesBootstrapInstallJob();
+  res.status(202).json(result);
+});
+
+app.get('/api/hermes-bootstrap/install/:jobId', (req, res) => {
+  const job = publicHermesBootstrapInstallJob();
+  if (!job || job.id !== req.params.jobId) return res.status(404).json({ error: 'Hermes 安装任务不存在。' });
+  res.json({ job });
+});
+
+app.get('/api/hermes-bootstrap/install/:jobId/events', (req, res) => {
+  const initial = publicHermesBootstrapInstallJob();
+  if (!initial || initial.id !== req.params.jobId) return res.status(404).json({ error: 'Hermes 安装任务不存在。' });
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+  });
+  const send = (snapshot) => {
+    if (snapshot.id !== req.params.jobId) return;
+    res.write(`event: install.snapshot\ndata: ${JSON.stringify({ job: snapshot })}\n\n`);
+  };
+  send(initial);
+  const heartbeat = setInterval(() => res.write(': heartbeat\n\n'), 15000);
+  hermesBootstrapInstallListeners.add(send);
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    hermesBootstrapInstallListeners.delete(send);
+  });
 });
 
 app.post('/api/hermes-bootstrap/start', async (_req, res) => {
@@ -7361,7 +8738,8 @@ app.post('/api/hermes-bootstrap/start', async (_req, res) => {
 app.post('/api/hermes-bootstrap/import', async (_req, res) => {
   try {
     const state = await readState();
-    const moduleSync = { skipped: true, reason: 'Profile import is read-only for user Hermes configuration.' };
+    for (const profile of await readHermesProfiles()) await ensureManagedGlobalModulesForProfile(profile.name);
+    const moduleSync = { skipped: true, reason: 'Profile import completed; managed global module roots were registered separately.' };
     const result = await syncHermesProfilesToState(state);
     await writeState(result.state);
     res.json({
@@ -7609,6 +8987,17 @@ app.post('/api/hermes-runtime/check-update', async (_req, res) => {
     res.json({ ok: true, manager: await runtimeManagerStatus({ refreshOfficial: true }), runtime: await hermesRuntimeStatus() });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Hermes Runtime update check failed.' });
+  }
+});
+
+app.get('/api/hermes-runtime/releases', async (_req, res) => {
+  try {
+    res.json({
+      releases: await officialHermesReleases(),
+      repositoryUrl: 'https://github.com/NousResearch/hermes-agent',
+    });
+  } catch (error) {
+    res.status(502).json({ error: error.message || 'Hermes Runtime releases could not be loaded.', releases: [] });
   }
 });
 
@@ -7880,42 +9269,6 @@ app.put('/api/hermes/config/auxiliary-models', async (req, res) => {
     });
   } catch (error) {
     res.status(error.status || 500).json({ error: error.message || '辅助模型配置保存失败。' });
-  }
-});
-
-app.get('/api/hermes/config/moa', async (req, res) => {
-  try {
-    const profile = requestedHermesProfile(req, 'default');
-    const config = await readYamlFile(profileConfigPath(profile));
-    res.json(normalizeMoaConfig(config.moa));
-  } catch (error) {
-    res.status(500).json({ error: error.message || '组合模型配置读取失败。' });
-  }
-});
-
-app.put('/api/hermes/config/moa', async (req, res) => {
-  try {
-    const profile = requestedHermesProfile(req, 'default');
-    if (!isPlainRecord(req.body?.moa)) return res.status(400).json({ error: 'moa 配置不能为空。' });
-    const normalized = normalizeMoaConfig(req.body.moa, true);
-    const config = await updateProfileYaml(profile, (current) => {
-      const previous = isPlainRecord(current.moa) ? current.moa : {};
-      current.moa = {
-        ...previous,
-        default_preset: normalized.default_preset,
-        active_preset: normalized.active_preset,
-        save_traces: normalized.save_traces,
-        trace_dir: normalized.trace_dir,
-        presets: Object.fromEntries(Object.entries(normalized.presets).map(([name, preset]) => [name, {
-          ...(isPlainRecord(previous.presets?.[name]) ? previous.presets[name] : {}),
-          ...preset,
-        }])),
-      };
-      return current;
-    });
-    res.json({ success: true, moa: normalizeMoaConfig(config.moa) });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message || '组合模型配置保存失败。' });
   }
 });
 
@@ -8603,6 +9956,9 @@ app.post('/api/threads/:id/collaboration/plans', async (req, res) => {
   try {
     const state = await readState();
     const thread = state.threads.find((item) => item.id === req.params.id);
+    if (thread?.collaborationMode === 'plan' && activePlanSession(thread)) {
+      return res.status(409).json({ error: 'Plan 模式中不能发布 Work 执行方案。请先由用户批准计划。', code: 'PLAN_MUTATION_BLOCKED' });
+    }
     const workflow = workflowById(thread, req.body?.workflowId);
     if (!thread || !workflow) return res.status(404).json({ error: 'Workflow not found.' });
     const cached = idempotentResult(thread.collaboration, req.body?.idempotencyKey);
@@ -8987,8 +10343,9 @@ app.get('/api/models', async (_req, res) => {
 app.get('/api/model-capabilities', async (_req, res) => {
   const state = await readState();
   const providerCatalog = flattenProviderCatalog(modelCatalogCache);
+  const runtime = findFrakioHermesRuntimeSync();
   res.json({
-    runtimeVersion: '0.18.2',
+    runtimeVersion: runtime?.version || '',
     capabilities: capabilitiesForModels(state.models, { providerCatalog }),
     providers: Object.fromEntries(state.models.map((model) => [model.id, catalogStatus(modelCatalogCache, model)])),
   });
@@ -9014,14 +10371,18 @@ app.get('/api/model-providers/presets', async (req, res) => {
 async function fetchProviderModelsForRequest(body) {
   const apiKey = String(body?.apiKey || body?.api_key || '').trim();
   const provider = {
-    providerKey: String(body?.providerKey || '').trim(), apiMode: normalizeApiMode(body?.apiMode),
+    providerKey: String(body?.providerKey || '').trim(), apiMode: runtimeApiMode(body?.apiMode),
     baseUrl: String(body?.baseUrl || body?.base_url || '').trim(), modelsUrl: String(body?.modelsUrl || '').trim(),
   };
   const urls = candidateModelUrls(provider);
   if (!urls.length) throw Object.assign(new Error('Base URL 格式不正确。'), { status: 400 });
+  const anthropicHeaders = provider.apiMode === 'anthropic_messages' || isAnthropicLikeBaseUrl(provider.baseUrl);
+  const headers = !apiKey ? {} : anthropicHeaders
+    ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01' }
+    : { Authorization: `Bearer ${apiKey}` };
   let lastError = null;
   for (const url of urls) {
-    const result = await fetchJson(url, { method: 'GET', headers: apiKey ? { Authorization: `Bearer ${apiKey}` } : {}, timeoutMs: 9000 });
+    const result = await fetchJson(url, { method: 'GET', headers, timeoutMs: 9000 });
     if (!result.ok) {
       const providerMessage = typeof result.body?.error?.message === 'string' ? `：${result.body.error.message.slice(0, 180)}` : '';
       lastError = Object.assign(new Error(result.status === 401 || result.status === 403
@@ -9040,6 +10401,272 @@ async function fetchProviderModelsForRequest(body) {
   }
   await recordCatalogError(modelCatalogCachePath, modelCatalogCache, provider, lastError || '模型目录不可用。');
   throw lastError || Object.assign(new Error('模型列表获取失败。'), { status: 502 });
+}
+
+function userProtocolLabel(apiMode) {
+  if (apiMode === 'codex_responses' || apiMode === 'openai_responses') return 'OpenAI Responses';
+  if (apiMode === 'anthropic_messages') return 'Anthropic Messages';
+  return 'OpenAI Chat Completions';
+}
+
+function protocolModesForDetection(preference, baseUrl) {
+  if (preference !== 'auto') return [runtimeApiMode(preference)];
+  return isAnthropicLikeBaseUrl(baseUrl)
+    ? ['anthropic_messages', 'codex_responses', 'chat_completions']
+    : ['codex_responses', 'chat_completions', 'anthropic_messages'];
+}
+
+function providerProbeBody(apiMode, modelId, requestOverrides = {}) {
+  const tool = {
+    name: 'frakio_connection_probe',
+    description: 'A harmless tool used to verify Agent tool-call compatibility.',
+    parameters: { type: 'object', properties: {}, additionalProperties: false },
+  };
+  if (apiMode === 'anthropic_messages') {
+    return {
+      model: modelId,
+      messages: [{ role: 'user', content: 'Reply with OK. Do not call the tool.' }],
+      max_tokens: 16,
+      tools: [tool],
+      ...requestOverrides,
+    };
+  }
+  if (apiMode === 'codex_responses' || apiMode === 'openai_responses') {
+    return {
+      model: modelId,
+      input: 'Reply with OK. Do not call the tool.',
+      max_output_tokens: 16,
+      tools: [{ type: 'function', ...tool }],
+      ...requestOverrides,
+    };
+  }
+  return {
+    model: modelId,
+    messages: [{ role: 'user', content: 'Reply with OK. Do not call the tool.' }],
+    max_tokens: 16,
+    tools: [{ type: 'function', function: tool }],
+    ...requestOverrides,
+  };
+}
+
+function chatCapabilityProbeCandidates(model = {}) {
+  const providerKey = String(model.providerKey || '').toLowerCase();
+  const baseUrl = String(model.baseUrl || '').toLowerCase();
+  const modelId = String(model.model || '').toLowerCase();
+  const preferred = [];
+  if (providerKey.includes('openrouter') || baseUrl.includes('openrouter')) preferred.push('openrouter');
+  if (providerKey.includes('deepseek') || baseUrl.includes('deepseek') || modelId.includes('deepseek')) preferred.push('deepseek');
+  if (providerKey.includes('qwen') || baseUrl.includes('dashscope') || modelId.includes('qwen')) preferred.push('qwen', 'chat_template');
+  if (providerKey.includes('zai') || baseUrl.includes('bigmodel') || /(?:^|[/_-])glm/.test(modelId)) preferred.push('zai');
+  return Array.from(new Set([...preferred, 'openai', 'openrouter', 'deepseek', 'qwen', 'chat_template', 'zai'])).map((format) => {
+    if (format === 'openrouter') return { format, off: { reasoning: { effort: 'none' } }, on: { reasoning: { effort: 'high' } }, effort: 'high' };
+    if (format === 'deepseek') return { format, off: { thinking: { type: 'disabled' } }, on: { thinking: { type: 'enabled' }, reasoning_effort: 'high' }, effort: 'high' };
+    if (format === 'qwen') return { format, off: { enable_thinking: false }, on: { enable_thinking: true }, effort: 'high' };
+    if (format === 'chat_template') return { format, off: { chat_template_kwargs: { enable_thinking: false } }, on: { chat_template_kwargs: { enable_thinking: true } }, effort: 'high' };
+    if (format === 'zai') return { format, off: { thinking: { type: 'disabled' } }, on: { thinking: { type: 'enabled' } }, effort: 'high' };
+    return { format: 'openai', off: { reasoning_effort: 'none' }, on: { reasoning_effort: 'low' }, effort: 'low' };
+  });
+}
+
+function safeProviderError(result, apiMode, requestUrl, stage = 'connection') {
+  const providerMessage = String(result?.body?.error?.message || result?.body?.message || result?.error || '').slice(0, 300);
+  const status = Number(result?.status || 0);
+  let message = providerMessage || (status ? `HTTP ${status}` : '无法连接供应商。');
+  if (status === 401) message = `API Key 未授权${providerMessage ? `：${providerMessage}` : ''}`;
+  else if (status === 403) message = `供应商拒绝请求${providerMessage ? `：${providerMessage}` : ''}`;
+  else if (status === 404) message = `接口路径不可用${providerMessage ? `：${providerMessage}` : ''}`;
+  let pathname = '';
+  try { pathname = new URL(requestUrl).pathname; } catch {}
+  return {
+    stage,
+    protocol: userProtocolLabel(apiMode),
+    path: pathname,
+    status,
+    providerMessage,
+    message,
+  };
+}
+
+async function verifyProviderProtocol({ baseUrl, apiMode, modelId, apiKey, requestOverrides = {}, timeoutMs = 30000 }) {
+  const requestUrl = providerInferenceUrl({ baseUrl, apiMode });
+  const headers = apiMode === 'anthropic_messages'
+    ? { 'x-api-key': apiKey, 'anthropic-version': '2023-06-01', 'Content-Type': 'application/json' }
+    : { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+  let result;
+  try {
+    result = await fetchExternalJson(requestUrl, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(providerProbeBody(apiMode, modelId, requestOverrides)),
+      timeoutMs,
+    });
+  } catch (error) {
+    result = { ok: false, status: 0, error: error?.name === 'AbortError' ? '请求超时' : String(error?.message || error) };
+  }
+  return result.ok
+    ? { ok: true, baseUrl, apiMode, requestUrl, result }
+    : { ok: false, baseUrl, apiMode, requestUrl, result, diagnostic: safeProviderError(result, apiMode, requestUrl) };
+}
+
+async function detectProviderConfiguration(body, savedModel = null, stateModels = [], onStage = () => {}) {
+  const preference = normalizeApiModePreference(body?.apiModePreference, body?.apiMode);
+  const rawBaseUrl = String(body?.baseUrl || body?.base_url || '').trim();
+  const normalizedInput = normalizeProviderBaseUrl(rawBaseUrl, preference === 'auto' ? '' : runtimeApiMode(preference));
+  if (!normalizedInput) throw Object.assign(new Error('Base URL 格式不正确。'), { status: 400, stage: 'models' });
+  const apiKey = savedModel
+    ? await credentialForModelDraft(savedModel, normalizedInput, body?.apiKey || body?.api_key, stateModels)
+    : String(body?.apiKey || body?.api_key || '').trim();
+  if (!apiKey && !/^(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|\[::1\])(?::|\/|$)/i.test(normalizedInput)) {
+    throw Object.assign(new Error('检测需要可用的 API Key。'), { status: 400, stage: 'models' });
+  }
+
+  const catalogMode = preference === 'auto'
+    ? (isAnthropicLikeBaseUrl(normalizedInput) ? 'anthropic_messages' : 'chat_completions')
+    : runtimeApiMode(preference);
+  let fetched;
+  try {
+    onStage('正在获取模型');
+    fetched = await fetchProviderModelsForRequest({ ...body, baseUrl: normalizedInput, apiMode: catalogMode, apiKey });
+  } catch (error) {
+    error.stage = 'models';
+    throw error;
+  }
+  const modelId = String(body?.model || body?.modelId || '').trim();
+  const selectedModel = fetched.models.includes(modelId) ? modelId : fetched.models[0];
+  let lastFailure = null;
+  let verified = null;
+  onStage('正在验证连接');
+  for (const apiMode of protocolModesForDetection(preference, normalizedInput)) {
+    onStage(`正在识别 API 协议 · ${userProtocolLabel(apiMode)}`);
+    for (const baseUrl of candidateProviderBaseUrls(normalizedInput, apiMode)) {
+      const attempt = await verifyProviderProtocol({ baseUrl, apiMode, modelId: selectedModel, apiKey });
+      if (attempt.ok) {
+        verified = attempt;
+        break;
+      }
+      lastFailure = attempt;
+    }
+    if (verified) break;
+  }
+  if (!verified) {
+    const diagnostic = lastFailure?.diagnostic || { stage: 'connection', protocol: userProtocolLabel(runtimeApiMode(preference)), path: '', status: 0, message: '连接验证失败。' };
+    throw Object.assign(new Error(diagnostic.message), { status: diagnostic.status || 502, code: 'provider_rejected', diagnostic });
+  }
+
+  const detectedModel = normalizeModels([{
+    ...body,
+    id: savedModel?.id || 'detected',
+    providerKey: body?.providerKey || savedModel?.providerKey || '',
+    baseUrl: verified.baseUrl,
+    apiMode: verified.apiMode,
+    apiModePreference: preference,
+    model: selectedModel,
+    models: fetched.models,
+    capabilityMode: 'auto',
+  }])[0];
+  let capability = resolveModelCapability(detectedModel, selectedModel, { providerCatalog: flattenProviderCatalog(modelCatalogCache) });
+  let probeResults = [];
+  if ((verified.apiMode === 'codex_responses' || verified.apiMode === 'openai_responses') && ['unknown', 'verification_failed'].includes(capability.status)) {
+    const headers = { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' };
+    const discovery = await probeResponsesCapabilities({
+      modelId: selectedModel,
+      request: async (requestBody) => {
+        try {
+          return await fetchExternalJson(verified.requestUrl, { method: 'POST', headers, body: JSON.stringify(requestBody), timeoutMs: 12000 });
+        } catch (error) {
+          return { ok: false, status: 0, error: String(error?.name === 'AbortError' ? '请求超时' : error?.message || error) };
+        }
+      },
+      onStage,
+    });
+    capability = discovery.capability;
+    probeResults = discovery.probeResults;
+    await recordActiveProbeCapability(modelCatalogCachePath, modelCatalogCache, detectedModel, capability);
+  } else if (verified.apiMode === 'chat_completions' && capability.status === 'unknown') {
+    onStage('正在探测推理档位');
+    let acceptedFormat = null;
+    for (const candidate of chatCapabilityProbeCandidates(detectedModel)) {
+      const disabled = await verifyProviderProtocol({
+        baseUrl: verified.baseUrl,
+        apiMode: verified.apiMode,
+        modelId: selectedModel,
+        apiKey,
+        requestOverrides: candidate.off,
+        timeoutMs: 12000,
+      });
+      probeResults.push({ kind: 'reasoning', option: 'off', mappedValue: 'none', status: disabled.ok ? 'accepted' : disabled.result?.status === 400 || disabled.result?.status === 422 ? 'unsupported' : 'unknown', ...(disabled.diagnostic?.providerMessage ? { error: disabled.diagnostic.providerMessage } : {}) });
+      if (!disabled.ok) continue;
+      const enabled = await verifyProviderProtocol({
+        baseUrl: verified.baseUrl,
+        apiMode: verified.apiMode,
+        modelId: selectedModel,
+        apiKey,
+        requestOverrides: candidate.on,
+        timeoutMs: 12000,
+      });
+      probeResults.push({ kind: 'reasoning', option: candidate.effort, mappedValue: candidate.effort, status: enabled.ok ? 'accepted' : enabled.result?.status === 400 || enabled.result?.status === 422 ? 'unsupported' : 'unknown', ...(enabled.diagnostic?.providerMessage ? { error: enabled.diagnostic.providerMessage } : {}) });
+      if (enabled.ok) {
+        acceptedFormat = candidate;
+        break;
+      }
+    }
+    if (acceptedFormat) {
+      capability = {
+        ...capability,
+        modelId: selectedModel,
+        reasoning: true,
+        reasoningType: 'binary',
+        reasoningEfforts: ['off', acceptedFormat.effort],
+        reasoningMap: { off: 'none', [acceptedFormat.effort]: acceptedFormat.effort },
+        defaultReasoning: acceptedFormat.effort,
+        thinkingFormat: acceptedFormat.format,
+        source: 'active_probe',
+        confidence: 'inferred',
+        status: 'confirmed',
+        reasoningStatus: 'confirmed',
+        updatedAt: now(),
+      };
+    }
+    onStage('正在检测快速模式');
+    const priorityAttempt = await verifyProviderProtocol({
+      baseUrl: verified.baseUrl,
+      apiMode: verified.apiMode,
+      modelId: selectedModel,
+      apiKey,
+      requestOverrides: { service_tier: 'priority' },
+      timeoutMs: 12000,
+    });
+    probeResults.push({ kind: 'service_tier', option: 'priority', mappedValue: 'priority', status: priorityAttempt.ok ? 'accepted' : priorityAttempt.result?.status === 400 || priorityAttempt.result?.status === 422 ? 'unsupported' : 'unknown', ...(priorityAttempt.diagnostic?.providerMessage ? { error: priorityAttempt.diagnostic.providerMessage } : {}) });
+    if (priorityAttempt.ok) {
+      capability = {
+        ...capability,
+        serviceTiers: [{ id: 'priority', name: '快速', description: '中转线路接受 Priority 服务层', requestValue: 'priority', billingNotice: '厂商可能额外计费' }],
+        speedModes: ['standard', 'priority'],
+        fastMode: 'openai_priority',
+        serviceTierStatus: 'confirmed',
+        source: 'active_probe',
+        confidence: 'inferred',
+        status: 'confirmed',
+        updatedAt: now(),
+      };
+    }
+    if (capability.status === 'confirmed') await recordActiveProbeCapability(modelCatalogCachePath, modelCatalogCache, detectedModel, capability);
+  }
+  const inputComparable = comparableBaseUrl(normalizedInput);
+  const autoCompletedV1 = inputComparable !== comparableBaseUrl(verified.baseUrl) && /\/v1$/i.test(verified.baseUrl);
+  return {
+    baseUrl: verified.baseUrl,
+    apiMode: verified.apiMode,
+    apiModePreference: preference,
+    protocol: modelProtocolFromApiMode(verified.apiMode),
+    model: selectedModel,
+    models: fetched.models,
+    capability,
+    probeResults,
+    catalog: { source: fetched.rich ? 'provider_catalog' : 'model_ids', rich: fetched.rich, url: fetched.url, ...catalogStatus(modelCatalogCache, fetched.provider) },
+    autoCompletedV1,
+    diagnostic: { stage: 'complete', protocol: userProtocolLabel(verified.apiMode), path: new URL(verified.requestUrl).pathname, status: verified.result.status },
+  };
 }
 
 async function refreshStaleProviderCatalogs() {
@@ -9091,6 +10718,53 @@ app.post('/api/models/fetch', async (req, res) => {
   }
 });
 
+app.post('/api/model-providers/detect', async (req, res) => {
+  const stream = req.body?.stream === true;
+  const writeEvent = (event) => {
+    if (!stream || res.writableEnded) return;
+    res.write(`${JSON.stringify(event)}\n`);
+  };
+  if (stream) {
+    res.status(200);
+    res.setHeader('Content-Type', 'application/x-ndjson; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-cache, no-transform');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+  }
+  try {
+    const state = await readState();
+    const savedModel = req.body?.modelId ? state.models.find((item) => item.id === req.body.modelId) : null;
+    if (req.body?.modelId && !savedModel) throw Object.assign(new Error('模型不存在。'), { status: 404, stage: 'models' });
+    const detection = await detectProviderConfiguration(req.body, savedModel, state.models, (stage) => writeEvent({ type: 'stage', stage }));
+    captureTelemetry('feature_used', { feature: 'model_connected', outcome: 'completed' });
+    captureMeaningfulActivity('feature_used');
+    const payload = { detected: true, ...detection };
+    if (stream) {
+      writeEvent({ type: 'result', data: payload });
+      res.end();
+    } else {
+      res.json(payload);
+    }
+  } catch (error) {
+    const diagnostic = error?.diagnostic || {};
+    const payload = {
+      error: error.message || 'Provider 检测失败。',
+      code: error.code || '',
+      stage: diagnostic.stage || error.stage || 'connection',
+      protocol: diagnostic.protocol || '',
+      path: diagnostic.path || '',
+      status: diagnostic.status || error.status || 0,
+      providerMessage: diagnostic.providerMessage || '',
+    };
+    if (stream) {
+      writeEvent({ type: 'error', ...payload });
+      res.end();
+    } else {
+      res.status(error.status || 500).json(payload);
+    }
+  }
+});
+
 app.post('/api/model-providers/fetch', async (req, res) => {
   try {
     const fetched = await fetchProviderModelsForRequest(req.body);
@@ -9102,13 +10776,6 @@ app.post('/api/model-providers/fetch', async (req, res) => {
     res.status(error.status || 500).json({ error: error.message || '模型列表获取失败。' });
   }
 });
-
-function providerInferenceUrl(model) {
-  const base = String(model.baseUrl || '').trim().replace(/\/+$/, '').replace(/\/(chat\/completions|responses|messages)$/i, '');
-  if (model.apiMode === 'anthropic_messages') return /\/v1$/i.test(base) ? `${base}/messages` : `${base}/v1/messages`;
-  if (model.apiMode === 'codex_responses' || model.apiMode === 'openai_responses') return /\/v1$/i.test(base) ? `${base}/responses` : `${base}/v1/responses`;
-  return /\/v1$/i.test(base) ? `${base}/chat/completions` : `${base}/v1/chat/completions`;
-}
 
 function verificationModelFromRequest(savedModel, body = {}) {
   const configuration = body?.configuration && typeof body.configuration === 'object' ? body.configuration : null;
@@ -9135,11 +10802,12 @@ function verificationModelFromRequest(savedModel, body = {}) {
     next.baseUrl = baseUrl;
   }
   if ('apiMode' in configuration) {
-    const apiMode = normalizeApiMode(configuration.apiMode);
+    const apiMode = runtimeApiMode(configuration.apiMode);
     if (!apiMode) throw Object.assign(new Error('API 协议不受支持。'), { status: 400 });
     next.apiMode = apiMode;
     next.protocol = modelProtocolFromApiMode(apiMode);
   }
+  if ('apiModePreference' in configuration) next.apiModePreference = normalizeApiModePreference(configuration.apiModePreference, next.apiMode);
   if ('modelApiModes' in configuration) next.modelApiModes = normalizeModelApiModes(configuration.modelApiModes);
   if ('compat' in configuration) next.compat = normalizeModelCompat(configuration.compat);
   if ('modelCompat' in configuration) next.modelCompat = normalizeModelCompatMap(configuration.modelCompat);
@@ -9152,7 +10820,7 @@ function verificationModelFromRequest(savedModel, body = {}) {
 }
 
 async function persistVerifiedModelDraft(state, savedModel, verifiedModel, explicitApiKey) {
-  for (const key of ['name', 'provider', 'kind', 'protocol', 'model', 'models', 'baseUrl', 'apiMode', 'modelsUrl', 'modelApiModes', 'compat', 'modelCompat', 'contextLimit', 'capabilityMode', 'capabilityOverrides', 'pricing']) {
+  for (const key of ['name', 'provider', 'kind', 'protocol', 'model', 'models', 'baseUrl', 'apiMode', 'apiModePreference', 'modelsUrl', 'modelApiModes', 'compat', 'modelCompat', 'contextLimit', 'capabilityMode', 'capabilityOverrides', 'pricing']) {
     savedModel[key] = verifiedModel[key];
   }
   const provided = String(explicitApiKey || '').trim();
@@ -9161,6 +10829,7 @@ async function persistVerifiedModelDraft(state, savedModel, verifiedModel, expli
     await setModelSecret(savedModel.id, provided);
   }
   savedModel.apiKey = '';
+  savedModel.runtimeRevision = newRuntimeRevision();
   await writeState(state);
 }
 
@@ -9626,7 +11295,8 @@ app.post('/api/models', async (req, res) => {
   const name = String(req.body?.name || '').trim();
   if (!name) return res.status(400).json({ error: '模型名称不能为空。' });
   const providerKey = String(req.body?.providerKey || '').trim().slice(0, 120);
-  const apiMode = normalizeApiMode(req.body?.apiMode);
+  const apiMode = runtimeApiMode(req.body?.apiMode);
+  const apiModePreference = normalizeApiModePreference(req.body?.apiModePreference, apiMode);
   if (providerKey.startsWith('custom:') && !apiMode) return res.status(400).json({ error: '自定义 Provider 必须选择 API 协议。' });
   const profileName = await requestedModelProfile(req);
   const oauthAuthenticated = oauthProviderKeys.has(providerKey) && oauthProviderAuthenticated(profileName, providerKey);
@@ -9650,6 +11320,7 @@ app.post('/api/models', async (req, res) => {
     profileName: oauthProviderKeys.has(providerKey) ? profileName : '',
     providerKey,
     apiMode,
+    apiModePreference,
     modelsUrl: String(req.body?.modelsUrl || '').trim().slice(0, 300),
     modelApiModes: normalizeModelApiModes(req.body?.modelApiModes),
     compat: normalizeModelCompat(req.body?.compat),
@@ -9658,6 +11329,7 @@ app.post('/api/models', async (req, res) => {
     capabilityMode: req.body?.capabilityMode === 'manual' ? 'manual' : 'auto',
     capabilityOverrides: normalizeCapabilityOverrides(req.body?.capabilityOverrides),
     pricing: normalizeModelPricing(req.body?.pricing),
+    runtimeRevision: newRuntimeRevision(),
   };
   model.providerKey = normalizeModels([...state.models, model]).find((item) => item.id === model.id)?.providerKey || providerKey;
   state.models.push(model);
@@ -9685,6 +11357,8 @@ app.patch('/api/models/:id', async (req, res) => {
   const model = state.models.find((item) => item.id === req.params.id);
   if (!model) return res.status(404).json({ error: '模型不存在。' });
   const previousVerificationPrefix = verificationRoutePrefix(model);
+  const previousConnectionFingerprint = modelRuntimeRevision({ ...model, runtimeRevision: '' });
+  const hadExplicitApiKey = Boolean(String(req.body?.apiKey || '').trim());
   if ('name' in req.body) {
     const name = String(req.body.name || '').trim();
     if (!name) return res.status(400).json({ error: '模型名称不能为空。' });
@@ -9702,9 +11376,10 @@ app.patch('/api/models/:id', async (req, res) => {
   if ('baseUrl' in req.body) model.baseUrl = String(req.body.baseUrl || '').trim().slice(0, 240);
   if ('providerKey' in req.body) model.providerKey = String(req.body.providerKey || '').trim().slice(0, 120);
   if ('apiMode' in req.body) {
-    model.apiMode = normalizeApiMode(req.body.apiMode);
+    model.apiMode = runtimeApiMode(req.body.apiMode);
     if (!('protocol' in req.body)) model.protocol = modelProtocolFromApiMode(model.apiMode);
   }
+  if ('apiModePreference' in req.body) model.apiModePreference = normalizeApiModePreference(req.body.apiModePreference, model.apiMode);
   if ('modelsUrl' in req.body) model.modelsUrl = String(req.body.modelsUrl || '').trim().slice(0, 300);
   if ('modelApiModes' in req.body) model.modelApiModes = normalizeModelApiModes(req.body.modelApiModes);
   if ('compat' in req.body) model.compat = normalizeModelCompat(req.body.compat);
@@ -9719,6 +11394,9 @@ app.patch('/api/models/:id', async (req, res) => {
     await setModelSecret(model.id, req.body.apiKey);
   }
   model.providerKey = normalizeModels(state.models).find((item) => item.id === model.id)?.providerKey || model.providerKey;
+  const nextConnectionFingerprint = modelRuntimeRevision({ ...model, runtimeRevision: '' });
+  if (hadExplicitApiKey || previousConnectionFingerprint !== nextConnectionFingerprint) model.runtimeRevision = newRuntimeRevision();
+  else model.runtimeRevision = modelRuntimeRevision(model);
   model.apiKey = '';
   await writeState(state);
   if (oauthProviderKeys.has(model.providerKey) && model.model) {
@@ -9747,6 +11425,7 @@ app.post('/api/agents', async (req, res) => {
     if (!name) return res.status(400).json({ error: 'Agent 名称不能为空。' });
     const profileName = await uniqueProfileName(name);
     await createHermesProfileFiles(profileName, req.body || {});
+    await ensureManagedGlobalModulesForProfile(profileName);
     const profile = (await readHermesProfiles()).find((item) => item.name === profileName);
     const agent = {
       id: profileName,
@@ -9856,10 +11535,13 @@ app.get('/api/state', async (_req, res) => {
 
 app.patch('/api/state/ui', async (req, res) => {
   const state = await readState();
-  const next = { ...(req.body || {}) };
+  const next = normalizeWorkbenchSidebarPatch(req.body || {});
   if ('defaultAgentId' in next && !state.agents.some((agent) => agent.id === next.defaultAgentId)) delete next.defaultAgentId;
   if ('activeSpaceId' in next && !state.spaces.some((space) => space.id === next.activeSpaceId && !space.archivedAt)) delete next.activeSpaceId;
   if ('telemetryEnabled' in next) next.telemetryEnabled = Boolean(next.telemetryEnabled);
+  if ('richToolDescriptions' in next) next.richToolDescriptions = Boolean(next.richToolDescriptions);
+  if ('appearance' in next && !['system', 'light', 'dark'].includes(next.appearance)) next.appearance = 'system';
+  if ('conversationTransition' in next) delete next.conversationTransition;
   if ('telemetryNoticeSeenAt' in next) next.telemetryNoticeSeenAt = String(next.telemetryNoticeSeenAt || '').slice(0, 40);
   if ('agentMentionMaxDepth' in next) next.agentMentionMaxDepth = normalizeAgentMentionMaxDepth(next.agentMentionMaxDepth, 2);
   state.ui = { ...state.ui, ...next };
@@ -10074,7 +11756,7 @@ app.post('/api/spaces', async (req, res) => {
     name,
     iconKind: req.body?.iconKind,
     iconValue: req.body?.iconValue,
-    theme: req.body?.theme,
+    theme: req.body?.theme || defaultSpaceTheme,
     lastOpenedAt: now(),
   }, name);
   state.spaces.push(space);
@@ -10146,8 +11828,6 @@ app.post('/api/workspaces', async (req, res) => {
       mode: 'workspace',
       primaryAgentId: defaultAgentId,
       defaultAgentId,
-      agents: state.agents,
-      intro: `项目已创建，项目目录是 ${rootPath}。后续产物和文件改动只会写入这个文件夹。`,
     });
     workspace.activeThreadId = thread.id;
     state.workspaces.push(workspace);
@@ -10233,11 +11913,13 @@ app.post('/api/conversations', async (req, res) => {
         executionMode,
         primaryAgentId,
         defaultAgentId: primaryAgentId,
-        agents: state.agents,
-        intro: primaryAgent ? `已开启临时对话，当前默认 Agent 是 ${primaryAgent.name}。需要更多成员时，直接 @Agent。` : '已开启临时对话。需要某个 Agent 参与时，直接 @Agent。',
       });
       let work = null;
       if (executionMode === 'work') work = await initializeNewThreadWorkMode(state, thread, requestedCoordinatorId || primaryAgentId, String(req.body?.requestId || ''));
+      if (req.body?.collaborationMode === 'plan') {
+        if (executionMode === 'chat') await ensurePlanRuntimeCapability(await resolveHermesProfileNameForAgent(primaryAgent || {}));
+        createPlanSession(thread, { authorAgentId: requestedCoordinatorId || primaryAgentId, targetExecutionMode: executionMode, at: now() });
+      }
       state.threads.unshift(thread);
       if (spaceId) state.ui.activeSpaceId = spaceId;
       const snapshot = work ? await collaborationSnapshot(state, thread, work.workflow.id) : null;
@@ -10297,6 +11979,56 @@ app.get('/api/workspaces/:id/files/content', async (req, res) => {
   }
 });
 
+app.get('/api/rich-preview', async (req, res) => {
+  try {
+    const state = await readState();
+    const threadId = String(req.query.threadId || '');
+    const workspaceId = String(req.query.workspaceId || '');
+    const thread = threadId ? state.threads.find((item) => item.id === threadId) : null;
+    const resolvedWorkspaceId = workspaceId || thread?.workspaceId || '';
+    const workspace = resolvedWorkspaceId ? state.workspaces.find((item) => item.id === resolvedWorkspaceId) : null;
+    const preview = await resolveRichPreviewFile(String(req.query.path || ''), [
+      workspace?.rootPath,
+      attachmentRoot,
+      frakioWorkHome,
+      os.tmpdir(),
+    ]);
+    res.setHeader('Content-Type', preview.mimeType);
+    res.setHeader('Content-Length', String(preview.size));
+    res.setHeader('Content-Disposition', `inline; filename*=UTF-8''${encodeURIComponent(preview.fileName)}`);
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    await pipeline(preview.stream(), res);
+  } catch (error) {
+    if (!res.headersSent) res.status(error.status || 500).json({ error: error.message || '文件预览失败。', code: error.code || 'RICH_PREVIEW_FAILED' });
+  }
+});
+
+app.post('/api/threads/:threadId/messages/:messageId/rich-content/repair', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.threadId);
+    const message = thread?.messages?.find((item) => item.id === req.params.messageId);
+    if (!thread || !message) return res.status(404).json({ error: '消息不存在。', code: 'RICH_CONTENT_MESSAGE_NOT_FOUND' });
+    if (message.agentId === 'user' || message.agentId === 'system') return res.status(400).json({ error: '只能修复 Agent 富内容回复。', code: 'RICH_CONTENT_MESSAGE_NOT_AGENT' });
+    const validation = validateRichContentOutput(message.content);
+    if (validation.valid) return res.json({ repaired: false, thread });
+    const result = await repairRichContentFinalOutput(thread.id, message.externalRunId || `message-${message.id}`, message.content);
+    if (!result.repaired) return res.status(422).json({ error: '富内容自动修复失败，已保留原消息。', code: 'RICH_CONTENT_REPAIR_FAILED', issues: result.issues });
+    const updatedThread = await updateState(async (latest) => {
+      const currentThread = latest.threads.find((item) => item.id === thread.id);
+      const currentMessage = currentThread?.messages?.find((item) => item.id === message.id);
+      if (!currentThread || !currentMessage) return null;
+      currentMessage.content = result.output;
+      currentMessage.richContentRepairedAt = now();
+      currentThread.updatedAt = now();
+      return currentThread;
+    });
+    res.json({ repaired: true, thread: updatedThread });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || '富内容修复失败。', code: error.code || 'RICH_CONTENT_REPAIR_FAILED' });
+  }
+});
+
 app.post('/api/workspaces/:id/threads', async (req, res) => {
   try {
     const result = await updateState(async (state) => {
@@ -10309,7 +12041,7 @@ app.post('/api/workspaces/:id/threads', async (req, res) => {
         spaceId: workspace.spaceId || state.ui.activeSpaceId || state.spaces[0]?.id || null,
         workspaceId: workspace.id,
         title: String(req.body?.title || '新的团队议事').slice(0, 40),
-        vaultId,
+        vaultId: workspace.vaultId || null,
         selectedAgents: Array.from(new Set([defaultAgentId, coordinatorAgentId, 'max'].filter(Boolean))),
         agentModelOverrides: normalizeAgentModelOverrides(req.body?.agentModelOverrides, state.agents, state.models),
         agentRunOverrides: normalizeAgentRunOverrides(req.body?.agentRunOverrides, state.agents),
@@ -10317,11 +12049,16 @@ app.post('/api/workspaces/:id/threads', async (req, res) => {
         executionMode,
         primaryAgentId: defaultAgentId,
         defaultAgentId,
-        agents: state.agents,
-        intro: `新项目对话已创建。项目目录是 ${workspace.rootPath}，自动写入会限制在这个文件夹内。`,
       });
       let work = null;
       if (executionMode === 'work') work = await initializeNewThreadWorkMode(state, thread, coordinatorAgentId, String(req.body?.requestId || ''));
+      if (req.body?.collaborationMode === 'plan') {
+        if (executionMode === 'chat') {
+          const coordinator = state.agents.find((agent) => agent.id === coordinatorAgentId || agent.id === defaultAgentId);
+          await ensurePlanRuntimeCapability(await resolveHermesProfileNameForAgent(coordinator || {}));
+        }
+        createPlanSession(thread, { authorAgentId: coordinatorAgentId || defaultAgentId, targetExecutionMode: executionMode, at: now() });
+      }
       state.threads.unshift(thread);
       workspace.activeThreadId = thread.id;
       workspace.updatedAt = now();
@@ -10346,6 +12083,121 @@ app.get('/api/threads/:id', async (req, res) => {
   res.json({ thread });
 });
 
+app.post('/api/threads/:threadId/branches', async (req, res) => {
+  let createdThreadId = '';
+  try {
+    const messageId = String(req.body?.messageId || '').trim();
+    if (!messageId) return res.status(400).json({ error: 'messageId 不能为空。', code: 'BRANCH_MESSAGE_REQUIRED' });
+    const result = await updateState(async (state) => {
+      const sourceThread = state.threads.find((thread) => thread.id === req.params.threadId);
+      if (!sourceThread) return { error: { status: 404, message: '会话不存在。', code: 'BRANCH_THREAD_NOT_FOUND' } };
+      const targetMessage = (sourceThread.messages || []).find((message) => message.id === messageId);
+      if (!targetMessage) return { error: { status: 404, message: '分支消息不存在。', code: 'BRANCH_MESSAGE_NOT_FOUND' } };
+      if (!isPersistedAgentMessage(targetMessage)) {
+        return { error: { status: 400, message: '只能从已完成的 Agent 回复创建分支。', code: 'BRANCH_MESSAGE_NOT_AGENT' } };
+      }
+      const targetTranscript = normalizeRunTranscripts(sourceThread.runTranscripts)
+        .find((transcript) => transcript.messageId === targetMessage.id || (targetMessage.externalRunId && transcript.runId === targetMessage.externalRunId));
+      const targetPlan = targetMessage.planId ? (sourceThread.planSessions || []).find((plan) => plan.id === targetMessage.planId) : null;
+      const targetPlanDraft = targetPlan?.drafts?.find((draft) => Number(draft.revision) === Number(targetMessage.planRevision));
+      const targetRunId = targetMessage.externalRunId || targetPlanDraft?.submittedByRunId || '';
+      if (targetTranscript?.status === 'running' || (targetRunId && targetRunId === sourceThread.activeRunId)) {
+        return { error: { status: 409, message: '这条回复仍在生成，完成后才能创建分支。', code: 'BRANCH_MESSAGE_RUNNING' } };
+      }
+
+      const title = branchTreeTitle(state, sourceThread);
+      const thread = createThreadRecord({
+        spaceId: sourceThread.spaceId,
+        workspaceId: sourceThread.workspaceId || null,
+        title,
+        vaultId: sourceThread.vaultId || null,
+        selectedAgents: [...(sourceThread.selectedAgents || [])],
+        agentModelOverrides: structuredClone(sourceThread.agentModelOverrides || {}),
+        agentRunOverrides: structuredClone(sourceThread.agentRunOverrides || {}),
+        mode: sourceThread.mode || (sourceThread.workspaceId ? 'workspace' : 'direct'),
+        executionMode: sourceThread.executionMode === 'work' ? 'work' : 'chat',
+        primaryAgentId: sourceThread.primaryAgentId,
+        defaultAgentId: sourceThread.defaultAgentId,
+        followMode: sourceThread.followMode,
+      });
+      createdThreadId = thread.id;
+      const history = await cloneThreadHistoryForBranch(sourceThread, targetMessage, thread.id);
+      thread.messages = history.messages;
+      thread.runTranscripts = history.runTranscripts;
+      thread.planSessions = history.planSessions;
+      thread.activePlanId = '';
+      thread.collaborationMode = 'default';
+      thread.workerOutputMode = sourceThread.workerOutputMode === 'all' ? 'all' : 'summary';
+      thread.activeAgentId = sourceThread.activeAgentId || sourceThread.defaultAgentId || sourceThread.primaryAgentId;
+      thread.permissionMode = ['manual', 'smart', 'off'].includes(sourceThread.permissionMode) ? sourceThread.permissionMode : 'smart';
+      thread.engine = sourceThread.engine || 'hermes-agent';
+      thread.externalSessionId = null;
+      thread.runStatus = 'idle';
+      thread.workflow = [];
+      thread.workflowState = [];
+      thread.proposals = [];
+      thread.artifacts = [];
+      thread.contextPacket = null;
+      thread.forkedFromThreadId = sourceThread.id;
+      thread.forkedFromMessageId = targetMessage.id;
+      thread.branchRootThreadId = sourceThread.branchRootThreadId || sourceThread.id;
+      thread.collaboration = normalizeCollaboration({
+        kind: thread.mode === 'workspace' ? 'workspace-group-chat' : 'direct-chat',
+        activeAgentId: thread.activeAgentId,
+        maxMentionDepth: sourceThread.collaboration?.maxMentionDepth,
+      }, { defaultAgentId: thread.defaultAgentId, activeAgentId: thread.activeAgentId });
+
+      let work = null;
+      if (thread.executionMode === 'work') {
+        work = await initializeNewThreadWorkMode(state, thread, thread.activeAgentId || thread.defaultAgentId, `branch:${thread.id}`);
+      }
+      state.threads.unshift(thread);
+      if (thread.spaceId) state.ui.activeSpaceId = thread.spaceId;
+      const workspace = thread.workspaceId ? state.workspaces.find((item) => item.id === thread.workspaceId) : null;
+      if (workspace) {
+        workspace.activeThreadId = thread.id;
+        workspace.updatedAt = now();
+      }
+      const snapshot = work ? await collaborationSnapshot(state, thread, work.workflow.id) : null;
+      return { state, thread, work, snapshot };
+    });
+    if (result?.error) {
+      return res.status(result.error.status).json({ error: result.error.message, code: result.error.code });
+    }
+    res.status(201).json({
+      thread: result.thread,
+      conversation: summarizeThread(result.thread, result.state),
+      workflow: result.work?.workflow || null,
+      capability: result.work?.capability || null,
+      snapshot: result.snapshot,
+    });
+  } catch (error) {
+    if (createdThreadId) await attachmentStore.removeForThreads([createdThreadId]).catch(() => {});
+    res.status(error.status || 500).json({ error: error.message || '创建分支失败。', code: error.code || 'BRANCH_CREATE_FAILED' });
+  }
+});
+
+app.patch('/api/threads/:threadId/messages/:messageId/feedback', async (req, res) => {
+  const value = req.body?.value;
+  if (!['up', 'down', null].includes(value)) {
+    return res.status(400).json({ error: '反馈值无效。', code: 'MESSAGE_FEEDBACK_INVALID' });
+  }
+  const result = await updateState(async (state) => {
+    const thread = state.threads.find((item) => item.id === req.params.threadId);
+    if (!thread) return { error: { status: 404, message: '会话不存在。', code: 'MESSAGE_FEEDBACK_THREAD_NOT_FOUND' } };
+    const message = (thread.messages || []).find((item) => item.id === req.params.messageId);
+    if (!message) return { error: { status: 404, message: '消息不存在。', code: 'MESSAGE_FEEDBACK_MESSAGE_NOT_FOUND' } };
+    if (!isPersistedAgentMessage(message)) {
+      return { error: { status: 400, message: '只能评价 Agent 回复。', code: 'MESSAGE_FEEDBACK_NOT_AGENT' } };
+    }
+    message.feedback = value;
+    thread.updatedAt = now();
+    return { thread, message };
+  });
+  if (result.error) return res.status(result.error.status).json({ error: result.error.message, code: result.error.code });
+  res.json(result);
+});
+
 app.patch('/api/threads/:id/mode', async (req, res) => {
   try {
     const targetMode = String(req.body?.mode || '').toLowerCase();
@@ -10353,6 +12205,9 @@ app.patch('/api/threads/:id/mode', async (req, res) => {
     const state = await readState();
     const thread = state.threads.find((item) => item.id === req.params.id);
     if (!thread) return res.status(404).json({ error: '会话不存在。' });
+    if (thread.collaborationMode === 'plan' && activePlanSession(thread)) {
+      return res.status(409).json({ error: '计划模式进行中，需先执行或取消当前计划。', code: 'PLAN_EXECUTION_MODE_LOCKED' });
+    }
     const previousMode = thread.executionMode === 'work' ? 'work' : 'chat';
     if (targetMode === 'chat') {
       thread.executionMode = 'chat';
@@ -10404,6 +12259,366 @@ app.patch('/api/threads/:id/mode', async (req, res) => {
     res.json({ thread, mode: 'work', workflow, snapshot, capability });
   } catch (error) {
     res.status(error.status || 500).json({ error: error.message || '对话模式切换失败。', code: error.code || '', details: error.details || {} });
+  }
+});
+
+app.patch('/api/threads/:id/collaboration-mode', async (req, res) => {
+  try {
+    const requestedMode = req.body?.mode === 'plan' ? 'plan' : req.body?.mode === 'default' ? 'default' : '';
+    if (!requestedMode) return res.status(400).json({ error: 'mode must be default or plan.' });
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    if (!thread) return res.status(404).json({ error: '会话不存在。' });
+    const current = activePlanSession(thread);
+    if (requestedMode === 'default') {
+      if (current) cancelPlanSession(thread, current, now());
+      else {
+        thread.collaborationMode = 'default';
+        thread.activePlanId = '';
+        thread.updatedAt = now();
+      }
+      await writeState(state);
+      captureTelemetry('plan_cancelled', { source: 'mode_control' });
+      return res.json({ thread, plan: current ? publicPlanSession(current) : null });
+    }
+    if (thread.runStatus === 'running') return res.status(409).json({ error: '当前运行结束后才能开启计划模式。', code: 'THREAD_RUN_ACTIVE' });
+    if (current) return res.json({ thread, plan: publicPlanSession(current), idempotent: true });
+    const workflow = workflowById(thread);
+    if (workflow?.currentRootTaskId) {
+      const detail = await readKanbanTaskDetail(workflow.boardSlug, workflow.currentRootTaskId).catch(() => null);
+      const rootStatus = String(detail?.task?.status || detail?.status || '');
+      if (rootStatus && !['done', 'archived', 'cancelled', 'failed'].includes(rootStatus)) {
+        return res.status(409).json({ error: '当前 Work 任务仍在执行，完成或取消后才能开启计划模式。', code: 'WORK_ROOT_ACTIVE' });
+      }
+    }
+    const authorAgentId = state.agents.some((agent) => agent.id === req.body?.authorAgentId)
+      ? req.body.authorAgentId
+      : workflow?.coordinatorAgentId || thread.activeAgentId || thread.defaultAgentId || resolveDefaultAgentId(state);
+    const author = state.agents.find((agent) => agent.id === authorAgentId);
+    const profileName = await resolveHermesProfileNameForAgent(author || {});
+    await ensurePlanRuntimeCapability(profileName);
+    const plan = createPlanSession(thread, {
+      authorAgentId,
+      targetExecutionMode: thread.executionMode === 'work' ? 'work' : 'chat',
+      at: now(),
+    });
+    await writeState(state);
+    captureTelemetry('plan_enabled', { target_mode: plan.targetExecutionMode });
+    res.json({ thread, plan: publicPlanSession(plan) });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || '计划模式切换失败。', code: error.code || '', details: error.details || {} });
+  }
+});
+
+app.get('/api/threads/:id/plans/events', async (req, res) => {
+  res.setHeader('Content-Type', 'text/event-stream');
+  res.setHeader('Cache-Control', 'no-cache, no-transform');
+  res.setHeader('Connection', 'keep-alive');
+  res.flushHeaders?.();
+  let lastDigest = '';
+  let closed = false;
+  req.on('close', () => { closed = true; });
+  while (!closed) {
+    try {
+      const state = await readState();
+      const thread = state.threads.find((item) => item.id === req.params.id);
+      if (!thread) {
+        res.write(`data: ${JSON.stringify({ event: 'plan.not_found' })}\n\n`);
+        break;
+      }
+      const plan = activePlanSession(thread);
+      let autoResolved = false;
+      if (plan) {
+        for (const batch of plan.questions || []) {
+          if (batch.status === 'pending' && batch.autoResolutionMs) {
+            const before = batch.status;
+            autoResolvePlanQuestionBatch(plan, batch.id, now());
+            if (before !== batch.status) autoResolved = true;
+          }
+        }
+      }
+      if (autoResolved) await writeState(state);
+      const payload = {
+        event: 'plan.snapshot',
+        collaborationMode: thread.collaborationMode,
+        activePlanId: thread.activePlanId || '',
+        plan: publicPlanSession(plan),
+      };
+      const digest = createHash('sha1').update(JSON.stringify(payload)).digest('hex');
+      if (digest !== lastDigest) {
+        lastDigest = digest;
+        res.write(`data: ${JSON.stringify(payload)}\n\n`);
+      } else {
+        res.write(': keep-alive\n\n');
+      }
+    } catch (error) {
+      res.write(`data: ${JSON.stringify({ event: 'plan.error', error: String(error?.message || error) })}\n\n`);
+    }
+    await new Promise((resolve) => setTimeout(resolve, 1000));
+  }
+  res.end();
+});
+
+app.post('/api/threads/:id/plans/:planId/questions', async (req, res) => {
+  try {
+    const result = await updateState(async (state) => {
+      const thread = state.threads.find((item) => item.id === req.params.id);
+      const plan = thread?.planSessions?.find((item) => item.id === req.params.planId);
+      if (!thread || !plan) return null;
+      if (thread.activePlanId !== plan.id || thread.collaborationMode !== 'plan') throw Object.assign(new Error('Plan session is not active.'), { status: 409, code: 'PLAN_NOT_ACTIVE' });
+      const batch = createPlanQuestionBatch(plan, req.body || {}, now());
+      thread.updatedAt = now();
+      return { batch, plan: publicPlanSession(plan) };
+    });
+    if (!result) return res.status(404).json({ error: 'Plan session not found.' });
+    captureTelemetry('plan_question_requested', { question_count: result.batch.questions.length, auto_resolve: Boolean(result.batch.autoResolutionMs) });
+    res.json(result);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Plan question request failed.', code: error.code || '', details: error.details || {} });
+  }
+});
+
+app.get('/api/threads/:id/plans/:planId/questions/:requestId', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    const plan = thread?.planSessions?.find((item) => item.id === req.params.planId);
+    if (!thread || !plan) return res.status(404).json({ error: 'Plan session not found.' });
+    const batch = autoResolvePlanQuestionBatch(plan, req.params.requestId, now());
+    if (!batch) return res.status(404).json({ error: 'Plan question request not found.' });
+    if (batch.status === 'auto_resolved') await writeState(state);
+    res.json({ batch, planStatus: plan.status });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Plan question read failed.', code: error.code || '' });
+  }
+});
+
+app.post('/api/threads/:id/plans/:planId/questions/:requestId/answer', async (req, res) => {
+  try {
+    const result = await updateState(async (state) => {
+      const thread = state.threads.find((item) => item.id === req.params.id);
+      const plan = thread?.planSessions?.find((item) => item.id === req.params.planId);
+      if (!thread || !plan) return null;
+      const batch = resolvePlanQuestionBatch(plan, req.params.requestId, req.body?.answers || {}, now());
+      thread.updatedAt = now();
+      return { batch, plan: publicPlanSession(plan) };
+    });
+    if (!result) return res.status(404).json({ error: 'Plan session not found.' });
+    captureTelemetry('plan_question_answered', { question_count: result.batch.questions.length });
+    res.json(result);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Plan answer failed.', code: error.code || '', details: error.details || {} });
+  }
+});
+
+app.post('/api/threads/:id/plans/:planId/questions/:requestId/cancel', async (req, res) => {
+  try {
+    const result = await updateState(async (state) => {
+      const thread = state.threads.find((item) => item.id === req.params.id);
+      const plan = thread?.planSessions?.find((item) => item.id === req.params.planId);
+      if (!thread || !plan) return null;
+      if (thread.activePlanId !== plan.id || thread.collaborationMode !== 'plan') {
+        throw Object.assign(new Error('Plan session is not active.'), { status: 409, code: 'PLAN_NOT_ACTIVE' });
+      }
+      const batch = cancelPlanQuestionBatch(plan, req.params.requestId, now());
+      thread.updatedAt = now();
+      return { batch, plan: publicPlanSession(plan) };
+    });
+    if (!result) return res.status(404).json({ error: 'Plan session not found.' });
+    captureTelemetry('plan_question_cancelled', { question_count: result.batch.questions.length });
+    res.json(result);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Plan question cancel failed.', code: error.code || '', details: error.details || {} });
+  }
+});
+
+app.post('/api/threads/:id/plans/:planId/submit', async (req, res) => {
+  try {
+    const result = await updateState(async (state) => {
+      const thread = state.threads.find((item) => item.id === req.params.id);
+      const plan = thread?.planSessions?.find((item) => item.id === req.params.planId);
+      if (!thread || !plan) return null;
+      if (thread.activePlanId !== plan.id || thread.collaborationMode !== 'plan') throw Object.assign(new Error('Plan session is not active.'), { status: 409, code: 'PLAN_NOT_ACTIVE' });
+      const submittedByRunId = String(req.body?.submittedByRunId || thread.activeRunId || plan.sourceRunId || '').trim();
+      const previousRevision = Number(plan.currentRevision || 0);
+      const draft = submitPlanDraft(plan, req.body || {}, { agentIds: state.agents.map((agent) => agent.id), submittedByRunId }, now());
+      const messageExists = (thread.messages || []).some((message) => message.planId === plan.id && Number(message.planRevision) === draft.revision);
+      if (!messageExists) {
+        thread.messages = [...(thread.messages || []), {
+          id: id('msg'),
+          agentId: plan.authorAgentId || thread.activeAgentId,
+          agentName: state.agents.find((agent) => agent.id === (plan.authorAgentId || thread.activeAgentId))?.name || 'Agent',
+          role: 'Plan',
+          content: draft.summary,
+          contentType: 'plan',
+          planId: plan.id,
+          planRevision: draft.revision,
+          createdAt: now(),
+        }];
+      }
+      thread.updatedAt = now();
+      return { draft, plan: publicPlanSession(plan), revised: previousRevision > 0 };
+    });
+    if (!result) return res.status(404).json({ error: 'Plan session not found.' });
+    captureTelemetry(result.revised ? 'plan_revised' : 'plan_submitted', { target_mode: result.plan.targetExecutionMode });
+    res.json(result);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Plan submit failed.', code: error.code || '', details: error.details || {} });
+  }
+});
+
+app.post('/api/threads/:id/plans/:planId/feedback', async (req, res) => {
+  try {
+    const feedback = String(req.body?.feedback || '').trim();
+    if (!feedback) return res.status(400).json({ error: 'feedback is required.' });
+    const result = await updateState(async (state) => {
+      const thread = state.threads.find((item) => item.id === req.params.id);
+      const plan = thread?.planSessions?.find((item) => item.id === req.params.planId);
+      if (!thread || !plan) return null;
+      if (plan.status !== 'waiting_approval') throw Object.assign(new Error('Plan is not waiting for approval.'), { status: 409, code: 'PLAN_NOT_WAITING_APPROVAL' });
+      const message = { id: id('msg'), agentId: 'user', agentName: '你', role: 'Workspace Owner', content: feedback, contentType: 'plan_feedback', planId: plan.id, createdAt: now() };
+      thread.messages = [...(thread.messages || []), message];
+      plan.status = 'drafting';
+      plan.error = '';
+      plan.updatedAt = now();
+      thread.updatedAt = now();
+      return { message, plan: publicPlanSession(plan), thread };
+    });
+    if (!result) return res.status(404).json({ error: 'Plan session not found.' });
+    captureTelemetry('plan_feedback_submitted', { target_mode: result.plan.targetExecutionMode });
+    res.json(result);
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Plan feedback failed.', code: error.code || '', details: error.details || {} });
+  }
+});
+
+app.post('/api/threads/:id/plans/:planId/cancel', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    const plan = thread?.planSessions?.find((item) => item.id === req.params.planId);
+    if (!thread || !plan) return res.status(404).json({ error: 'Plan session not found.' });
+    if (thread.runStatus === 'running' && thread.activeRunId) {
+      await requestHermesBridge({ action: 'interrupt', session_id: thread.activeSessionId || '', run_id: thread.activeRunId, message: '用户取消了计划。' }, { timeoutMs: 10000, retryMs: 1000 }).catch(() => null);
+    }
+    cancelPlanSession(thread, plan, now());
+    await writeState(state);
+    captureTelemetry('plan_cancelled', { source: String(req.body?.source || 'plan_card') });
+    res.json({ thread, plan: publicPlanSession(plan) });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Plan cancel failed.', code: error.code || '' });
+  }
+});
+
+app.post('/api/threads/:id/plans/:planId/execute', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    const plan = thread?.planSessions?.find((item) => item.id === req.params.planId);
+    if (!thread || !plan) return res.status(404).json({ error: 'Plan session not found.' });
+    const retryingFailedExecution = plan.status === 'failed';
+    if ((!retryingFailedExecution && thread.activePlanId !== plan.id) || !['waiting_approval', 'failed'].includes(plan.status)) return res.status(409).json({ error: 'Plan is not waiting for approval.', code: 'PLAN_NOT_WAITING_APPROVAL' });
+    const draft = latestPlanDraft(plan);
+    if (!draft) return res.status(409).json({ error: 'Plan has no submitted draft.', code: 'PLAN_DRAFT_MISSING' });
+    plan.status = 'approved';
+    plan.updatedAt = now();
+    if (plan.targetExecutionMode === 'work') {
+      try {
+        const published = await publishApprovedWorkPlan(state, thread, plan, draft);
+        plan.status = 'executing';
+        plan.executionRunId = `work:${published.workflow.id}:${published.rootTaskId}`;
+        plan.error = '';
+        plan.updatedAt = now();
+        thread.collaborationMode = 'default';
+        thread.activePlanId = '';
+        thread.updatedAt = now();
+        await writeState(state);
+        captureTelemetry('plan_approved', { target_mode: 'work' });
+        captureTelemetry('plan_execution_started', { target_mode: 'work' });
+        return res.json({
+          kind: 'work-dispatch',
+          plan: publicPlanSession(plan),
+          draft,
+          workflow: published.workflow,
+          rootTaskId: published.rootTaskId,
+          dispatch: published.dispatch,
+          snapshot: published.snapshot,
+          thread,
+        });
+      } catch (error) {
+        plan.status = 'failed';
+        plan.error = String(error?.message || error).slice(0, 1000);
+        plan.updatedAt = now();
+        thread.collaborationMode = 'default';
+        thread.activePlanId = '';
+        thread.updatedAt = now();
+        await writeState(state);
+        captureTelemetry('plan_execution_failed', { target_mode: 'work', error_code: telemetryErrorCode(error) });
+        throw error;
+      }
+    }
+    thread.collaborationMode = 'default';
+    thread.activePlanId = '';
+    thread.updatedAt = now();
+    await writeState(state);
+    captureTelemetry('plan_approved', { target_mode: plan.targetExecutionMode });
+    res.json({
+      kind: plan.targetExecutionMode === 'work' ? 'work-dispatch-pending' : 'chat-run',
+      plan: publicPlanSession(plan),
+      draft,
+      targetAgentId: plan.authorAgentId,
+      thread,
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Plan execute failed.', code: error.code || '', details: error.details || {} });
+  }
+});
+
+app.post('/api/threads/:id/title-generation', async (req, res) => {
+  const applyTitle = req.body?.apply === true;
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    if (!thread) return res.status(404).json({ error: '会话不存在。' });
+    const transcript = titleGenerationTranscript(thread);
+    if (!transcript) return res.status(409).json({ error: '当前对话还没有足够的内容生成标题。', code: 'TITLE_CONTEXT_EMPTY' });
+    const agent = resolveThreadDefaultAgent(state, thread);
+    if (!agent) return res.status(409).json({ error: '当前对话没有可用的 Agent。', code: 'TITLE_AGENT_MISSING' });
+    const profile = await resolveHermesProfileNameForAgent(agent);
+    await startHermesBridge();
+    const generated = await requestHermesBridge({
+      action: 'title_generate',
+      profile,
+      transcript,
+      timeout: 30,
+    }, { timeoutMs: 45000, retryMs: 1000 });
+    const title = sanitizeGeneratedTitle(generated?.title);
+    if (!title) {
+      const error = new Error('标题模型没有返回有效内容。');
+      error.status = 502;
+      error.code = 'TITLE_OUTPUT_EMPTY';
+      throw error;
+    }
+    if (!applyTitle) {
+      captureTelemetry('title_generation_generated', { apply: false });
+      return res.json({ title });
+    }
+    const result = await updateState(async (latestState) => {
+      const latestThread = latestState.threads.find((item) => item.id === req.params.id);
+      if (!latestThread) return null;
+      latestThread.title = title;
+      latestThread.updatedAt = now();
+      return { thread: latestThread };
+    });
+    if (!result) return res.status(404).json({ error: '会话不存在。' });
+    captureTelemetry('title_generation_applied', { apply: true });
+    return res.json({ title, thread: result.thread });
+  } catch (error) {
+    captureTelemetry('title_generation_failed', { error_code: telemetryErrorCode(error), apply: applyTitle });
+    return res.status(error.status || 503).json({
+      error: error.message || '自动生成标题失败。',
+      code: error.code || 'TITLE_GENERATION_FAILED',
+    });
   }
 });
 
@@ -10539,15 +12754,17 @@ app.post('/api/threads/:id/convert-to-workspace', async (req, res) => {
   }
 });
 
-function createThreadRecord({ spaceId, workspaceId, title, vaultId, selectedAgents, agentModelOverrides = {}, agentRunOverrides = {}, mode, executionMode = 'chat', primaryAgentId, defaultAgentId, followMode = 'default', intro, agents = [] }) {
+function createThreadRecord({ spaceId, workspaceId, title, vaultId, selectedAgents, agentModelOverrides = {}, agentRunOverrides = {}, mode, executionMode = 'chat', primaryAgentId, defaultAgentId, followMode = 'default' }) {
   const threadDefaultAgentId = defaultAgentId || primaryAgentId || selectedAgents?.[0] || 'iris';
-  const introAgent = agents.find((agent) => agent.id === threadDefaultAgentId) || agents.find((agent) => agent.id === 'iris') || { id: 'iris', name: 'Iris', role: '书记官 / 默认入口' };
   return {
     id: id('thread'),
     spaceId: spaceId || null,
     workspaceId,
     mode,
     executionMode: executionMode === 'work' ? 'work' : 'chat',
+    collaborationMode: 'default',
+    activePlanId: '',
+    planSessions: [],
     workerOutputMode: 'summary',
     primaryAgentId: primaryAgentId || threadDefaultAgentId,
     defaultAgentId: threadDefaultAgentId,
@@ -10558,7 +12775,7 @@ function createThreadRecord({ spaceId, workspaceId, title, vaultId, selectedAgen
     selectedAgents,
     agentModelOverrides,
     agentRunOverrides,
-    permissionMode: 'manual',
+    permissionMode: 'smart',
     archivedAt: null,
     pinnedAt: null,
     updatedAt: now(),
@@ -10569,13 +12786,87 @@ function createThreadRecord({ spaceId, workspaceId, title, vaultId, selectedAgen
     artifacts: [],
     contextPacket: null,
     collaboration: normalizeCollaboration({ kind: mode === 'workspace' ? 'workspace-group-chat' : 'direct-chat', activeAgentId: threadDefaultAgentId }, { defaultAgentId: threadDefaultAgentId }),
-    messages: [
-      { id: id('msg'), agentId: introAgent.id, agentName: introAgent.name, role: introAgent.role, content: intro },
-    ],
+    messages: [],
     engine: 'simulate',
     externalSessionId: null,
     runStatus: 'idle',
   };
+}
+
+function isSyntheticThreadIntroMessage(message) {
+  const content = String(message?.content || '');
+  return /^(已开启普通对话|已开启与 .+ 的单 Agent 对话|已开启临时对话|项目已创建|新项目对话已创建|Workspace 已开启)/.test(content);
+}
+
+function isPersistedAgentMessage(message) {
+  return Boolean(message?.id && message.agentId && !['user', 'system'].includes(message.agentId) && !isSyntheticThreadIntroMessage(message));
+}
+
+function branchTreeTitle(state, sourceThread) {
+  const rootId = sourceThread.branchRootThreadId || sourceThread.id;
+  const rootThread = state.threads.find((thread) => thread.id === rootId) || sourceThread;
+  const baseTitle = String(rootThread.title || sourceThread.title || '新对话').replace(/\s+\(\d+\)$/, '').trim() || '新对话';
+  const used = new Set([1]);
+  for (const thread of state.threads) {
+    const threadRootId = thread.branchRootThreadId || thread.id;
+    if (threadRootId !== rootId) continue;
+    const title = String(thread.title || '');
+    if (thread.id === rootId || title === baseTitle) {
+      used.add(1);
+      continue;
+    }
+    const match = title.match(/\s+\((\d+)\)$/);
+    if (match) used.add(Number(match[1]));
+  }
+  let branchNumber = 2;
+  while (used.has(branchNumber)) branchNumber += 1;
+  const suffix = ` (${branchNumber})`;
+  return `${baseTitle.slice(0, Math.max(1, 60 - suffix.length))}${suffix}`;
+}
+
+async function cloneThreadHistoryForBranch(sourceThread, targetMessage, newThreadId) {
+  const targetIndex = (sourceThread.messages || []).findIndex((message) => message.id === targetMessage.id);
+  const sourceMessages = sourceThread.messages.slice(0, targetIndex + 1).filter((message) => !isSyntheticThreadIntroMessage(message));
+  const messageIdMap = new Map(sourceMessages.map((message) => [message.id, id('msg')]));
+  const messages = [];
+  for (const sourceMessage of sourceMessages) {
+    const nextMessageId = messageIdMap.get(sourceMessage.id);
+    const nextMessage = {
+      ...structuredClone(sourceMessage),
+      id: nextMessageId,
+      parentMessageId: sourceMessage.parentMessageId ? messageIdMap.get(sourceMessage.parentMessageId) || '' : sourceMessage.parentMessageId,
+    };
+    if (Array.isArray(sourceMessage.attachments) && sourceMessage.attachments.length) {
+      nextMessage.attachments = await attachmentStore.cloneMany(
+        sourceMessage.attachments.map((attachment) => attachment.id),
+        newThreadId,
+        nextMessageId,
+      );
+    }
+    messages.push(nextMessage);
+  }
+  const copiedMessageIds = new Set(messageIdMap.keys());
+  const copiedRunIds = new Set(sourceMessages.map((message) => message.externalRunId).filter(Boolean));
+  const runTranscripts = normalizeRunTranscripts(sourceThread.runTranscripts)
+    .filter((transcript) => copiedMessageIds.has(transcript.messageId) || copiedRunIds.has(transcript.runId))
+    .map((transcript) => {
+      const sourceMessage = sourceMessages.find((message) => message.id === transcript.messageId || message.externalRunId === transcript.runId);
+      return {
+        ...structuredClone(transcript),
+        messageId: sourceMessage ? messageIdMap.get(sourceMessage.id) : '',
+      };
+    });
+  const copiedPlanIds = new Set(messages.map((message) => message.planId).filter(Boolean));
+  const planSessions = (sourceThread.planSessions || [])
+    .filter((plan) => copiedPlanIds.has(plan.id))
+    .map((plan) => ({
+      ...structuredClone(plan),
+      readOnly: true,
+      questions: (plan.questions || []).map((batch) => batch.status === 'pending'
+        ? { ...batch, status: 'cancelled', resolvedAt: now() }
+        : batch),
+    }));
+  return { messages, runTranscripts, planSessions };
 }
 
 function summarizeThread(thread, state) {
@@ -10589,7 +12880,7 @@ function summarizeThread(thread, state) {
     ...(Array.isArray(thread.selectedAgents) ? thread.selectedAgents : []),
     thread.primaryAgentId,
   ].filter((agentId) => agentId && validAgentIds.has(agentId)))];
-  const last = thread.messages.at(-1);
+  const last = [...(thread.messages || [])].reverse().find((message) => !isSyntheticThreadIntroMessage(message));
   return {
     id: thread.id,
     title: thread.title,
@@ -10598,6 +12889,8 @@ function summarizeThread(thread, state) {
     workspaceRootPath: workspace?.rootPath || '',
     mode: thread.mode || 'workspace',
     executionMode: thread.executionMode === 'work' ? 'work' : 'chat',
+    collaborationMode: thread.collaborationMode === 'plan' ? 'plan' : 'default',
+    activePlanId: thread.activePlanId || '',
     workerOutputMode: thread.workerOutputMode === 'all' ? 'all' : 'summary',
     primaryAgentId: thread.primaryAgentId || null,
     defaultAgentId: thread.defaultAgentId || null,
@@ -10605,7 +12898,7 @@ function summarizeThread(thread, state) {
     participantAgentIds,
     followMode: thread.followMode || 'default',
     primaryAgentName: primaryAgent?.name || '',
-    permissionMode: thread.permissionMode || 'manual',
+    permissionMode: thread.permissionMode || 'smart',
     agentModelOverrides: thread.agentModelOverrides || {},
     agentRunOverrides: thread.agentRunOverrides || {},
     vaultId: thread.vaultId,
@@ -10619,6 +12912,9 @@ function summarizeThread(thread, state) {
     runStatus: thread.runStatus || 'idle',
     archivedAt: thread.archivedAt || null,
     pinnedAt: thread.pinnedAt || null,
+    forkedFromThreadId: thread.forkedFromThreadId || null,
+    forkedFromMessageId: thread.forkedFromMessageId || null,
+    branchRootThreadId: thread.branchRootThreadId || null,
   };
 }
 
@@ -10688,6 +12984,7 @@ function agentEvent(agent, content, extra = {}) {
     agentName: agent.name,
     role: agent.role,
     content,
+    createdAt: now(),
     ...extra,
   };
 }
@@ -10781,6 +13078,7 @@ function resolveInitialRoomAgent(state, thread, message, collaboration, selected
 }
 
 async function runCouncilSimulation(req, res, options = {}) {
+  const startedAt = Date.now();
   const state = await readState();
   const message = String(req.body?.message || '').trim();
   const thread = state.threads.find((item) => item.id === req.body?.threadId) || state.threads[0];
@@ -10802,13 +13100,15 @@ async function runCouncilSimulation(req, res, options = {}) {
   const taskType = detectTaskType(message);
 
   const activeAgents = state.agents.filter((agent) => activeAgentIds.includes(agent.id));
-  const userMessage = { id: id('msg'), agentId: 'user', agentName: '你', role: 'Workspace Owner', content: message };
+  const userMessage = { id: id('msg'), agentId: 'user', agentName: '你', role: 'Workspace Owner', content: message, createdAt: now() };
   const events = activeAgents.map((agent, index) => ({
     id: `${Date.now()}-${agent.id}-${index}`,
     agentId: agent.id,
     agentName: agent.name,
     role: agent.role,
     content: buildAgentReply(agent.id, message, taskType, summary),
+    processingDurationMs: Math.max(1, Date.now() - startedAt),
+    createdAt: now(),
   }));
   const internalNotice = options.notice || '';
 
@@ -10885,13 +13185,14 @@ async function runAgentRoomChat(req, res) {
       return null;
     }
     totalRoutedRuns += 1;
+    const invokedAt = Date.now();
     let event;
     try {
       const reply = await runConfiguredModelChat(state, { ...thread, messages: [...thread.messages, userMessage, ...events] }, prompt, [agent.id]);
-      event = agentEvent(agent, reply.content, { role: `${agent.role}${routeLabel} / ${reply.provider} / ${reply.modelId}`, turnId, mentionDepth, parentMessageId, routeReason });
+      event = agentEvent(agent, reply.content, { role: `${agent.role}${routeLabel} / ${reply.provider} / ${reply.modelId}`, turnId, mentionDepth, parentMessageId, routeReason, processingDurationMs: Math.max(1, Date.now() - invokedAt) });
     } catch (error) {
       providerNotice ||= String(error?.message || error);
-      event = agentEvent(agent, buildAgentReply(agent.id, prompt, taskType, summary), { role: `${agent.role}${routeLabel}`, turnId, mentionDepth, parentMessageId, routeReason });
+      event = agentEvent(agent, buildAgentReply(agent.id, prompt, taskType, summary), { role: `${agent.role}${routeLabel}`, turnId, mentionDepth, parentMessageId, routeReason, processingDurationMs: Math.max(1, Date.now() - invokedAt) });
       engine = 'simulate';
     }
     events.push(event);
@@ -10978,7 +13279,7 @@ async function runAgentRoomChat(req, res) {
 
 async function threadHistoryForHermes(thread, targetAgent = null) {
   const messages = (thread.messages || [])
-    .filter((message) => message.agentId !== 'system' && (message.content || message.attachments?.length))
+    .filter((message) => message.agentId !== 'system' && !isSyntheticThreadIntroMessage(message) && (message.content || message.attachments?.length))
     .slice(-20);
   return Promise.all(messages.map(async (message) => {
     const attachments = await Promise.all((message.attachments || []).map(async (attachment) => {
@@ -11010,9 +13311,52 @@ function agentIdentityRunInstruction(agent, agents = []) {
   ].join('\n');
 }
 
+function planRunInstruction(thread, agent) {
+  const plan = activePlanSession(thread);
+  if (!plan) return '';
+  const latestDraft = latestPlanDraft(plan);
+  const resolvedQuestions = (plan.questions || [])
+    .filter((batch) => batch.status === 'resolved' || batch.status === 'auto_resolved')
+    .map((batch) => ({
+      questions: batch.questions.map((question) => ({ id: question.id, question: question.question })),
+      answers: batch.answers,
+    }));
+  const lines = [
+    '当前处于 Frakio Plan 模式。你可以读取本地资料和实时网络资料；用户批准前不得修改项目、创建任务、启动执行、发布内容或改变任何外部状态。',
+    `当前 threadId：${thread.id}。当前 planId：${plan.id}。锁定的目标执行模式：${plan.targetExecutionMode}。你的 Agent id：${agent?.id || plan.authorAgentId}。`,
+    '按三个阶段工作：先只读检查当前环境与源码；再确认目标、范围和会改变方案的取舍；最后确认接口、数据流、失败处理和测试。能够从源码、文档或只读查询得到的事实禁止询问用户。',
+    '实时信息优先调用 web_search；搜索后端失败时改用只读 browser_navigate、browser_snapshot 等浏览工具。单个搜索服务限流、目标网站拒绝或超时，都不能推断 Frakio、Hermes 或本机无法联网。查询天气不要求安装天气 Skill。',
+    '只在答案会明显改变实施方案时提问。优先一次问一个问题，最多三个。必须调用 hermes_workbench_plan_user_input_request，并为每个问题提供短标题、两到三个互斥选项和一句取舍说明。推荐项放在第一位。不要调用普通 clarify。',
+    '完成后必须调用 hermes_workbench_plan_submit 提交结构化方案。不得用普通 Markdown 编号代替提交。提交后停止继续规划，等待用户批准。',
+    '步骤必须包含稳定 key、标题、具体说明、涉及文件、预期结果和依赖。测试与假设单独列出。',
+  ];
+  if (plan.targetExecutionMode === 'work') {
+    lines.push('这是 Work 计划。每个步骤必须指定当前 Frakio Agent 列表中的 assigneeAgentId，并形成无环依赖 DAG。不得调用 collaboration_plan_publish、root_create、workflow_create、dependency_request、artifact_publish 或 task_complete。');
+  } else {
+    lines.push('这是 Chat 计划。由你本人在批准后执行；步骤可以省略 assigneeAgentId。计划正文中的 @Agent 名称只作为文字，不会触发其他 Agent。');
+  }
+  if (latestDraft) lines.push(`上一版计划（revision ${latestDraft.revision}）：\n${JSON.stringify(latestDraft)}`);
+  if (resolvedQuestions.length) lines.push(`已经确认的结构化问答：\n${JSON.stringify(resolvedQuestions)}`);
+  return lines.join('\n');
+}
+
+function approvedPlanExecutionInstruction(plan, draft) {
+  return [
+    '用户已经明确批准下面的 Frakio Plan。现在进入执行阶段。',
+    '严格按照已批准步骤实施。遇到会改变范围的情况时先停下说明，不要自行扩大计划。',
+    '方案涉及天气等实时信息时，执行阶段必须重新联网获取，不能沿用规划阶段的旧数据。',
+    `planId：${plan.id}；revision：${draft.revision}；目标模式：${plan.targetExecutionMode}。`,
+    JSON.stringify(draft),
+  ].join('\n');
+}
+
 function collaborationRunInstruction(thread, agent) {
+  if (thread.collaborationMode === 'plan' && activePlanSession(thread)) return planRunInstruction(thread, agent);
   if (thread.executionMode !== 'work') {
-    return '当前对话处于 Chat 模式。按普通多人聊天方式回复；不要创建协作工作流、看板任务或执行方案。需要其他成员接话时继续使用普通 @Agent 路由。';
+    return [
+      '当前对话处于 Chat 模式。按普通多人聊天方式回复；不要创建协作工作流、看板任务或执行方案。需要其他成员接话时继续使用普通 @Agent 路由。',
+      '需要实时信息时优先调用 web_search；搜索后端失败时改用只读浏览器。单个服务限流、网站拒绝或超时不能被描述成 Frakio、Hermes 或本机无法联网。天气查询不要求安装天气 Skill。',
+    ].join('\n');
   }
   const workflow = workflowById(thread);
   const lines = [
@@ -11030,6 +13374,18 @@ function collaborationRunInstruction(thread, agent) {
   lines.push(`你自己的 Agent id：${agent?.id || ''}。所有写操作都使用稳定且唯一的 idempotencyKey。`);
   lines.push('dependency 类型会自动恢复。needs_input 或 capability 必须调用 hermes_workbench_collaboration_blocker_report，系统会先交给工作流协调 Agent，再升级给全局决策 Agent，最后才请求人工。支付、授权、删除和外部发布不得由决策 Agent 代替用户批准。');
   return lines.join('\n');
+}
+
+function richContentRunInstruction() {
+  return [
+    '这是 Frakio 应用级最终输出协议，优先于任何 Skill、SOUL 或参考文档中的图表和预览格式建议。',
+    'Frakio 支持标准 Markdown 与以下富内容围栏。只有内容确实适合交互或可视化时才使用，不要为了装饰滥用。',
+    '流程、架构、UML、BPMN、时序与关系图一律使用 ```mermaid；禁止输出 plantuml、puml、vega 或其他图表围栏。必须输出合法 Mermaid，节点含标点时用双引号包裹标签。',
+    '结构化记录使用 ```datatable 或 ```spreadsheet，内容为严格 JSON。推荐列定义：{ "columns": [{"key":"name","label":"名称","type":"text"}], "rows": [{"name":"值"}] }。也兼容字符串列与数组行。数据量很小时优先使用普通 Markdown 表格。',
+    '补丁使用 ```diff；可折叠对象使用 ```json；公式使用 $...$、$$...$$ 或 ```math。',
+    '本地文件预览使用 ```image-preview、```pdf-preview、```markdown-preview 或 ```html-preview，内容为 { "src": "/绝对路径", "title": "可选标题" }；多个文件使用 { "title":"标题", "items":[{"src":"/绝对路径","label":"标签"}] }。只能引用当前项目、Frakio 附件、应用数据或临时目录中的真实文件。',
+    '所有富内容围栏都必须完整闭合。无法确认语法或文件存在时，改用普通 Markdown 或普通代码块。',
+  ].join('\n');
 }
 
 function hermesAgentSessionId(thread, agentId) {
@@ -11135,6 +13491,9 @@ function normalizeHermesRunEvent(event) {
     return { event: 'agent.event', runId: event.run_id || '', title: event.title || event.status || event.message || '', detail: event.delta || event.detail || event.message || '', raw: event, timestamp: event.timestamp || Date.now() / 1000 };
   }
   if (name === 'approval.request' || name === 'approval.requested') {
+    const choices = Array.isArray(event.choices)
+      ? event.choices.map((choice) => String(choice)).filter((choice) => ['once', 'session', 'always', 'deny'].includes(choice))
+      : ['once', 'session', 'always', 'deny'];
     return {
       event: 'approval.request',
       runId: event.run_id || '',
@@ -11143,7 +13502,9 @@ function normalizeHermesRunEvent(event) {
       command: event.command || event.command_preview || event.preview || '',
       cwd: event.cwd || '',
       tool: event.tool || event.tool_name || '',
-      choices: event.choices || ['once', 'session', 'always', 'deny'],
+      choices,
+      allowPermanent: event.allowPermanent ?? event.allow_permanent,
+      smartDenied: Boolean(event.smartDenied ?? event.smart_denied),
       timestamp: event.timestamp || Date.now() / 1000,
     };
   }
@@ -11315,25 +13676,68 @@ function hermesChunkError(chunk) {
   return '';
 }
 
+async function repairRichContentFinalOutput(threadId, runId, output) {
+  const validation = validateRichContentOutput(output);
+  if (validation.valid) return { output, repaired: false, issues: [] };
+  const state = await readState().catch(() => null);
+  const thread = state?.threads?.find((item) => item.id === threadId);
+  const diagnostic = state?.observability?.modelRuns?.find((item) => item.runId === runId);
+  const repairSessionId = `frakio-rich-repair-${runId}`;
+  try {
+    const response = await requestHermesBridge({
+      action: 'chat',
+      wait: true,
+      timeout: 150,
+      ephemeral: true,
+      session_id: repairSessionId,
+      message: richContentRepairPrompt(output, validation.issues),
+      storage_message: '',
+      conversation_history: [],
+      profile: diagnostic?.profileName || thread?.profileName || 'default',
+      model: diagnostic?.model || undefined,
+      provider: diagnostic?.providerKey || undefined,
+      runtime_overrides: { disable_tools: true, rich_tool_descriptions: false },
+      instructions: '你是 Frakio 富内容格式修复器。只能输出修复后的完整正文，不得解释、调用工具或增加新内容。',
+      source: 'frakio-rich-content-repair',
+    }, { timeoutMs: 180000, retryMs: 1000 });
+    const candidate = normalizeRepairedOutput(extractHermesOutput('', response.output, response.result));
+    const repairedValidation = validateRichContentOutput(candidate);
+    if (candidate && repairedValidation.valid) {
+      captureTelemetry('rich_content_repaired', { issue_count: validation.issues.length, issue_codes: validation.issues.map((issue) => issue.code).join(',') });
+      return { output: candidate, repaired: true, issues: validation.issues };
+    }
+    captureTelemetry('rich_content_repair_failed', { issue_count: validation.issues.length, remaining_count: repairedValidation.issues.length });
+  } catch (error) {
+    captureTelemetry('rich_content_repair_failed', { issue_count: validation.issues.length, error_code: telemetryErrorCode(error) });
+  } finally {
+    await requestHermesBridge({ action: 'destroy', session_id: repairSessionId }, { timeoutMs: 5000 }).catch(() => {});
+  }
+  return { output, repaired: false, issues: validation.issues };
+}
+
 async function completeHermesRunFromOutput(threadId, runId, output, usage, res, outputState = {}) {
   const telemetryState = await readState().catch(() => null);
   const telemetryThread = telemetryState?.threads?.find((item) => item.id === threadId);
-  if (!output) {
+  const structuredPlanSubmitted = (telemetryThread?.planSessions || []).some((plan) => (plan.drafts || []).some((draft) => draft.submittedByRunId === runId));
+  if (!output && !structuredPlanSubmitted) {
     const error = 'Hermes 已结束但没有返回最终文本。';
     const thread = await failHermesRun(threadId, runId, error, 'Hermes Agent 返回空回复');
     captureTelemetry('agent_run_failed', { stage: 'empty_output', error_code: 'empty_output' });
     writeHermesRunSse(res, { event: 'run.failed', runId, error, thread, timestamp: Date.now() / 1000 });
     return { completed: true, failed: true, thread };
   }
+  const richResult = output ? await repairRichContentFinalOutput(threadId, runId, output) : { output: '', repaired: false, issues: [] };
+  const finalOutput = richResult.output;
   const streamedText = String(outputState.text || '');
   const contentOffsetShift = streamedText.length - trimLeadingBlankLines(streamedText).length;
-  const thread = await appendHermesRunResult(threadId, output, runId, usage || {}, contentOffsetShift);
+  const thread = await appendHermesRunResult(threadId, finalOutput, runId, usage || {}, contentOffsetShift);
   const completedMessage = thread?.messages?.find((message) => message.externalRunId === runId);
   captureTelemetry('agent_run_completed', runTelemetryProperties(telemetryThread));
   writeHermesRunSse(res, {
     event: 'run.completed',
     runId,
-    output,
+    output: finalOutput,
+    richContentRepaired: richResult.repaired,
     thread,
     turnId: completedMessage?.turnId || runId,
     agentId: completedMessage?.agentId || '',
@@ -11353,6 +13757,7 @@ async function failHermesRunFromChunk(threadId, runId, errorMessage, res, output
     const currentThread = state.threads.find((item) => item.id === threadId);
     telemetryProperties = runTelemetryProperties(currentThread);
     if (!currentThread) return null;
+    markPlanRunFailed(currentThread, runId, event.error);
     currentThread.runStatus = 'failed';
     finalizeStoredRunTranscript(currentThread, runId, 'failed', outputState.text || '');
     finishStoredModelRun(state, { runId, threadId, status: 'failed', error: event.error });
@@ -11406,6 +13811,7 @@ async function processHermesBridgeChunk({ threadId, runId, chunk, res, outputSta
         const currentThread = state.threads.find((item) => item.id === threadId);
         telemetryProperties = runTelemetryProperties(currentThread);
         if (!currentThread) return null;
+        markPlanRunFailed(currentThread, runId, event.error || (event.event === 'run.cancelled' ? '用户已停止运行。' : 'Plan run failed.'));
         currentThread.runStatus = event.event === 'run.failed' ? 'failed' : 'idle';
         finalizeStoredRunTranscript(currentThread, runId, event.event === 'run.failed' ? 'failed' : 'cancelled', outputState.text || '');
         finishStoredModelRun(state, {
@@ -11469,7 +13875,11 @@ async function appendHermesRunResult(threadId, output, runId, usage = {}, conten
   const runSessionId = thread.activeSessionId || hermesAgentSessionId(thread, agent.id);
   const runTurnId = thread.activeRunTurnId || runId;
   const finalOutput = trimLeadingBlankLines(output);
-  if (finalOutput && !(thread.messages || []).some((message) => message.externalRunId === runId)) {
+  const runStartedAtMs = Date.parse(thread.activeRunStartedAt || '');
+  const processingDurationMs = Number.isFinite(runStartedAtMs) ? Math.max(1, Date.now() - runStartedAtMs) : undefined;
+  const submittedPlan = (thread.planSessions || []).find((plan) => (plan.drafts || []).some((draft) => draft.submittedByRunId === runId));
+  const executingPlan = (thread.planSessions || []).find((plan) => plan.executionRunId === runId);
+  if (finalOutput && !submittedPlan && !(thread.messages || []).some((message) => message.externalRunId === runId)) {
     thread.messages = [
       ...(thread.messages || []),
       agentEvent(agent, finalOutput, {
@@ -11479,10 +13889,19 @@ async function appendHermesRunResult(threadId, output, runId, usage = {}, conten
         mentionDepth: Number(thread.activeRunMentionDepth || 0),
         parentMessageId: thread.activeRunParentMessageId || '',
         routeReason: thread.activeRunRouteReason || '',
+        ...(processingDurationMs ? { processingDurationMs } : {}),
       }),
     ];
   }
-  const completedRunMessage = (thread.messages || []).find((message) => message.externalRunId === runId);
+  let completedRunMessage = (thread.messages || []).find((message) => message.externalRunId === runId);
+  if (!completedRunMessage && submittedPlan) {
+    const submittedDraft = (submittedPlan.drafts || []).find((draft) => draft.submittedByRunId === runId);
+    completedRunMessage = (thread.messages || []).find((message) => message.planId === submittedPlan.id && Number(message.planRevision) === Number(submittedDraft?.revision));
+    if (completedRunMessage) {
+      completedRunMessage.externalRunId = runId;
+      if (processingDurationMs) completedRunMessage.processingDurationMs = processingDurationMs;
+    }
+  }
   if (contentOffsetShift > 0) {
     const transcript = normalizeRunTranscripts(thread.runTranscripts).find((item) => item.runId === runId);
     if (transcript) {
@@ -11504,6 +13923,12 @@ async function appendHermesRunResult(threadId, output, runId, usage = {}, conten
     lastRouteReason: explicitlyMentionedAgent ? 'user_mention' : thread.followMode === 'conversation' ? 'conversation_follow' : 'default_agent',
   }, { defaultAgentId: thread.defaultAgentId, activeAgentId: nextActiveAgent?.id });
   thread.engine = 'hermes-agent';
+  if (executingPlan) {
+    executingPlan.status = 'completed';
+    executingPlan.error = '';
+    executingPlan.updatedAt = now();
+    captureTelemetry('plan_execution_completed', { target_mode: executingPlan.targetExecutionMode });
+  }
   thread.agentSessionIds = { ...(thread.agentSessionIds || {}), [agent.id]: runSessionId };
   thread.externalSessionId = thread.externalSessionId || hermesAgentSessionId(thread, defaultAgent.id);
   if (thread.activeRunGroup?.turnId === runTurnId) {
@@ -11527,6 +13952,13 @@ async function appendHermesRunResult(threadId, output, runId, usage = {}, conten
         activeWorkflow.completedAt = now();
         activeWorkflow.updatedAt = now();
         appendThreadCollaborationEvent(thread, { type: 'workflow.completed', workflowId: activeWorkflow.id, actorAgentId: agent.id, title: activeWorkflow.name, detail: '根任务和执行方案已经完成' });
+      }
+      const approvedPlanSession = (thread.planSessions || []).find((plan) => plan.id === activeWorkflow.approvedPlanId);
+      if (approvedPlanSession && approvedPlanSession.status !== 'completed') {
+        approvedPlanSession.status = 'completed';
+        approvedPlanSession.error = '';
+        approvedPlanSession.updatedAt = now();
+        captureTelemetry('plan_execution_completed', { target_mode: 'work' });
       }
     }
   }
@@ -11592,10 +14024,21 @@ function extractHermesOutput(...sources) {
   return '';
 }
 
+function markPlanRunFailed(thread, runId, errorMessage) {
+  const plan = (thread?.planSessions || []).find((item) => item.sourceRunId === runId || item.executionRunId === runId);
+  if (!plan || ['cancelled', 'completed', 'waiting_approval'].includes(plan.status)) return null;
+  plan.status = 'failed';
+  plan.error = String(errorMessage || 'Plan run failed.').slice(0, 1000);
+  plan.updatedAt = now();
+  captureTelemetry('plan_execution_failed', { target_mode: plan.targetExecutionMode });
+  return plan;
+}
+
 async function failHermesRun(threadId, runId, errorMessage, title = 'Hermes Agent 运行失败') {
   return updateState(async (state) => {
     const thread = state.threads.find((item) => item.id === threadId);
     if (!thread) return null;
+    markPlanRunFailed(thread, runId, errorMessage);
     thread.runStatus = 'failed';
     finishStoredModelRun(state, { runId, threadId, status: 'failed', error: errorMessage });
     finishActiveRunGroupChild(thread, runId, 'failed');
@@ -11605,6 +14048,319 @@ async function failHermesRun(threadId, runId, errorMessage, title = 'Hermes Agen
     thread.updatedAt = now();
     return thread;
   });
+}
+
+const hermesTurnRuntime = new Map();
+const hermesRunConsumers = new Map();
+const hermesTurnEventLimit = 1200;
+
+function turnRuntime(threadId, turnId) {
+  const cleanThreadId = String(threadId || '').trim();
+  const cleanTurnId = String(turnId || '').trim();
+  if (!cleanThreadId || !cleanTurnId) return null;
+  const runtimeKey = `${cleanThreadId}:${cleanTurnId}`;
+  let runtime = hermesTurnRuntime.get(runtimeKey);
+  if (!runtime) {
+    runtime = { cursor: 0, events: [], subscribers: new Set(), completed: false };
+    hermesTurnRuntime.set(runtimeKey, runtime);
+  }
+  return runtime;
+}
+
+function emitHermesTurnEvent(threadId, turnId, event = {}) {
+  const runtime = turnRuntime(threadId, turnId);
+  if (!runtime) return null;
+  const next = {
+    ...event,
+    threadId,
+    turnId,
+    cursor: ++runtime.cursor,
+    timestamp: event.timestamp || Date.now() / 1000,
+  };
+  runtime.events.push(next);
+  if (runtime.events.length > hermesTurnEventLimit) runtime.events.splice(0, runtime.events.length - hermesTurnEventLimit);
+  if (next.event === 'turn.completed' || next.event === 'turn.failed' || next.event === 'turn.cancelled') runtime.completed = true;
+  for (const subscriber of runtime.subscribers) subscriber(next);
+  return next;
+}
+
+function hermesTurnEventSink(threadId, turnId, runMeta = {}) {
+  return {
+    write(chunk) {
+      for (const line of String(chunk || '').split(/\r?\n/)) {
+        if (!line.startsWith('data:')) continue;
+        try {
+          const event = JSON.parse(line.slice(5).trim());
+          emitHermesTurnEvent(threadId, turnId, {
+            ...event,
+            runId: event.runId || runMeta.runId || '',
+            agentId: event.agentId || runMeta.agentId || '',
+            agentName: event.agentName || runMeta.agentName || '',
+            mentionDepth: Number(event.mentionDepth ?? runMeta.mentionDepth ?? 0),
+            parentMessageId: event.parentMessageId || runMeta.parentMessageId || '',
+          });
+        } catch {
+          // Ignore malformed compatibility output; the Bridge consumer remains authoritative.
+        }
+      }
+    },
+  };
+}
+
+async function invokeInternalHermesRun(threadId, body) {
+  return new Promise((resolve) => {
+    let statusCode = 200;
+    let settled = false;
+    const finish = (payload) => {
+      if (settled) return;
+      settled = true;
+      resolve({ status: statusCode, payload: payload || {} });
+    };
+    const res = {
+      status(code) {
+        statusCode = Number(code) || 200;
+        return this;
+      },
+      json(payload) {
+        finish(payload);
+        return this;
+      },
+    };
+    Promise.resolve(startHermesRunRequest({ params: { id: threadId }, body: body || {}, query: {}, headers: {} }, res))
+      .then(() => { if (!settled) finish({}); })
+      .catch((error) => {
+        statusCode = Number(error?.status || 500);
+        finish({ error: String(error?.message || error), code: error?.code || '' });
+      });
+  });
+}
+
+function mentionRouteRecord({ turnId, sourceAgentId, sourceAgentName, sourceMessageId, target, depth, text }) {
+  const edge = `${sourceAgentId}->${target.id}`;
+  return {
+    id: `${turnId}:${edge}`,
+    edge,
+    sourceAgentId,
+    sourceAgentName,
+    sourceMessageId,
+    targetAgentId: target.id,
+    targetAgentName: target.name,
+    mentionDepth: depth,
+    text,
+    status: 'pending',
+    runId: '',
+    error: '',
+    createdAt: now(),
+    updatedAt: now(),
+  };
+}
+
+async function collectHermesMentionRoutes(threadId, turnId, completedRunId) {
+  return updateState(async (state) => {
+    const thread = state.threads.find((item) => item.id === threadId);
+    if (!thread || thread.executionMode === 'work' || thread.collaborationMode === 'plan') return [];
+    const group = thread.activeRunGroup?.turnId === turnId ? thread.activeRunGroup : null;
+    if (!group) return [];
+    const completedMessage = (thread.messages || []).find((message) => message.externalRunId === completedRunId);
+    if (!completedMessage) return [];
+    const routes = Array.isArray(group.routes) ? [...group.routes] : [];
+    const knownEdges = new Set([...(group.routedEdges || []), ...routes.map((route) => route.edge)]);
+    const queuedRouteCount = routes.filter((route) => route.status === 'pending' || route.status === 'starting').length;
+    const maxDepth = group.maxMentionDepth ?? normalizeAgentMentionMaxDepth(state.ui?.agentMentionMaxDepth, 2);
+    const additions = [];
+    const appendTargets = (source, targets, depth, relayTextForTarget) => {
+      if (!mentionDepthAllows(depth, maxDepth)) return;
+      for (const target of targets) {
+        const edge = `${source.agentId}->${target.id}`;
+        if (knownEdges.has(edge) || Number(group.totalRoutedRuns || 0) + queuedRouteCount + additions.length >= 64) continue;
+        knownEdges.add(edge);
+        additions.push(mentionRouteRecord({
+          turnId,
+          sourceAgentId: source.agentId,
+          sourceAgentName: source.agentName,
+          sourceMessageId: source.id,
+          target,
+          depth,
+          text: relayTextForTarget(target),
+        }));
+      }
+    };
+
+    if (Number(completedMessage.mentionDepth || 0) === 0 && completedMessage.routeReason !== 'agent_mention') {
+      const completedIndex = (thread.messages || []).findIndex((message) => message.id === completedMessage.id);
+      const userMessage = [...(thread.messages || []).slice(0, Math.max(0, completedIndex))].reverse().find((message) => message.agentId === 'user');
+      if (userMessage) {
+        const targets = resolveMentionedAgents(userMessage.content, state.agents, {
+          senderAgentId: 'user',
+          selectedAgentIds: thread.selectedAgents || [],
+          fallbackAgentId: resolveDefaultAgentId(state),
+        }).filter((target) => target.id !== completedMessage.agentId);
+        appendTargets(userMessage, targets, 0, () => userMessage.content);
+      }
+    }
+
+    const nextDepth = Number(completedMessage.mentionDepth || 0) + 1;
+    const targets = resolveMentionedAgents(completedMessage.content, state.agents, {
+      senderAgentId: completedMessage.agentId,
+      selectedAgentIds: thread.selectedAgents || [],
+      fallbackAgentId: resolveDefaultAgentId(state),
+    });
+    appendTargets(completedMessage, targets, nextDepth, (target) => {
+      const routedText = stripMentionRoutingTokens(completedMessage.content, target) || completedMessage.content;
+      return `群聊系统：${completedMessage.agentName} 在对话中提及了你（${target.name}），请基于当前上下文直接回复。\n\n原始消息：${routedText}`;
+    });
+
+    group.routes = [...routes.map((route) => route.runId === completedRunId && route.status === 'running'
+      ? { ...route, status: 'completed', updatedAt: now() }
+      : route), ...additions];
+    group.status = additions.length || group.routes.some((route) => route.status === 'pending') ? 'routing' : group.status;
+    group.updatedAt = now();
+    thread.updatedAt = now();
+    return additions;
+  });
+}
+
+async function appendMentionRouteFailure(threadId, turnId, route, errorMessage) {
+  return updateState(async (state) => {
+    const thread = state.threads.find((item) => item.id === threadId);
+    const group = thread?.activeRunGroup?.turnId === turnId ? thread.activeRunGroup : null;
+    if (!thread || !group) return null;
+    group.routes = (group.routes || []).map((item) => item.id === route.id
+      ? { ...item, status: 'failed', error: errorMessage, updatedAt: now() }
+      : item);
+    const duplicate = (thread.messages || []).some((message) => message.routeId === route.id && message.routeReason === 'mention_route_failed');
+    if (!duplicate) {
+      thread.messages = [...(thread.messages || []), {
+        id: id('msg'),
+        agentId: 'system',
+        agentName: '系统',
+        role: 'System',
+        content: `未能唤醒 ${route.targetAgentName}：${String(errorMessage || '启动失败').slice(0, 180)}`,
+        turnId,
+        mentionDepth: route.mentionDepth,
+        parentMessageId: route.sourceMessageId,
+        routeReason: 'mention_route_failed',
+        routeId: route.id,
+        createdAt: now(),
+      }];
+    }
+    thread.updatedAt = now();
+    return thread;
+  });
+}
+
+async function completeHermesTurnIfIdle(threadId, turnId) {
+  const thread = await updateState(async (state) => {
+    const current = state.threads.find((item) => item.id === threadId);
+    const group = current?.activeRunGroup?.turnId === turnId ? current.activeRunGroup : null;
+    if (!current || !group) return null;
+    const hasPending = (group.routes || []).some((route) => route.status === 'pending' || route.status === 'starting' || route.status === 'running');
+    const hasActive = Object.keys(group.activeRuns || {}).length > 0;
+    if (hasPending || hasActive) return null;
+    group.status = (group.routes || []).some((route) => route.status === 'failed') ? 'completed_with_errors' : 'completed';
+    group.updatedAt = now();
+    group.completedAt = group.completedAt || now();
+    current.runStatus = 'idle';
+    current.updatedAt = now();
+    return current;
+  });
+  if (thread) emitHermesTurnEvent(threadId, turnId, { event: 'turn.completed', thread });
+  return thread;
+}
+
+async function startNextHermesMentionRoute(threadId, turnId) {
+  const snapshot = await readState();
+  const thread = snapshot.threads.find((item) => item.id === threadId);
+  const group = thread?.activeRunGroup?.turnId === turnId ? thread.activeRunGroup : null;
+  if (!thread || !group) return completeHermesTurnIfIdle(threadId, turnId);
+  const route = (group.routes || []).find((item) => item.status === 'pending');
+  if (!route) return completeHermesTurnIfIdle(threadId, turnId);
+  await updateState(async (state) => {
+    const current = state.threads.find((item) => item.id === threadId);
+    const currentGroup = current?.activeRunGroup?.turnId === turnId ? current.activeRunGroup : null;
+    if (!currentGroup) return;
+    currentGroup.routes = (currentGroup.routes || []).map((item) => item.id === route.id ? { ...item, status: 'starting', updatedAt: now() } : item);
+    currentGroup.status = 'routing';
+    currentGroup.updatedAt = now();
+  });
+  emitHermesTurnEvent(threadId, turnId, { event: 'mention.route', route: { ...route, status: 'starting' } });
+  const selectedAgents = Array.from(new Set([...(thread.selectedAgents || []), route.targetAgentId]));
+  const result = await invokeInternalHermesRun(threadId, {
+    message: route.text,
+    selectedAgents,
+    targetAgentId: route.targetAgentId,
+    turnId,
+    sourceAgentId: route.sourceAgentId,
+    sourceAgentName: route.sourceAgentName,
+    mentionDepth: route.mentionDepth,
+    parentMessageId: route.sourceMessageId,
+    _deferConsumer: true,
+  });
+  if (result.status >= 400 || !result.payload?.runId) {
+    const message = result.payload?.error || `Agent 路由启动失败（HTTP ${result.status}）`;
+    const failedThread = await appendMentionRouteFailure(threadId, turnId, route, message);
+    emitHermesTurnEvent(threadId, turnId, { event: 'mention.failed', route: { ...route, status: 'failed', error: message }, thread: failedThread });
+    return startNextHermesMentionRoute(threadId, turnId);
+  }
+  await updateState(async (state) => {
+    const current = state.threads.find((item) => item.id === threadId);
+    const currentGroup = current?.activeRunGroup?.turnId === turnId ? current.activeRunGroup : null;
+    if (!currentGroup) return;
+    currentGroup.routes = (currentGroup.routes || []).map((item) => item.id === route.id
+      ? { ...item, status: 'running', runId: result.payload.runId, updatedAt: now() }
+      : item);
+    currentGroup.updatedAt = now();
+  });
+  ensureHermesRunConsumer({
+    threadId,
+    turnId,
+    runId: result.payload.runId,
+    sessionId: result.payload.sessionId,
+    agentId: result.payload.agentId || route.targetAgentId,
+    agentName: result.payload.agentName || route.targetAgentName,
+    mentionDepth: Number(result.payload.mentionDepth ?? route.mentionDepth),
+    parentMessageId: result.payload.parentMessageId || route.sourceMessageId,
+  });
+  return result.payload;
+}
+
+async function routeCompletedHermesRun(threadId, turnId, runId) {
+  await collectHermesMentionRoutes(threadId, turnId, runId);
+  return startNextHermesMentionRoute(threadId, turnId);
+}
+
+function ensureHermesRunConsumer({ threadId, turnId, runId, sessionId = '', agentId = '', agentName = '', mentionDepth = 0, parentMessageId = '' }) {
+  if (!runId) return null;
+  if (hermesRunConsumers.has(runId)) return hermesRunConsumers.get(runId);
+  const promise = (async () => {
+    let cursor = 0;
+    let eventCursor = 0;
+    const outputState = { text: '' };
+    const sink = hermesTurnEventSink(threadId, turnId, { runId, agentId, agentName, mentionDepth, parentMessageId });
+    try {
+      for (;;) {
+        const chunk = await requestHermesBridge({ action: 'get_output', run_id: runId, cursor, event_cursor: eventCursor }, { timeoutMs: 10000, retryMs: 1000 });
+        cursor = Number(chunk.cursor ?? cursor);
+        eventCursor = Number(chunk.event_cursor ?? eventCursor);
+        const result = await processHermesBridgeChunk({ threadId, runId, chunk, res: sink, outputState });
+        if (result.completed) {
+          if (!result.failed) await routeCompletedHermesRun(threadId, turnId, runId);
+          else await startNextHermesMentionRoute(threadId, turnId);
+          break;
+        }
+        await new Promise((resolve) => setTimeout(resolve, 120));
+      }
+    } catch (error) {
+      const formatted = enrichMissingExecutableError(String(error?.message || error), 'default');
+      const failedThread = await failHermesRun(threadId, runId, formatted);
+      emitHermesTurnEvent(threadId, turnId, { event: 'run.failed', runId, agentId, agentName, mentionDepth, parentMessageId, error: formatted, thread: failedThread });
+      await startNextHermesMentionRoute(threadId, turnId);
+    } finally {
+      hermesRunConsumers.delete(runId);
+    }
+  })();
+  hermesRunConsumers.set(runId, promise);
+  return promise;
 }
 
 async function healStaleRunningThreads(state) {
@@ -11626,46 +14382,46 @@ async function healStaleRunningThreads(state) {
       }
       continue;
     }
-    try {
-      const status = await requestHermesBridge({ action: 'status', session_id: activeSessionId, profile: thread.profileName || 'default' }, { timeoutMs: 2500, retryMs: 0 });
-      const bridgeStatus = String(status.status || '').toLowerCase();
-      if (['complete', 'completed', 'interrupted', 'cancelled', 'error', 'failed'].includes(bridgeStatus)) {
-        thread.runStatus = bridgeStatus === 'error' || bridgeStatus === 'failed' ? 'failed' : 'idle';
-        clearHermesRunState(thread);
-        thread.workflowState = closeOpenWorkflowSteps(thread.workflowState || [], thread.runStatus === 'failed' ? 'failed' : 'completed');
-        thread.workflow = thread.workflowState.map((step) => step.title);
-        thread.updatedAt = now();
-        changed = true;
-      }
-    } catch (error) {
-      const text = String(error?.message || error);
-      if (/No such file or directory|FileNotFoundError|unknown run|not found|unknown session/i.test(text) || ageMs > 5 * 60000) {
-        thread.runStatus = 'failed';
-        clearHermesRunState(thread);
-        thread.workflowState = mergeWorkflowStep(closeOpenWorkflowSteps(thread.workflowState || [], 'failed'), { title: 'Hermes Agent 运行状态已失效', status: 'failed', source: 'run', detail: enrichMissingExecutableError(text, thread.profileName || 'default').slice(0, 200), updatedAt: now() });
-        thread.workflow = thread.workflowState.map((step) => step.title);
-        thread.updatedAt = now();
-        changed = true;
-      }
-    }
+    const turnId = thread.activeRunTurnId || thread.activeRunGroup?.turnId || activeRunId;
+    const runMeta = thread.activeRunGroup?.activeRuns?.[activeRunId] || {};
+    ensureHermesRunConsumer({
+      threadId: thread.id,
+      turnId,
+      runId: activeRunId,
+      sessionId: activeSessionId,
+      agentId: runMeta.agentId || thread.activeRunAgentId || '',
+      agentName: runMeta.agentName || '',
+      mentionDepth: Number(runMeta.mentionDepth ?? thread.activeRunMentionDepth ?? 0),
+      parentMessageId: runMeta.parentMessageId || thread.activeRunParentMessageId || '',
+    });
   }
   if (changed) await writeState(state);
   return changed;
 }
 
-app.post('/api/threads/:id/runs', async (req, res) => {
+async function startHermesRunRequest(req, res) {
   let runProfileName = 'default';
   let runDiagnosticId = '';
   let runTurnId = '';
+  const requestedPlanRunId = String(req.body?.planExecutionId || '').trim();
   try {
     const state = await readState();
     const thread = state.threads.find((item) => item.id === req.params.id);
     if (!thread) return res.status(404).json({ error: '会话不存在。' });
+    const requestedPlanExecutionId = requestedPlanRunId;
+    const planExecution = requestedPlanExecutionId
+      ? (thread.planSessions || []).find((item) => item.id === requestedPlanExecutionId && ['approved', 'executing', 'failed'].includes(item.status))
+      : null;
+    const planExecutionDraft = latestPlanDraft(planExecution);
+    const draftingPlan = thread.collaborationMode === 'plan' ? activePlanSession(thread) : null;
+    if (requestedPlanExecutionId && (!planExecution || !planExecutionDraft || planExecution.targetExecutionMode !== 'chat')) {
+      return res.status(409).json({ error: '批准的 Chat 计划不存在或已失效。', code: 'PLAN_EXECUTION_INVALID' });
+    }
     const message = String(req.body?.message || '').trim();
     const turnId = String(req.body?.turnId || id('turn'));
     runTurnId = turnId;
     const attachmentMetadata = await attachmentStore.resolveMany(req.body?.attachmentIds);
-    if (!message && !attachmentMetadata.length) return res.status(400).json({ error: '消息和附件不能同时为空。' });
+    if (!message && !attachmentMetadata.length && !planExecution) return res.status(400).json({ error: '消息和附件不能同时为空。' });
     const existingRunGroup = thread.activeRunGroup?.turnId === turnId ? thread.activeRunGroup : null;
     const configuredDepth = existingRunGroup?.maxMentionDepth ?? normalizeAgentMentionMaxDepth(state.ui?.agentMentionMaxDepth, 2);
     if (req.body?.sourceAgentId && req.body.sourceAgentId !== 'user') {
@@ -11686,11 +14442,16 @@ app.post('/api/threads/:id/runs', async (req, res) => {
     const selected = Array.isArray(req.body?.selectedAgents) ? req.body.selectedAgents : thread.selectedAgents || [resolveDefaultAgentId(state)];
     const selectedAgents = state.agents.filter((agent) => selected.includes(agent.id));
     let primaryAgent = resolveRunTargetAgent(state, thread, req.body?.targetAgentId, selectedAgents);
+    if (draftingPlan?.authorAgentId || planExecution?.authorAgentId) {
+      primaryAgent = state.agents.find((agent) => agent.id === (draftingPlan?.authorAgentId || planExecution.authorAgentId)) || primaryAgent;
+    }
     if (thread.executionMode === 'work' && workflowById(thread)?.currentRootTaskId) {
       primaryAgent = state.agents.find((agent) => agent.id === workflowById(thread).coordinatorAgentId) || primaryAgent;
     }
     if (!primaryAgent) return res.status(400).json({ error: '没有可用的 Agent。' });
-    const routingMessage = message || '请查看并处理这些附件。';
+    const routingMessage = planExecution
+      ? approvedPlanExecutionInstruction(planExecution, planExecutionDraft)
+      : message || '请查看并处理这些附件。';
     const mentionedAgents = matchMentionedAgents(routingMessage, state.agents, selected, resolveDefaultAgentId(state));
     const explicitlyMentionedPrimaryAgent = !isAllAgentsMentioned(message) && mentionedAgents.some((agent) => agent.id === primaryAgent.id);
     const routeReason = req.body?.sourceAgentId
@@ -11730,7 +14491,7 @@ app.post('/api/threads/:id/runs', async (req, res) => {
     }
     let workRoot = null;
     let workReplan = false;
-    if (thread.executionMode === 'work' && !req.body?.sourceAgentId) {
+    if (thread.executionMode === 'work' && !req.body?.sourceAgentId && !draftingPlan && !planExecution) {
       let workflow = workflowById(thread);
       if (workflow?.status === 'cancelled') {
         const created = await createCollaborationWorkflow(state, thread, {
@@ -11798,7 +14559,7 @@ app.post('/api/threads/:id/runs', async (req, res) => {
       mentionDepth: Number(req.body.mentionDepth || 1),
       parentMessageId: String(req.body.parentMessageId || ''),
     } : null;
-    if (!relayMessage) {
+    if (!relayMessage && !planExecution && !req.body?.suppressUserMessage) {
       await attachmentStore.claim(attachmentMetadata, thread.id, userMessage.id);
       if (!(thread.messages || []).some((item) => item.content === message && item.agentId === 'user' && String(item.id).startsWith('local-'))) {
         thread.messages = [...(thread.messages || []), userMessage];
@@ -11826,6 +14587,7 @@ app.post('/api/threads/:id/runs', async (req, res) => {
       maxMentionDepth: configuredDepth,
       depth: Math.max(Number(existingRunGroup?.depth || 0), Number(req.body?.mentionDepth || 0)),
       routedEdges: [...routedEdges],
+      routes: Array.isArray(existingRunGroup?.routes) ? existingRunGroup.routes : [],
       activeRuns: { ...(existingRunGroup?.activeRuns || {}), [runDiagnosticId]: { runId: '', sessionId, agentId: primaryAgent.id, agentName: primaryAgent.name, mentionDepth: Number(req.body?.mentionDepth || 0), parentMessageId: String(req.body?.parentMessageId || ''), status: 'starting' } },
       totalRoutedRuns: Number(existingRunGroup?.totalRoutedRuns || 0) + 1,
       status: 'running',
@@ -11844,6 +14606,9 @@ app.post('/api/threads/:id/runs', async (req, res) => {
       }
       Object.assign(currentThread, {
         messages: thread.messages,
+        collaborationMode: thread.collaborationMode,
+        activePlanId: thread.activePlanId,
+        planSessions: thread.planSessions,
         agentRunOverrides: thread.agentRunOverrides,
         collaboration: thread.collaboration,
         selectedAgents: thread.selectedAgents,
@@ -11885,18 +14650,25 @@ app.post('/api/threads/:id/runs', async (req, res) => {
       const { filePath } = await attachmentStore.content(metadata.id);
       return { id: metadata.id, name: metadata.name, mime_type: metadata.mimeType, size: metadata.size, kind: metadata.kind, path: filePath };
     }));
-    const runtimeMessage = `${agentIdentityRunInstruction(primaryAgent, state.agents)}\n\n${collaborationRunInstruction(preparedThread, primaryAgent)}\n\n用户或群聊消息：\n${routingMessage}`;
+    const runtimeMessage = `${agentIdentityRunInstruction(primaryAgent, state.agents)}\n\n${planExecution ? approvedPlanExecutionInstruction(planExecution, planExecutionDraft) : collaborationRunInstruction(preparedThread, primaryAgent)}\n\n${planExecution ? '已批准计划执行上下文' : '用户或群聊消息'}：\n${routingMessage}`;
     const started = await requestHermesBridge({
       action: 'chat',
       session_id: sessionId,
       message: runtimeMessage,
-      storage_message: hermesStoredMessageContent(message, bridgeAttachments),
+      storage_message: planExecution || req.body?.suppressUserMessage ? '' : hermesStoredMessageContent(message, bridgeAttachments),
       attachments: bridgeAttachments,
-      conversation_history: await threadHistoryForHermes({ ...preparedThread, messages: relayMessage ? preparedThread.messages : (preparedThread.messages || []).slice(0, -1) }, primaryAgent),
+      conversation_history: await threadHistoryForHermes({
+        ...preparedThread,
+        messages: relayMessage || planExecution || req.body?.suppressUserMessage
+          ? preparedThread.messages
+          : (preparedThread.messages || []).slice(0, -1),
+      }, primaryAgent),
       profile: profileName,
       model: runModel.model || undefined,
       provider: runModel.provider || undefined,
-      runtime_overrides: runMapping.runtimeOverrides,
+      runtime_revision: runModel.modelProfile?.runtimeRevision || undefined,
+      runtime_overrides: { ...runMapping.runtimeOverrides, rich_tool_descriptions: state.ui?.richToolDescriptions !== false, ...(draftingPlan ? { plan_mode: true } : {}) },
+      instructions: [richContentRunInstruction(), draftingPlan ? planRunInstruction(preparedThread, primaryAgent) : '', planExecution ? approvedPlanExecutionInstruction(planExecution, planExecutionDraft) : ''].filter(Boolean).join('\n\n'),
       source: 'frakio-workbench',
     }, {
       // Cold-starting the bundled Python/Hermes worker can exceed 30s on Windows,
@@ -11918,6 +14690,20 @@ app.post('/api/threads/:id/runs', async (req, res) => {
       threadAfterStart.activeRunParentMessageId = String(req.body?.parentMessageId || '');
       threadAfterStart.activeRunTurnId = turnId;
       threadAfterStart.agentSessionIds = { ...(threadAfterStart.agentSessionIds || {}), [primaryAgent.id]: started.session_id || sessionId };
+      const startedPlan = draftingPlan
+        ? (threadAfterStart.planSessions || []).find((item) => item.id === draftingPlan.id)
+        : planExecution
+          ? (threadAfterStart.planSessions || []).find((item) => item.id === planExecution.id)
+          : null;
+      if (startedPlan) {
+        if (draftingPlan) startedPlan.sourceRunId = started.run_id;
+        if (planExecution) {
+          startedPlan.executionRunId = started.run_id;
+          startedPlan.status = 'executing';
+        }
+        startedPlan.error = '';
+        startedPlan.updatedAt = sentAt;
+      }
       if (workReplan) {
         const activeWorkflow = workflowById(threadAfterStart);
         if (activeWorkflow?.interventionQueue?.length) {
@@ -11937,11 +14723,11 @@ app.post('/api/threads/:id/runs', async (req, res) => {
     captureTelemetry('agent_run_started', {
       agent_count: selectedAgentIds.length,
       attachment_count: attachmentMetadata.length,
-      permission_mode: thread.permissionMode || req.body?.permissionMode || 'manual',
+      permission_mode: thread.permissionMode || req.body?.permissionMode || 'smart',
       route_reason: routeReason,
     });
     captureMeaningfulActivity('agent_run_started');
-    res.status(202).json({
+    const responsePayload = {
       runId: started.run_id,
       sessionId: started.session_id || sessionId,
       status: started.status || 'started',
@@ -11963,10 +14749,34 @@ app.post('/api/threads/:id/runs', async (req, res) => {
       agentName: primaryAgent.name,
       mentionDepth: Number(req.body?.mentionDepth || 0),
       parentMessageId: String(req.body?.parentMessageId || ''),
-      kind: thread.executionMode === 'work' ? (workReplan ? 'work-replan' : 'work-root') : 'chat',
+      kind: draftingPlan ? 'plan-drafting' : planExecution ? 'plan-chat-execution' : thread.executionMode === 'work' ? (workReplan ? 'work-replan' : 'work-root') : 'chat',
+      planId: draftingPlan?.id || planExecution?.id || '',
       workflowId: thread.executionMode === 'work' ? workflowById(thread)?.id || '' : '',
       rootTaskId: workRoot?.id || '',
+    };
+    res.status(202).json(responsePayload);
+    emitHermesTurnEvent(req.params.id, turnId, {
+      event: 'run.started',
+      runId: responsePayload.runId,
+      sessionId: responsePayload.sessionId,
+      agentId: primaryAgent.id,
+      agentName: primaryAgent.name,
+      mentionDepth: responsePayload.mentionDepth,
+      parentMessageId: responsePayload.parentMessageId,
+      routeReason,
     });
+    if (!req.body?._deferConsumer) {
+      ensureHermesRunConsumer({
+        threadId: req.params.id,
+        turnId,
+        runId: responsePayload.runId,
+        sessionId: responsePayload.sessionId,
+        agentId: primaryAgent.id,
+        agentName: primaryAgent.name,
+        mentionDepth: responsePayload.mentionDepth,
+        parentMessageId: responsePayload.parentMessageId,
+      });
+    }
   } catch (error) {
     const details = { ...hermesRuntimeErrorDetails(error, error.details?.profileName || runProfileName), ...(error.details || {}) };
     const enriched = enrichMissingExecutableError(error.message || 'Hermes Bridge run 创建失败。', details.profileName || runProfileName);
@@ -11975,6 +14785,14 @@ app.post('/api/threads/:id/runs', async (req, res) => {
         const thread = state.threads.find((item) => item.id === req.params.id);
         finishStoredModelRun(state, { diagnosticId: runDiagnosticId, threadId: req.params.id, status: 'failed', error: enriched });
         if (thread?.runStatus !== 'running' || thread.activeRunTurnId !== runTurnId) return;
+        const failedPlan = requestedPlanRunId
+          ? (thread.planSessions || []).find((plan) => plan.id === requestedPlanRunId)
+          : thread.collaborationMode === 'plan' ? activePlanSession(thread) : null;
+        if (failedPlan && !['cancelled', 'completed', 'waiting_approval'].includes(failedPlan.status)) {
+          failedPlan.status = 'failed';
+          failedPlan.error = enriched.slice(0, 1000);
+          failedPlan.updatedAt = now();
+        }
         thread.runStatus = 'failed';
         finishActiveRunGroupChild(thread, runDiagnosticId, 'failed');
         clearHermesRunState(thread);
@@ -11986,63 +14804,61 @@ app.post('/api/threads/:id/runs', async (req, res) => {
     captureTelemetry('agent_run_failed', { stage: 'startup', error_code: telemetryErrorCode(error) });
     res.status(error.status || 500).json({ error: enriched, code: error.code || details.errorType || '', details });
   }
+}
+
+app.post('/api/threads/:id/runs', startHermesRunRequest);
+
+function streamHermesTurnEvents(req, res, { turnId, runId = '' }) {
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+  });
+  const runtime = turnRuntime(req.params.id, turnId);
+  const requestedCursor = Math.max(0, Number(req.query.cursor || req.headers['last-event-id'] || 0) || 0);
+  const matches = (event) => !runId || event.runId === runId || event.event.startsWith('turn.');
+  const send = (event) => {
+    if (!matches(event) || res.writableEnded) return;
+    res.write(`id: ${event.cursor}\ndata: ${JSON.stringify(event)}\n\n`);
+    if ((event.event === 'turn.completed' || event.event === 'turn.failed' || event.event === 'turn.cancelled')
+      || (runId && ['run.completed', 'run.failed', 'run.cancelled'].includes(event.event) && event.runId === runId)) {
+      res.end();
+    }
+  };
+  for (const event of runtime.events) {
+    if (event.cursor > requestedCursor) send(event);
+    if (res.writableEnded) return;
+  }
+  if (runtime.completed) {
+    res.end();
+    return;
+  }
+  runtime.subscribers.add(send);
+  const heartbeat = setInterval(() => {
+    if (!res.writableEnded) res.write(': keepalive\n\n');
+  }, 15000);
+  req.on('close', () => {
+    clearInterval(heartbeat);
+    runtime.subscribers.delete(send);
+  });
+}
+
+app.get('/api/threads/:id/turns/:turnId/events', async (req, res) => {
+  const state = await readState();
+  const thread = state.threads.find((item) => item.id === req.params.id);
+  if (!thread) return res.status(404).json({ error: '会话不存在。' });
+  if (thread.activeRunGroup?.turnId !== req.params.turnId && !hermesTurnRuntime.has(`${req.params.id}:${req.params.turnId}`)) {
+    return res.status(404).json({ error: '运行轮次不存在。' });
+  }
+  return streamHermesTurnEvents(req, res, { turnId: req.params.turnId });
 });
 
 app.get('/api/threads/:id/runs/:runId/events', async (req, res) => {
-  const sessionId = String(req.query.sessionId || `workbench-${req.params.id}`);
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-  });
-  let cursor = 0;
-  let eventCursor = 0;
-  let closed = false;
-  const outputState = { text: '' };
-  req.on('close', () => { closed = true; });
-  try {
-    while (!closed) {
-      const chunk = await requestHermesBridge({
-        action: 'get_output',
-        run_id: req.params.runId,
-        cursor,
-        event_cursor: eventCursor,
-      }, { timeoutMs: 10000, retryMs: 1000 });
-      cursor = Number(chunk.cursor ?? cursor);
-      eventCursor = Number(chunk.event_cursor ?? eventCursor);
-      const result = await processHermesBridgeChunk({
-        threadId: req.params.id,
-        runId: req.params.runId,
-        chunk,
-        res,
-        outputState,
-      });
-      if (result.completed) {
-        break;
-      }
-      await new Promise((resolve) => setTimeout(resolve, 120));
-    }
-  } catch (error) {
-    const formattedError = enrichMissingExecutableError(String(error?.message || error), 'default');
-    try {
-      await updateState(async (state) => {
-        const thread = state.threads.find((item) => item.id === req.params.id);
-        if (!thread) return;
-        thread.runStatus = 'failed';
-        finalizeStoredRunTranscript(thread, req.params.runId, 'failed', outputState.text || '');
-        finishStoredModelRun(state, { runId: req.params.runId, threadId: req.params.id, status: 'failed', error: formattedError });
-        finishActiveRunGroupChild(thread, req.params.runId, 'failed');
-        clearHermesRunState(thread);
-        thread.workflowState = mergeWorkflowStep(closeOpenWorkflowSteps(thread.workflowState || [], 'failed'), { title: 'Hermes Agent 运行失败', status: 'failed', source: 'run', detail: formattedError.slice(0, 200), updatedAt: now() });
-        thread.workflow = thread.workflowState.map((step) => step.title);
-        thread.updatedAt = now();
-      });
-    } catch {}
-    captureTelemetry('agent_run_failed', { stage: 'runtime', error_code: telemetryErrorCode(error) });
-    res.write(`data: ${JSON.stringify({ event: 'run.failed', runId: req.params.runId, error: formattedError, details: hermesRuntimeErrorDetails(error, 'default') })}\n\n`);
-  } finally {
-    res.end();
-  }
+  const state = await readState();
+  const thread = state.threads.find((item) => item.id === req.params.id);
+  if (!thread) return res.status(404).json({ error: '会话不存在。' });
+  const turnId = thread.activeRunGroup?.turnId || thread.activeRunTurnId || req.params.runId;
+  return streamHermesTurnEvents(req, res, { turnId, runId: req.params.runId });
 });
 
 app.post('/api/threads/:id/runs/:runId/approval', async (req, res) => {
@@ -12203,7 +15019,7 @@ function compressContext(message, messages, summary, selectedAgents) {
   };
 }
 
-if (isDesktopMode && existsSync(webDistPath)) {
+if ((isDesktopMode || isManagedWebMode) && existsSync(webDistPath)) {
   app.use(express.static(webDistPath));
   app.get(/^(?!\/api(?:\/|$)).*/, (_req, res) => {
     res.sendFile(path.join(webDistPath, 'index.html'));
@@ -12212,24 +15028,32 @@ if (isDesktopMode && existsSync(webDistPath)) {
 
 let appInitialized = false;
 let httpServer = null;
+let releaseManagedServiceLock = null;
 
 export async function createApp() {
   if (appInitialized) return app;
+  if (isManagedWebMode && !releaseManagedServiceLock) {
+    releaseManagedServiceLock = await acquireManagedServiceLock(frakioWorkHome);
+  }
   await runModelScopeMigration().catch((error) => {
     console.warn('Model scope migration skipped:', error?.message || error);
   });
   await runPresetProviderCredentialMigration().catch((error) => {
     console.warn('Preset Provider credential migration skipped:', error?.message || error);
   });
+  await runLegacyDemoDataCleanupMigration().catch((error) => {
+    console.warn('Legacy demo data cleanup skipped:', error?.message || error);
+  });
   const startupState = await readState();
   await recoverWorkflowControls(startupState).catch((error) => {
     console.warn('Workflow control recovery skipped:', error?.message || error);
   });
-  await runLegacyDemoDataCleanupMigration().catch((error) => {
-    console.warn('Legacy demo data cleanup skipped:', error?.message || error);
-  });
   const initialTelemetryState = await readState();
   await telemetry.initialize();
+  const authInitialization = await managedWebAuth.initialize();
+  if (authInitialization.generatedAdminPassword) {
+    console.log(`Frakio Work managed Web administrator password: ${authInitialization.generatedAdminPassword}`);
+  }
   await telemetry.setEnabled(initialTelemetryState.ui?.telemetryEnabled === true && Boolean(initialTelemetryState.ui?.telemetryNoticeSeenAt));
   appInitialized = true;
   return app;
@@ -12238,14 +15062,40 @@ export async function createApp() {
 export async function startServer() {
   if (httpServer) return httpServer;
   const readyApp = await createApp();
-  httpServer = readyApp.listen(port, '127.0.0.1', () => {
-    console.log(`Frakio Work API listening on http://127.0.0.1:${port}`);
+  const bindHost = isManagedWebMode ? String(process.env.FRAKIO_WORK_BIND_HOST || '0.0.0.0') : '127.0.0.1';
+  const appVersion = await readFrakioPackageVersion();
+  const scheme = tlsEnabled ? 'https' : 'http';
+  const onListening = () => {
+    console.log(`Frakio Work API listening on ${scheme}://${bindHost}:${port}`);
+    if (isManagedWebMode) {
+      const loopbackUrl = String(process.env.FRAKIO_WORK_TLS_LOOPBACK_URL || '').trim()
+        || `${scheme}://${tlsEnabled ? 'localhost' : '127.0.0.1'}:${port}`;
+      void writeServiceDescriptor(frakioWorkHome, {
+        deploymentMode: 'managed-web',
+        appVersion,
+        apiProtocol: FRAKIO_SERVICE_PROTOCOL,
+        pid: process.pid,
+        port,
+        bindHost,
+        loopbackUrl,
+        startedAt: new Date().toISOString(),
+      }).catch((error) => console.warn('Unable to write managed service descriptor:', error?.message || error));
+    }
     const launchId = String(process.env.FRAKIO_WORK_LAUNCH_ID || '').trim();
     if (launchId) {
       captureTelemetry('app_opened', { startup_ms: Math.max(0, Date.now() - Number(process.env.FRAKIO_WORK_LAUNCH_STARTED_AT || Date.now())) }, { dedupeKey: `launch_${launchId}` });
     }
     if (process.env.FRAKIO_WORK_DISABLE_AUTOSTART !== '1') setTimeout(() => {
-      ensureHermesRuntimeReady().catch((error) => {
+      ensureHermesRuntimeReady().then(async (result) => {
+        if (result.status === 'failed') throw new Error(result.error || 'Hermes Runtime startup verification failed.');
+        await completePendingHermes019Upgrade();
+      }).catch(async (error) => {
+        const restored = await rollbackPendingHermes019Upgrade(error).catch(() => null);
+        if (restored) {
+          hermesAutoStartState = restored;
+          console.warn(`Hermes 0.19 startup verification failed; restored Runtime ${readRuntimeRegistrySync().activeVersion || 'previous'}.`);
+          return;
+        }
         hermesAutoStartState.status = 'failed';
         hermesAutoStartState.error = String(error?.message || error);
         hermesAutoStartState.finishedAt = now();
@@ -12253,7 +15103,15 @@ export async function startServer() {
       });
     }, 100);
     setTimeout(() => void refreshStaleProviderCatalogs().catch(() => {}), 400);
-  });
+  };
+  if (tlsEnabled) {
+    httpServer = createHttpsServer({
+      cert: await readFile(tlsCertPath),
+      key: await readFile(tlsKeyPath),
+    }, readyApp).listen(port, bindHost, onListening);
+  } else {
+    httpServer = readyApp.listen(port, bindHost, onListening);
+  }
   return httpServer;
 }
 
@@ -12292,6 +15150,11 @@ async function shutdownApi() {
   telemetryShutdownStarted = true;
   await stopOwnedRuntimeProcesses().catch((error) => console.warn('Runtime shutdown warning:', error?.message || error));
   await Promise.race([telemetry.shutdown(), new Promise((resolve) => setTimeout(resolve, 900))]);
+  if (isManagedWebMode) {
+    await removeServiceDescriptor(frakioWorkHome).catch(() => {});
+    await releaseManagedServiceLock?.().catch(() => {});
+    releaseManagedServiceLock = null;
+  }
   if (httpServer) httpServer.close(() => process.exit(0));
   else process.exit(0);
   setTimeout(() => process.exit(0), 3000).unref();

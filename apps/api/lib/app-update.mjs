@@ -36,6 +36,13 @@ export function selectReleaseAsset(assets = [], { platform = process.platform, a
   return null;
 }
 
+export function selectChecksumAsset(assets = [], { platform = process.platform, arch = process.arch } = {}) {
+  if (platform !== 'darwin') return null;
+  const architecture = arch === 'arm64' ? 'arm64' : 'x64';
+  const expected = `frakio-work-mac-${architecture}-sha256sums.txt`;
+  return assets.find((asset) => String(asset?.name || '').toLowerCase() === expected) || null;
+}
+
 function decodeFeedText(value = '') {
   return String(value)
     .replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
@@ -67,6 +74,8 @@ async function fetchLatestReleaseFromFeed(fetchImpl) {
       asset(`Frakio.Work-${version}-arm64.dmg`),
       asset(`Frakio.Work-${version}-x64.dmg`),
       asset(`Frakio.Work-${version}-x64.exe`),
+      asset('Frakio-Work-mac-arm64-SHA256SUMS.txt'),
+      asset('Frakio-Work-mac-x64-SHA256SUMS.txt'),
     ],
   };
 }
@@ -100,6 +109,7 @@ export async function appUpdateStatus({ currentVersion, force = false, packaged 
     notes: '',
     publishedAt: '',
     asset: null,
+    checksumAsset: null,
     installMode: packaged ? 'desktop-release' : 'source',
   };
   try {
@@ -110,9 +120,10 @@ export async function appUpdateStatus({ currentVersion, force = false, packaged 
       latestVersion,
       updateAvailable: compareVersions(latestVersion, base.currentVersion) > 0,
       releaseUrl: String(release.html_url || base.releaseUrl),
-      notes: String(release.body || '').slice(0, 8000),
+      notes: String(release.body || '').slice(0, 65536),
       publishedAt: String(release.published_at || ''),
       asset: selectReleaseAsset(release.assets || [], { platform, arch }),
+      checksumAsset: selectChecksumAsset(release.assets || [], { platform, arch }),
     };
   } catch (error) {
     return { ...base, error: error?.message || String(error) };

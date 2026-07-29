@@ -23,7 +23,14 @@ export function runtimeBuildTarget(platform = process.platform, arch = process.a
       pythonExecutableParts: ['python.exe'],
     };
   }
-  throw new Error(`Bundled desktop runtimes are not supported on ${platform}-${arch}.`);
+  if (platform === 'linux' && (arch === 'x64' || arch === 'arm64')) {
+    return {
+      runtimePlatform: arch === 'arm64' ? 'linux-arm64' : 'linux-x64',
+      nodeArchiveName: `node-v${nodeVersion}-linux-${arch}.tar.gz`,
+      pythonExecutableParts: ['bin', 'python3'],
+    };
+  }
+  throw new Error(`Bundled Frakio Work runtimes are not supported on ${platform}-${arch}.`);
 }
 
 export function portablePythonRoot(executable, platform = process.platform) {

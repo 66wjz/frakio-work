@@ -2,7 +2,7 @@
 const workbenchUrl = String(process.env.HERMES_WORKBENCH_URL || 'http://127.0.0.1:8787').replace(/\/+$/, '');
 const profile = String(process.env.HERMES_WORKBENCH_PROFILE || 'default');
 const toolset = String(process.env.HERMES_WORKBENCH_MCP_TOOLSET || process.argv[2] || 'use').toLowerCase();
-const protocolVersion = 2;
+const protocolVersion = 3;
 let sessionCookie = '';
 
 const apiCatalog = [
@@ -13,11 +13,14 @@ const apiCatalog = [
   { method: 'GET', path: '/api/workspaces/:id/threads', description: 'Project thread list' },
   { method: 'GET', path: '/api/threads/:id', description: 'Thread detail' },
   { method: 'GET', path: '/api/hermes-runtime/status', description: 'Hermes runtime status' },
+  { method: 'GET', path: '/api/hermes/network-status?profile=:name', description: 'Hermes web search and read-only browser readiness' },
   { method: 'GET', path: '/api/hermes-bootstrap/status', description: 'Hermes bootstrap status' },
   { method: 'GET', path: '/api/hermes/mcp/servers', description: 'MCP server list for a profile' },
   { method: 'GET', path: '/api/user-profile', description: 'Frakio Work user profile' },
   { method: 'GET', path: '/api/threads/:id/collaboration', description: 'Collaboration workflow snapshot for a thread' },
   { method: 'PATCH', path: '/api/threads/:id/mode', description: 'Switch a thread between Chat and Work execution modes' },
+  { method: 'POST', path: '/api/threads/:id/plans/:planId/questions', description: 'Request structured user input while drafting a Plan' },
+  { method: 'POST', path: '/api/threads/:id/plans/:planId/submit', description: 'Submit a structured Plan draft for user approval' },
   { method: 'GET', path: '/api/threads/:id/collaboration/plans/:rootTaskId', description: 'Read a Work execution plan and revision' },
   { method: 'POST', path: '/api/threads/:id/collaboration/plans', description: 'Publish a validated Work execution plan revision' },
 ];
@@ -57,6 +60,87 @@ const toolsBySet = {
     { name: 'hermes_workbench_use_runtime_status', description: 'Read local Hermes runtime and bootstrap status as seen by Frakio Work.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     { name: 'hermes_workbench_use_mcp_servers_list', description: 'List MCP servers configured for the current Hermes profile.', inputSchema: { type: 'object', properties: { profile: { type: 'string' } }, additionalProperties: false } },
     { name: 'hermes_workbench_use_user_profile_get', description: 'Read the Frakio Work user profile.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+    {
+      name: 'hermes_workbench_plan_user_input_request',
+      description: 'Ask one to three decision questions for the active Frakio Plan. Prefer one question. Each question must have a short header and two or three mutually exclusive options; the first option is treated as recommended. The call waits for the user answer or optional auto-resolution.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string' },
+          planId: { type: 'string' },
+          questions: {
+            type: 'array',
+            minItems: 1,
+            maxItems: 3,
+            items: {
+              type: 'object',
+              properties: {
+                id: { type: 'string' },
+                header: { type: 'string' },
+                question: { type: 'string' },
+                options: {
+                  type: 'array',
+                  minItems: 2,
+                  maxItems: 3,
+                  items: {
+                    type: 'object',
+                    properties: {
+                      label: { type: 'string' },
+                      description: { type: 'string' },
+                      recommended: { type: 'boolean' },
+                    },
+                    required: ['label', 'description'],
+                    additionalProperties: false,
+                  },
+                },
+              },
+              required: ['id', 'header', 'question', 'options'],
+              additionalProperties: false,
+            },
+          },
+          autoResolutionMs: { type: 'integer', minimum: 60000, maximum: 240000 },
+        },
+        required: ['threadId', 'planId', 'questions'],
+        additionalProperties: false,
+      },
+    },
+    {
+      name: 'hermes_workbench_plan_submit',
+      description: 'Submit the complete structured draft for the active Frakio Plan. This ends planning and waits for explicit user approval; it does not execute or publish Work tasks.',
+      inputSchema: {
+        type: 'object',
+        properties: {
+          threadId: { type: 'string' },
+          planId: { type: 'string' },
+          baseRevision: { type: 'integer', minimum: 0 },
+          title: { type: 'string' },
+          summary: { type: 'string' },
+          steps: {
+            type: 'array',
+            minItems: 1,
+            items: {
+              type: 'object',
+              properties: {
+                key: { type: 'string' },
+                title: { type: 'string' },
+                description: { type: 'string' },
+                files: { type: 'array', items: { type: 'string' } },
+                assigneeAgentId: { type: 'string' },
+                expectedResult: { type: 'string' },
+                dependsOnKeys: { type: 'array', items: { type: 'string' } },
+              },
+              required: ['key', 'title', 'description', 'expectedResult', 'dependsOnKeys'],
+              additionalProperties: false,
+            },
+          },
+          tests: { type: 'array', items: { type: 'string' } },
+          assumptions: { type: 'array', items: { type: 'string' } },
+          idempotencyKey: { type: 'string' },
+        },
+        required: ['threadId', 'planId', 'baseRevision', 'title', 'summary', 'steps', 'tests', 'assumptions', 'idempotencyKey'],
+        additionalProperties: false,
+      },
+    },
     {
       name: 'hermes_workbench_collaboration_workflow_create',
       description: 'Create and bind a durable Hermes Kanban workflow to a Frakio Work thread. Use once for a new workstream, then reuse the returned workflowId.',
@@ -122,6 +206,7 @@ const allowlist = [
   /^\/api\/workspaces\/[A-Za-z0-9_-]+\/threads(?:\?.*)?$/,
   /^\/api\/threads\/[A-Za-z0-9_-]+(?:\?.*)?$/,
   /^\/api\/hermes-runtime\/status(?:\?.*)?$/,
+  /^\/api\/hermes\/network-status(?:\?.*)?$/,
   /^\/api\/hermes-bootstrap\/status(?:\?.*)?$/,
   /^\/api\/hermes\/mcp\/servers(?:\?.*)?$/,
   /^\/api\/user-profile(?:\?.*)?$/,
@@ -183,7 +268,7 @@ async function listThreads() {
 }
 
 async function callTool(name, args = {}) {
-  if (name === 'hermes_workbench_protocol_get') return { protocolVersion, toolset, capabilities: { collaborationPlans: true, planRevision: true, steerQueue: true } };
+  if (name === 'hermes_workbench_protocol_get') return { protocolVersion, toolset, capabilities: { collaborationPlans: true, planMode: true, structuredPlanQuestions: true, planRevision: true, steerQueue: true } };
   if (name === 'hermes_workbench_api_catalog_get') return { profile, workbenchUrl, routes: apiCatalog };
   if (name === 'hermes_workbench_api_request') return requestJson(assertAllowedPath(args.path || ''));
   if (name === 'hermes_workbench_use_threads_list') return listThreads();
@@ -203,6 +288,23 @@ async function callTool(name, args = {}) {
     return requestJson(`/api/hermes/mcp/servers?profile=${selectedProfile}`);
   }
   if (name === 'hermes_workbench_use_user_profile_get') return requestJson('/api/user-profile');
+  if (name === 'hermes_workbench_plan_user_input_request') {
+    const { threadId, planId, ...body } = args;
+    const encodedThreadId = encodeURIComponent(String(threadId || ''));
+    const encodedPlanId = encodeURIComponent(String(planId || ''));
+    const created = await requestJson(`/api/threads/${encodedThreadId}/plans/${encodedPlanId}/questions`, { method: 'POST', body });
+    const requestId = created?.batch?.id;
+    if (!requestId) throw new Error('Frakio Work did not return a Plan question request id.');
+    while (true) {
+      const status = await requestJson(`/api/threads/${encodedThreadId}/plans/${encodedPlanId}/questions/${encodeURIComponent(String(requestId))}`);
+      if (status?.batch?.status !== 'pending') return status;
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
+  if (name === 'hermes_workbench_plan_submit') {
+    const { threadId, planId, ...body } = args;
+    return requestJson(`/api/threads/${encodeURIComponent(String(threadId || ''))}/plans/${encodeURIComponent(String(planId || ''))}/submit`, { method: 'POST', body });
+  }
   if (name === 'hermes_workbench_collaboration_workflow_create') {
     const { threadId, ...body } = args;
     return requestJson(`/api/threads/${encodeURIComponent(String(threadId || ''))}/collaboration/workflows`, { method: 'POST', body });

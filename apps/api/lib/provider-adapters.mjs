@@ -239,19 +239,73 @@ export function adapterFor(model = {}) {
   return { id: 'openai_chat', apiMode: mode || 'chat_completions', catalogKind: 'openai', modelsPaths: ['/v1/models', '/models'] };
 }
 
+const TERMINAL_API_ENDPOINT = /\/(?:chat\/completions|responses|messages|models)\/?$/i;
+const VERSION_PATH_SEGMENT = /^v\d+(?:beta\d*)?$/i;
+
+export function normalizeProviderBaseUrl(value, apiMode = '') {
+  let parsed;
+  try { parsed = new URL(clean(value)); } catch { return ''; }
+  if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+  parsed.search = '';
+  parsed.hash = '';
+  parsed.pathname = parsed.pathname.replace(/\/+/g, '/').replace(TERMINAL_API_ENDPOINT, '').replace(/\/+$/, '');
+  const mode = normalizeApiMode(apiMode);
+  if (mode === 'anthropic_messages' && /\/v1$/i.test(parsed.pathname)) {
+    parsed.pathname = parsed.pathname.replace(/\/v1$/i, '');
+  }
+  return `${parsed.origin}${parsed.pathname}`.replace(/\/+$/, '');
+}
+
+export function isAnthropicLikeBaseUrl(value) {
+  try {
+    const parsed = new URL(clean(value));
+    return parsed.hostname.toLowerCase() === 'api.anthropic.com'
+      || /\/anthropic(?:\/v1)?\/?$/i.test(parsed.pathname);
+  } catch {
+    return false;
+  }
+}
+
+export function shouldOfferV1Candidate(value, apiMode = '') {
+  const mode = normalizeApiMode(apiMode);
+  if (mode === 'anthropic_messages' || isAnthropicLikeBaseUrl(value)) return false;
+  let parsed;
+  try { parsed = new URL(clean(value)); } catch { return false; }
+  if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+  if (/\.openai\.azure\.com$/i.test(parsed.hostname) || /\/openai\/deployments\//i.test(parsed.pathname)) return false;
+  const normalized = normalizeProviderBaseUrl(value, mode);
+  if (!normalized) return false;
+  const segments = new URL(normalized).pathname.split('/').filter(Boolean);
+  return !segments.some((segment) => VERSION_PATH_SEGMENT.test(segment));
+}
+
+export function candidateProviderBaseUrls(value, apiMode = '') {
+  const normalized = normalizeProviderBaseUrl(value, apiMode);
+  if (!normalized) return [];
+  if (!shouldOfferV1Candidate(normalized, apiMode)) return [normalized];
+  return [normalized, `${normalized}/v1`];
+}
+
+export function providerInferenceUrl(model = {}, baseUrl = model.baseUrl) {
+  const mode = normalizeApiMode(model.apiMode);
+  const base = normalizeProviderBaseUrl(baseUrl, mode);
+  if (!base) return '';
+  if (mode === 'anthropic_messages') return `${base}/v1/messages`;
+  if (mode === 'codex_responses' || mode === 'openai_responses') return `${base}/responses`;
+  return `${base}/chat/completions`;
+}
+
 export function candidateModelUrls(model = {}) {
   const raw = clean(model.modelsUrl || model.models_url);
   if (raw) return [raw];
-  let parsed;
-  try { parsed = new URL(clean(model.baseUrl)); } catch { return []; }
-  if (!['http:', 'https:'].includes(parsed.protocol)) return [];
-  parsed.pathname = parsed.pathname.replace(/\/(chat\/completions|responses|messages|models)\/?$/i, '').replace(/\/$/, '');
-  const root = `${parsed.origin}${parsed.pathname}`.replace(/\/$/, '');
-  const origin = parsed.origin;
-  return Array.from(new Set(adapterFor(model).modelsPaths.map((suffix) => {
-    if (/\/v\d+$/.test(parsed.pathname) && suffix.startsWith('/v1/')) return `${root}${suffix.slice(3)}`;
-    if (suffix.startsWith('/api/') && parsed.pathname.startsWith('/api/')) return `${origin}${suffix}`;
-    return `${root}${suffix}`;
+  const roots = candidateProviderBaseUrls(model.baseUrl, model.apiMode);
+  return Array.from(new Set(roots.flatMap((root) => {
+    const parsed = new URL(root);
+    return adapterFor(model).modelsPaths.map((suffix) => {
+      if (/\/v\d+(?:beta\d*)?$/i.test(parsed.pathname) && suffix.startsWith('/v1/')) return `${root}${suffix.slice(3)}`;
+      if (suffix.startsWith('/api/') && parsed.pathname.startsWith('/api/')) return `${parsed.origin}${suffix}`;
+      return `${root}${suffix}`;
+    });
   })));
 }
 

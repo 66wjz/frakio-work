@@ -1,0 +1,8 @@
+node_modules
+release
+artifacts
+.git
+.runtime-build
+*.png
+*.jpg
+qa-*

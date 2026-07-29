@@ -10,7 +10,17 @@ Frakio Work treats a conversation, workflow, Hermes Kanban board, task, and task
 
 ## Agent protocol
 
-The `hermes-workbench-use` MCP server exposes structured collaboration tools and protocol version 2. Frakio creates the workflow and root task before starting a Work coordinator. The coordinator reads the current revision with `hermes_workbench_collaboration_plan_get` and publishes a complete DAG through `hermes_workbench_collaboration_plan_publish`. Stable task keys, Agents, revision, duplicate keys, unknown dependencies, and cycles are validated before any dispatch. Ready tasks are immediately offered to the Hermes Kanban dispatcher instead of waiting for its normal gateway interval.
+The `hermes-workbench-use` MCP server exposes structured collaboration tools and protocol version 3. Frakio creates the workflow and root task before starting a Work coordinator. The coordinator reads the current revision with `hermes_workbench_collaboration_plan_get` and publishes a complete DAG through `hermes_workbench_collaboration_plan_publish`. Stable task keys, Agents, revision, duplicate keys, unknown dependencies, and cycles are validated before any dispatch. Ready tasks are immediately offered to the Hermes Kanban dispatcher instead of waiting for its normal gateway interval.
+
+## Plan mode
+
+Plan is a separate `collaborationMode` layered over Chat or Work. It locks the current `executionMode` for one planning session and leaves `permissionMode` unchanged. Existing state files need no migration: missing Plan fields normalize to `collaborationMode: default`, an empty `activePlanId`, and an empty session list.
+
+During Plan, the Bridge receives `runtime_overrides.plan_mode=true`. A `tool_execution` guard runs before permission approval and only permits direct reads, search and extraction, image viewing, narrowly allowlisted read-only terminal commands, Workbench context reads, `hermes_workbench_plan_user_input_request`, and `hermes_workbench_plan_submit`. Write, patch, code execution, delegation, unknown MCP, publishing, task creation, and other mutations return `PLAN_MUTATION_BLOCKED`.
+
+Questions and drafts are stored on the thread and streamed from `/api/threads/:threadId/plans/events`. The question tool waits on the persisted request, so refreshing the UI restores the same choices without interrupting the Agent run. Drafts use `planId`, `baseRevision`, and `idempotencyKey`; Work drafts additionally require valid assignees and an acyclic dependency graph.
+
+Approving a Chat plan starts a hidden run on the author Agent without appending a fabricated user message. Approving a Work plan creates the root task, publishes the approved DAG, links dependencies, and dispatches workers in that order. No Kanban task is created while the Plan is still drafting or waiting for approval.
 
 Missing work is requested with `hermes_workbench_collaboration_dependency_request`. Frakio creates a new Hermes task, links it as a parent of the requester, and blocks the requester with `--kind dependency`. Hermes promotes the requester after every parent completes. Artifacts and completion summaries are written back with the corresponding publish and complete tools.
 

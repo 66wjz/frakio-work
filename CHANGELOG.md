@@ -1,5 +1,17 @@
 # Changelog
 
+## 1.0.0 — 2026-07-29
+
+Frakio Work 1.0.0 是首个正式发布版。桌面端与 Web UI 现在共用同一套工作台体验：侧栏、设置、输入区、流式回复、工具活动与紧凑选择托盘在不同入口保持一致。macOS 增加了独立于内容滚动层的固定顶部窗口拖拽区，启动、设置和对话页面都可以稳定移动窗口。
+
+内置 Hermes Agent Runtime 升级到 0.19.0。审批模式与 Hermes Smart Approval 对齐，运行时内置 DDGS 搜索，并在 Plan 模式允许只读联网调查；计划提交、补充提问与只读 Workbench API 不再被 MCP 工具名前缀误拦截。
+
+Agent `@` 接力改由 API 后台持久化调度。页面刷新、SSE 重连和 Hermes 完成事件差异不会再中断 Iris、Max 等 Agent 的连续回复。流式正文接管与最终持久化交接也改为同一展示节点，移除了思考态切换和回复完成时的闪烁。
+
+本版提供 Apple Silicon 与 Intel Mac 桌面包；同时提供 macOS ARM64/x64、Windows x64、Linux x64 的免依赖托管 Web 包，以及 Linux x64 Docker 镜像。托管 Web 自带 Node、Python、Hermes Runtime 和 Bridge，可通过生成的管理员密码在可信局域网使用。
+
+macOS 桌面包尚未经过 Apple 签名与公证。首次被系统阻止打开时，请在 Finder 中按住 Control 点击应用并选择“打开”。
+
 ## 0.1.8 Beta — 2026-07-25
 
 对话新增 Chat 与 Work 两种运行模式。Chat 保留原有的多 Agent @ 协作；Work 会创建可持久的协作工作流和 Hermes Kanban 任务，由协调 Agent 发布带依赖关系的执行计划。新的协作协议支持任务拆解、依赖补充、阻塞升级、成果回传、用户中途调整、暂停、恢复和取消，并使用幂等键和修订号防止重复调度或过期计划覆盖。

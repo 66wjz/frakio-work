@@ -9,8 +9,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
 const runtimeRoot = path.join(projectRoot, 'runtime', 'hermes');
 const bridgeDest = path.join(projectRoot, 'runtime', 'agent-bridge', 'python');
-const bridgeProtocolVersion = 2;
-const requiredPythonDependencies = { aiohttp: '3.14.1', mcp: '1.26.0', starlette: '1.0.1' };
+const bridgeProtocolVersion = 3;
+const requiredPythonDependencies = { aiohttp: '3.14.1', mcp: '1.26.0', starlette: '1.0.1', ddgs: '9.14.4' };
 const execFileAsync = promisify(execFile);
 const targetArch = process.env.FRAKIO_WORK_TARGET_ARCH || process.arch;
 
@@ -104,14 +104,30 @@ async function validateRuntime(runtimeDir) {
       throw new Error(`Runtime Python dependency ${name} must be ${version}, found ${manifest.pythonDependencies?.[name] || 'missing'}. Run npm run runtime:build.`);
     }
   }
-  const dependencyCheck = `import aiohttp, importlib.metadata as metadata, mcp, starlette; assert aiohttp.__version__ == "${requiredPythonDependencies.aiohttp}"; assert metadata.version("mcp") == "${requiredPythonDependencies.mcp}"; assert starlette.__version__ == "${requiredPythonDependencies.starlette}"`;
+  const dependencyCheck = `import aiohttp, ddgs, importlib.metadata as metadata, mcp, starlette; assert aiohttp.__version__ == "${requiredPythonDependencies.aiohttp}"; assert metadata.version("mcp") == "${requiredPythonDependencies.mcp}"; assert starlette.__version__ == "${requiredPythonDependencies.starlette}"; assert metadata.version("ddgs") == "${requiredPythonDependencies.ddgs}"; from tools.web_tools import _ensure_web_plugins_loaded; _ensure_web_plugins_loaded(); from agent.web_search_registry import get_provider; provider = get_provider("ddgs"); assert provider is not None and provider.is_available() and provider.supports_search()`;
   try {
     await execFileAsync(python, ['-c', dependencyCheck], { cwd: runtimeDir, timeout: 30000 });
   } catch (error) {
     throw new Error(`Runtime MCP dependency validation failed: ${error.stderr || error.message || error}`);
   }
   const node = path.join(runtimeDir, 'node', process.platform === 'win32' ? 'node.exe' : 'bin/node');
-  if (existsSync(node)) await assertContainedExecutable(runtimeDir, node);
+  if (existsSync(node)) {
+    await assertContainedExecutable(runtimeDir, node);
+    const npx = path.join(runtimeDir, 'node', process.platform === 'win32' ? 'npx.cmd' : 'bin/npx');
+    await assertContainedExecutable(runtimeDir, npx);
+    try {
+      await execFileAsync(npx, ['--version'], {
+        cwd: runtimeDir,
+        timeout: 30000,
+        env: {
+          ...process.env,
+          PATH: `${path.dirname(node)}${path.delimiter}${process.env.PATH || ''}`,
+        },
+      });
+    } catch (error) {
+      throw new Error(`Runtime npx validation failed: ${error.stderr || error.message || error}`);
+    }
+  }
   if (process.platform !== 'win32') {
     const binDir = path.join(runtimeDir, 'python', 'bin');
     const entries = await readdir(binDir, { withFileTypes: true });

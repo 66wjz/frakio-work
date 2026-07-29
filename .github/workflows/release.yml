@@ -61,7 +61,7 @@ jobs:
           if-no-files-found: error
 
   publish:
-    needs: build
+    needs: [build, web-build]
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v7
@@ -71,7 +71,11 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-      - name: Publish beta release
+      - name: Add platform installers to release artifacts
+        run: cp scripts/install.sh scripts/install.ps1 artifacts/
+      - name: Verify complete release artifact set
+        run: npm run verify:release-artifacts -- artifacts
+      - name: Publish GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.tag || github.ref_name }}
@@ -79,9 +83,80 @@ jobs:
         run: |
           mapfile -d '' release_files < <(find artifacts -type f -print0)
           node scripts/current-release-notes.mjs "$TAG" > /tmp/frakio-release-notes.md
+          release_flags=()
+          release_title="Frakio Work $TAG"
+          case "$TAG" in
+            *-alpha.*|*-beta.*|*-rc.*)
+              release_flags+=(--prerelease)
+              release_title="Frakio Work $TAG Pre-release"
+              ;;
+          esac
           if gh release view "$TAG" >/dev/null 2>&1; then
             gh release upload "$TAG" "${release_files[@]}" --clobber
-            gh release edit "$TAG" --prerelease --title "Frakio Work $TAG Beta" --notes-file /tmp/frakio-release-notes.md
+            gh release edit "$TAG" "${release_flags[@]}" --title "$release_title" --notes-file /tmp/frakio-release-notes.md
           else
-            gh release create "$TAG" "${release_files[@]}" --prerelease --title "Frakio Work $TAG Beta" --notes-file /tmp/frakio-release-notes.md
+            gh release create "$TAG" "${release_files[@]}" "${release_flags[@]}" --title "$release_title" --notes-file /tmp/frakio-release-notes.md
           fi
+
+  web-build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-15
+            platform: mac
+            arch: arm64
+          - runner: macos-15-intel
+            platform: mac
+            arch: x64
+          - runner: windows-2025
+            platform: win
+            arch: x64
+          - runner: ubuntu-24.04
+            platform: linux
+            arch: x64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.event.inputs.tag || github.ref }}
+      - uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: npm
+      - uses: astral-sh/setup-uv@v7
+      - run: npm ci
+      - name: Verify tag matches package version
+        shell: bash
+        run: test "v$(node -p "require('./package.json').version")" = "${{ github.event.inputs.tag || github.ref_name }}"
+      - run: npm run runtime:build
+      - run: npm run web:package
+      - uses: actions/upload-artifact@v7
+        with:
+          name: web-${{ matrix.platform }}-${{ matrix.arch }}
+          path: release/managed-web/*
+          if-no-files-found: error
+
+  docker:
+    if: startsWith(github.ref, 'refs/tags/')
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      packages: write
+    steps:
+      - uses: actions/checkout@v7
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/build-push-action@v7
+        with:
+          context: .
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ghcr.io/madsgao/frakio-work:${{ github.ref_name }}
+            ghcr.io/madsgao/frakio-work:latest

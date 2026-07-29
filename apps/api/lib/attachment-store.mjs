@@ -151,6 +151,31 @@ export function createAttachmentStore(rootPath) {
     return { metadata, filePath, inline: metadata.kind === 'image' && SAFE_INLINE_IMAGE_MIMES.has(metadata.mimeType) };
   }
 
+  async function cloneMany(idsValue, threadId, messageId) {
+    const sourceItems = await resolveMany(idsValue);
+    const clonedItems = [];
+    const clonedIds = [];
+    try {
+      for (const source of sourceItems) {
+        const sourceContent = await content(source.id);
+        const cloned = await save({
+          name: source.name,
+          mimeType: source.mimeType,
+          data: await readFile(sourceContent.filePath),
+        });
+        clonedIds.push(cloned.id);
+        const [metadata] = await resolveMany([cloned.id]);
+        await claim([metadata], threadId, messageId);
+        clonedItems.push(metadata);
+      }
+      return clonedItems.map(publicAttachment);
+    } catch (error) {
+      await removeForThreads([threadId]).catch(() => {});
+      await Promise.all(clonedIds.map((id) => rm(path.join(root, id), { recursive: true, force: true }))).catch(() => {});
+      throw error;
+    }
+  }
+
   async function removeForThreads(threadIdsValue) {
     const threadIds = new Set((threadIdsValue || []).map(String));
     if (!threadIds.size) return 0;
@@ -188,5 +213,5 @@ export function createAttachmentStore(rootPath) {
     return removed;
   }
 
-  return { save, metadataFor, resolveMany, claim, removeDraft, content, removeForThreads, cleanupOrphans, publicAttachment };
+  return { save, metadataFor, resolveMany, claim, removeDraft, content, cloneMany, removeForThreads, cleanupOrphans, publicAttachment };
 }

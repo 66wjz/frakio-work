@@ -16,6 +16,83 @@ export type Attachment = {
   contentUrl: string;
 };
 
+export type CollaborationMode = 'default' | 'plan';
+
+export type PlanSessionStatus =
+  | 'drafting'
+  | 'waiting_input'
+  | 'waiting_approval'
+  | 'approved'
+  | 'executing'
+  | 'completed'
+  | 'cancelled'
+  | 'failed';
+
+export type PlanOption = {
+  label: string;
+  description: string;
+  recommended: boolean;
+};
+
+export type PlanQuestion = {
+  id: string;
+  header: string;
+  question: string;
+  options: PlanOption[];
+};
+
+export type PlanQuestionAnswer = {
+  selectedLabel?: string;
+  note?: string;
+};
+
+export type PlanQuestionBatch = {
+  id: string;
+  questions: PlanQuestion[];
+  answers: Record<string, PlanQuestionAnswer>;
+  status: 'pending' | 'resolved' | 'cancelled' | 'auto_resolved';
+  autoResolutionMs?: number;
+  createdAt: string;
+  resolvedAt?: string;
+};
+
+export type PlanStep = {
+  key: string;
+  title: string;
+  description: string;
+  files: string[];
+  assigneeAgentId?: string;
+  expectedResult: string;
+  dependsOnKeys: string[];
+};
+
+export type PlanDraft = {
+  revision: number;
+  title: string;
+  summary: string;
+  steps: PlanStep[];
+  tests: string[];
+  assumptions: string[];
+  submittedByRunId: string;
+  createdAt: string;
+};
+
+export type PlanSession = {
+  id: string;
+  readOnly?: boolean;
+  targetExecutionMode: 'chat' | 'work';
+  authorAgentId: string;
+  status: PlanSessionStatus;
+  currentRevision: number;
+  drafts: PlanDraft[];
+  questions: PlanQuestionBatch[];
+  sourceRunId?: string;
+  executionRunId?: string;
+  error?: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type RunActivityKind = 'read' | 'search' | 'edit' | 'write' | 'command' | 'web' | 'skill' | 'collaboration' | 'other';
 export type RunActivityStatus = 'running' | 'completed' | 'failed' | 'cancelled';
 
@@ -24,6 +101,8 @@ export type RunActivityItem = {
   kind: RunActivityKind;
   status: RunActivityStatus;
   toolName: string;
+  displayName?: string;
+  intent?: string;
   activeLabel: string;
   completedLabel: string;
   target: string;
@@ -53,6 +132,93 @@ export type RunTranscript = {
   partialContent?: string;
   createdAt: string;
   updatedAt: string;
+};
+
+export type HermesMentionRouteStatus = 'pending' | 'starting' | 'running' | 'completed' | 'failed';
+
+export type HermesMentionRoute = {
+  id: string;
+  edge: string;
+  sourceAgentId: string;
+  sourceAgentName: string;
+  sourceMessageId: string;
+  targetAgentId: string;
+  targetAgentName: string;
+  mentionDepth: number;
+  text: string;
+  status: HermesMentionRouteStatus;
+  runId: string;
+  error: string;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type HermesAgentTurn = {
+  turnId: string;
+  maxMentionDepth: number | 'unlimited';
+  depth: number;
+  routedEdges: string[];
+  routes: HermesMentionRoute[];
+  activeRuns: Record<string, {
+    runId: string;
+    sessionId: string;
+    agentId: string;
+    agentName: string;
+    mentionDepth: number;
+    parentMessageId: string;
+    status: 'starting' | 'running' | 'completed' | 'failed' | 'cancelled';
+  }>;
+  totalRoutedRuns: number;
+  status: 'running' | 'routing' | 'completed' | 'completed_with_errors' | 'failed' | 'cancelled';
+  startedAt: string;
+  updatedAt: string;
+  completedAt?: string;
+};
+
+export type HermesTurnEvent = {
+  event: string;
+  cursor: number;
+  timestamp: number;
+  threadId: string;
+  turnId: string;
+  runId?: string;
+  sessionId?: string;
+  agentId?: string;
+  agentName?: string;
+  mentionDepth?: number;
+  parentMessageId?: string;
+  delta?: string;
+  output?: string;
+  error?: string;
+  route?: HermesMentionRoute;
+  thread?: unknown;
+  [key: string]: unknown;
+};
+
+export type HermesNetworkCapabilityStatus = {
+  enabled: boolean;
+  ready: boolean;
+  provider?: string | null;
+  source?: 'configured' | 'automatic' | 'free' | 'unconfigured';
+  chromiumReady?: boolean;
+  detail:
+    | 'ready'
+    | 'free_provider_ready'
+    | 'tool_disabled'
+    | 'provider_not_configured'
+    | 'provider_unavailable'
+    | 'provider_probe_failed'
+    | 'browser_cli_missing'
+    | 'chromium_missing';
+};
+
+export type HermesNetworkStatus = {
+  profile: string;
+  onlineReadReady: boolean;
+  search: HermesNetworkCapabilityStatus;
+  extract: HermesNetworkCapabilityStatus;
+  browser: HermesNetworkCapabilityStatus;
+  checkedAt: string;
 };
 
 export type CollaborationWorkflowStatus = 'active' | 'paused' | 'completed' | 'cancelled' | 'archived';
@@ -156,6 +322,7 @@ export type AppUpdateStatus = {
   notes?: string;
   publishedAt?: string;
   asset?: ReleaseAsset | null;
+  checksumAsset?: ReleaseAsset | null;
   installMode: 'desktop-release' | 'source';
   error?: string;
 };

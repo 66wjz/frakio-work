@@ -11,6 +11,12 @@ function requestMethod(input: RequestInfo | URL, init?: RequestInit) {
   return String(init?.method || (input instanceof Request ? input.method : 'GET')).toUpperCase();
 }
 
+function isAuthenticationBootstrap(input: RequestInfo | URL) {
+  const value = typeof input === 'string' ? input : input instanceof URL ? input.toString() : input.url;
+  const url = new URL(value, window.location.origin);
+  return ['/api/auth/login', '/api/auth/status', '/api/auth/desktop-session'].includes(url.pathname);
+}
+
 async function ensureSession() {
   if (!sessionPromise) {
     sessionPromise = originalFetch('/api/session', { credentials: 'include' }).then((response) => {
@@ -27,7 +33,7 @@ export function installLocalApiFetchGuard() {
   window.fetch = async (input: RequestInfo | URL, init: RequestInit = {}) => {
     if (!isLocalApi(input)) return originalFetch(input, init);
     const method = requestMethod(input, init);
-    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) await ensureSession();
+    if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method) && !isAuthenticationBootstrap(input)) await ensureSession();
     const headers = new Headers(input instanceof Request ? input.headers : undefined);
     new Headers(init.headers).forEach((value, key) => headers.set(key, value));
     if (['POST', 'PUT', 'PATCH', 'DELETE'].includes(method)) headers.set('X-Frakio-Request', '1');

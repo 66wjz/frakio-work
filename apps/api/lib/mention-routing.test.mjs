@@ -42,3 +42,14 @@ test('the same directed mention edge is routed only once per turn', () => {
   assert.equal(registerMentionEdge(edges, 'b', 'a'), true);
   assert.equal(registerMentionEdge(edges, 'a', 'b'), false);
 });
+
+test('mentions inside quoted message blocks do not trigger routing', () => {
+  assert.deepEqual(resolveMentionedAgents(
+    '<quoted_message sender=\"Iris\">@Max 这是旧消息</quoted_message>\\n没有新的提及',
+    agents,
+  ), []);
+});
+
+test('mentions are case-insensitive and remain intact beside emoji and punctuation', () => {
+  assert.deepEqual(resolveMentionedAgents('👋@mAx，please join @设计总监。', agents).map((agent) => agent.id), ['max', 'director']);
+});

@@ -105,7 +105,7 @@ test('threads default to Chat and entering Work atomically creates a reusable wo
   assert.equal(work.thread.executionMode, 'work');
   assert.equal(work.snapshot.workflows.length, 1);
   assert.equal(work.snapshot.workflows[0].tasks.length, 0);
-  assert.equal(work.capability.protocolVersion, 2);
+  assert.equal(work.capability.protocolVersion, 3);
 
   const chat = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/mode`, { method: 'PATCH', headers: ctx.headers, body: JSON.stringify({ mode: 'chat' }) }).then(res => res.json());
   assert.equal(chat.thread.executionMode, 'chat');
@@ -128,7 +128,196 @@ test('a new Work conversation creates its workflow during conversation creation'
   assert.equal(created.workflow.coordinatorAgentId, 'coord-new');
   assert.equal(created.snapshot.workflows.length, 1);
   assert.equal(created.snapshot.workflows[0].tasks.length, 0);
-  assert.equal(created.capability.protocolVersion, 2);
+  assert.equal(created.capability.protocolVersion, 3);
+});
+
+test('Chat Plan persists structured questions, revisions, and cancellation without changing execution mode', async t => {
+  const agents = [{ id: 'plan-chat-agent', name: 'Plan Chat Agent', role: 'Engineer', profileName: 'plan-chat-agent', source: 'hermes-profile' }];
+  const ctx = await startTestApp(t, { agents });
+  const createdResponse = await fetch(`${ctx.baseUrl}/api/conversations`, {
+    method: 'POST',
+    headers: ctx.headers,
+    body: JSON.stringify({ title: 'Chat Plan', primaryAgentId: 'plan-chat-agent', collaborationMode: 'plan' }),
+  });
+  const created = await createdResponse.json();
+  assert.equal(createdResponse.status, 200, JSON.stringify(created));
+  assert.equal(created.thread.executionMode, 'chat');
+  assert.equal(created.thread.collaborationMode, 'plan');
+  assert.ok(created.thread.activePlanId);
+  const planId = created.thread.activePlanId;
+
+  const lockedMode = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/mode`, {
+    method: 'PATCH',
+    headers: ctx.headers,
+    body: JSON.stringify({ mode: 'work' }),
+  });
+  assert.equal(lockedMode.status, 409);
+
+  const questionResponse = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/plans/${planId}/questions`, {
+    method: 'POST',
+    headers: ctx.headers,
+    body: JSON.stringify({
+      questions: [{
+        id: 'scope',
+        header: '范围',
+        question: '首版覆盖到哪里？',
+        options: [
+          { label: '当前模块', description: '变更更小，先验证闭环。' },
+          { label: '全部模块', description: '范围更广，回归成本更高。' },
+        ],
+      }],
+    }),
+  });
+  const question = await questionResponse.json();
+  assert.equal(questionResponse.status, 200, JSON.stringify(question));
+  assert.equal(question.batch.status, 'pending');
+  assert.equal(question.batch.questions[0].options[0].recommended, true);
+
+  const answeredResponse = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/plans/${planId}/questions/${question.batch.id}/answer`, {
+    method: 'POST',
+    headers: ctx.headers,
+    body: JSON.stringify({ answers: { scope: { selectedLabel: '当前模块', note: '保留兼容性' } } }),
+  });
+  const answered = await answeredResponse.json();
+  assert.equal(answeredResponse.status, 200, JSON.stringify(answered));
+  assert.equal(answered.batch.status, 'resolved');
+
+  const cancelledQuestionResponse = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/plans/${planId}/questions`, {
+    method: 'POST',
+    headers: ctx.headers,
+    body: JSON.stringify({
+      questions: [{
+        id: 'cancel-scope',
+        header: '取消范围',
+        question: '是否继续补充？',
+        options: [
+          { label: '继续', description: '继续补充问题。' },
+          { label: '停止', description: '返回计划草拟。', recommended: true },
+        ],
+      }],
+    }),
+  });
+  const cancelledQuestion = await cancelledQuestionResponse.json();
+  assert.equal(cancelledQuestionResponse.status, 200, JSON.stringify(cancelledQuestion));
+  assert.equal(cancelledQuestion.batch.questions[0].options[1].recommended, true);
+
+  const cancelQuestionResponse = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/plans/${planId}/questions/${cancelledQuestion.batch.id}/cancel`, {
+    method: 'POST',
+    headers: ctx.headers,
+    body: JSON.stringify({ source: 'test' }),
+  });
+  const cancelQuestion = await cancelQuestionResponse.json();
+  assert.equal(cancelQuestionResponse.status, 200, JSON.stringify(cancelQuestion));
+  assert.equal(cancelQuestion.batch.status, 'cancelled');
+  assert.equal(cancelQuestion.plan.status, 'drafting');
+
+  const cancelQuestionReplayResponse = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/plans/${planId}/questions/${cancelledQuestion.batch.id}/cancel`, {
+    method: 'POST',
+    headers: ctx.headers,
+    body: JSON.stringify({ source: 'test-replay' }),
+  });
+  const cancelQuestionReplay = await cancelQuestionReplayResponse.json();
+  assert.equal(cancelQuestionReplayResponse.status, 200, JSON.stringify(cancelQuestionReplay));
+  assert.equal(cancelQuestionReplay.batch.status, 'cancelled');
+
+  const draftBody = {
+    baseRevision: 0,
+    title: '接入 Chat Plan',
+    summary: '在当前模块增加只读规划与批准执行。',
+    idempotencyKey: 'chat-plan-v1',
+    steps: [{
+      key: 'inspect',
+      title: '检查现状',
+      description: '读取现有实现并确认接入点。',
+      files: ['apps/web/src/main.tsx'],
+      expectedResult: '得到明确接入位置。',
+      dependsOnKeys: [],
+    }],
+    tests: ['运行类型检查'],
+    assumptions: ['保持现有权限模式'],
+  };
+  const submittedResponse = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/plans/${planId}/submit`, {
+    method: 'POST',
+    headers: ctx.headers,
+    body: JSON.stringify(draftBody),
+  });
+  const submitted = await submittedResponse.json();
+  assert.equal(submittedResponse.status, 200, JSON.stringify(submitted));
+  assert.equal(submitted.draft.revision, 1);
+  assert.equal(submitted.plan.status, 'waiting_approval');
+
+  const replay = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/plans/${planId}/submit`, {
+    method: 'POST',
+    headers: ctx.headers,
+    body: JSON.stringify(draftBody),
+  }).then(res => res.json());
+  assert.equal(replay.draft.revision, 1);
+
+  const cancelled = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/plans/${planId}/cancel`, {
+    method: 'POST',
+    headers: ctx.headers,
+    body: JSON.stringify({}),
+  }).then(res => res.json());
+  assert.equal(cancelled.thread.collaborationMode, 'default');
+  assert.equal(cancelled.plan.status, 'cancelled');
+});
+
+test('Work Plan keeps Kanban empty before approval and publishes the approved DAG once', async t => {
+  const agents = [
+    { id: 'plan-coord', name: 'Plan Coordinator', role: 'Coordinator', profileName: 'plan-coord', source: 'hermes-profile' },
+    { id: 'plan-worker', name: 'Plan Worker', role: 'Engineer', profileName: 'plan-worker', source: 'hermes-profile' },
+  ];
+  const ctx = await startTestApp(t, { agents });
+  const createdResponse = await fetch(`${ctx.baseUrl}/api/conversations`, {
+    method: 'POST',
+    headers: ctx.headers,
+    body: JSON.stringify({
+      title: 'Work Plan',
+      primaryAgentId: 'plan-coord',
+      coordinatorAgentId: 'plan-coord',
+      executionMode: 'work',
+      collaborationMode: 'plan',
+      requestId: 'work-plan-create',
+    }),
+  });
+  const created = await createdResponse.json();
+  assert.equal(createdResponse.status, 200, JSON.stringify(created));
+  assert.equal(created.snapshot.workflows[0].tasks.length, 0);
+  const planId = created.thread.activePlanId;
+
+  const submittedResponse = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/plans/${planId}/submit`, {
+    method: 'POST',
+    headers: ctx.headers,
+    body: JSON.stringify({
+      baseRevision: 0,
+      title: '发布批准后的 DAG',
+      summary: '先研究，再实现。',
+      idempotencyKey: 'work-plan-v1',
+      steps: [
+        { key: 'research', title: '研究', description: '读取现状。', files: [], assigneeAgentId: 'plan-coord', expectedResult: '研究结论', dependsOnKeys: [] },
+        { key: 'implement', title: '实现', description: '按结论实现。', files: [], assigneeAgentId: 'plan-worker', expectedResult: '可运行实现', dependsOnKeys: ['research'] },
+      ],
+      tests: ['运行回归测试'],
+      assumptions: [],
+    }),
+  });
+  const submitted = await submittedResponse.json();
+  assert.equal(submittedResponse.status, 200, JSON.stringify(submitted));
+  const beforeApproval = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/collaboration`).then(res => res.json());
+  assert.equal(beforeApproval.snapshot.workflows[0].tasks.length, 0);
+
+  const executedResponse = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/plans/${planId}/execute`, {
+    method: 'POST',
+    headers: ctx.headers,
+    body: JSON.stringify({}),
+  });
+  const executed = await executedResponse.json();
+  assert.equal(executedResponse.status, 200, JSON.stringify(executed));
+  assert.equal(executed.kind, 'work-dispatch');
+  assert.equal(executed.plan.status, 'executing');
+  assert.equal(executed.snapshot.workflows[0].tasks.length, 3);
+  assert.equal(executed.snapshot.workflows[0].plan.tasks.length, 2);
+  assert.ok(executed.snapshot.events.some(event => event.type === 'dependency.created'));
 });
 
 test('a structured plan creates visible tasks and dependencies with revision control', async t => {

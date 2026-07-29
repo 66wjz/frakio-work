@@ -108,6 +108,30 @@ function targetForTool(kind, name, args, event) {
   return firstTarget(args, ['title', 'query', 'path', 'target', 'command']) || name.replaceAll('_', ' ');
 }
 
+function semanticCommandCopy(command = '') {
+  const value = String(command).trim();
+  if (!value) return null;
+  if (/(^|[;&|]\s*)(rg|grep)(\s|$)/i.test(value)) return ['搜索了', '在项目中查找匹配内容'];
+  if (/(^|[;&|]\s*)git\s+(log|show)(\s|$)/i.test(value)) return ['查看提交记录', '了解项目最近的修改'];
+  if (/(^|[;&|]\s*)git\s+status(\s|$)/i.test(value)) return ['检查仓库状态', '确认当前文件变更'];
+  if (/(^|\s)(npm|pnpm|yarn|bun)\s+(run\s+)?test(\s|$)|(^|\s)(pytest|vitest|jest|node\s+--test)(\s|$)/i.test(value)) return ['运行测试', '验证相关功能'];
+  if (/(^|[;&|]\s*)curl(\s|$)/i.test(value)) return ['访问站点', '获取网络内容'];
+  return null;
+}
+
+function fallbackSemantics(kind, args, event, status) {
+  const description = firstTarget(args, ['description', 'intent', 'purpose']);
+  if (kind === 'command') {
+    const commandCopy = semanticCommandCopy(firstTarget(args, ['command', 'cmd', 'code', 'script']));
+    if (commandCopy) return { displayName: commandCopy[0], intent: description || commandCopy[1] };
+  }
+  const [active, completed] = copyByKind[kind] || copyByKind.other;
+  return {
+    displayName: cleanText(event.title || event.description || event.label, 120) || (status === 'running' ? active : completed),
+    intent: description,
+  };
+}
+
 export function normalizeRunActivityItem(event = {}, status = 'running') {
   const name = normalizedToolName(event) || 'operation';
   const kind = classifyTool(name);
@@ -116,6 +140,9 @@ export function normalizeRunActivityItem(event = {}, status = 'running') {
   const activeLabel = cleanText(event.activeLabel, 120) || defaultActiveLabel;
   const completedLabel = cleanText(event.completedLabel, 120) || defaultCompletedLabel;
   const target = targetForTool(kind, name, args, event);
+  const fallback = fallbackSemantics(kind, args, event, status);
+  const displayName = cleanText(redactActivityText(event.displayName || event.display_name), 80) || fallback.displayName;
+  const intent = cleanText(redactActivityText(event.intent), 280) || fallback.intent;
   const timestamp = Number(event.timestamp || 0);
   const createdAt = event.createdAt || (timestamp ? new Date(timestamp * 1000).toISOString() : new Date().toISOString());
   const result = event.raw?.result ?? event.result ?? event.resultPreview ?? event.result_preview ?? event.error;
@@ -124,6 +151,8 @@ export function normalizeRunActivityItem(event = {}, status = 'running') {
     kind,
     status: status === 'failed' || event.error || event.is_error ? 'failed' : status === 'completed' ? 'completed' : status === 'cancelled' ? 'cancelled' : 'running',
     toolName: name,
+    displayName,
+    intent,
     activeLabel,
     completedLabel,
     target: cleanText(redactActivityText(target), 500),

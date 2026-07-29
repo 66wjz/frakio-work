@@ -1,14 +1,18 @@
-const { app, BrowserWindow, Menu, dialog, ipcMain, shell } = require('electron');
+const { app, BrowserWindow, Menu, dialog, ipcMain, nativeTheme, shell } = require('electron');
 const { spawn } = require('node:child_process');
 const { randomUUID } = require('node:crypto');
 const fs = require('node:fs');
 const http = require('node:http');
+const https = require('node:https');
 const net = require('node:net');
 const os = require('node:os');
 const path = require('node:path');
 const { isAllowedExternalUrl } = require('./external-url.cjs');
 const { electronNodeExecutable: resolveElectronNodeExecutable } = require('./platform-paths.cjs');
 const { closeActionForState, closeNoticeForPlatform, restoreWindow } = require('./window-lifecycle.cjs');
+const { applyAppearance, appearanceState } = require('./appearance.cjs');
+const { desktopRuntimeTarget } = require('./dev-runtime.cjs');
+const { createDesktopUpdateService } = require('./desktop-update.cjs');
 
 const APP_NAME = 'Frakio Work';
 const DEFAULT_PORT = 8787;
@@ -21,10 +25,12 @@ let mainWindow = null;
 let apiProcess = null;
 let apiPort = DEFAULT_PORT;
 let apiUrl = `http://127.0.0.1:${DEFAULT_PORT}`;
+let rendererUrl = apiUrl;
 let quitting = false;
 let startupError = '';
 let startingPromise = null;
 let closeNoticeShown = false;
+let desktopUpdateService = null;
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
@@ -33,6 +39,9 @@ const userHome = path.join(os.homedir(), '.frakio-work');
 const logsDir = path.join(userHome, 'logs');
 const desktopLogPath = path.join(logsDir, 'desktop.log');
 const apiLogPath = path.join(logsDir, 'api.log');
+const managedServicePath = path.join(userHome, 'runtime', 'service.json');
+const desktopSessionSecretPath = path.join(userHome, 'runtime', 'desktop-session-secret');
+const SERVICE_PROTOCOL = 1;
 
 function ensureLogsDir() {
   fs.mkdirSync(logsDir, { recursive: true });
@@ -86,7 +95,9 @@ async function findPort(preferred) {
 
 function requestHealth(url) {
   return new Promise((resolve) => {
-    const req = http.get(`${url}/api/health`, (res) => {
+    const target = new URL('/api/health', `${url}/`);
+    const client = target.protocol === 'https:' ? https : http;
+    const req = client.get(target, (res) => {
       res.resume();
       resolve(res.statusCode >= 200 && res.statusCode < 500);
     });
@@ -98,10 +109,93 @@ function requestHealth(url) {
   });
 }
 
+function requestPage(url) {
+  return new Promise((resolve) => {
+    const target = new URL(url);
+    const client = target.protocol === 'https:' ? https : http;
+    const req = client.get(target, (res) => {
+      res.resume();
+      resolve(res.statusCode >= 200 && res.statusCode < 500);
+    });
+    req.once('error', () => resolve(false));
+    req.setTimeout(1500, () => {
+      req.destroy();
+      resolve(false);
+    });
+  });
+}
+
+async function discoverManagedService() {
+  if (!app.isPackaged || String(process.env.FRAKIO_WORK_EXTERNAL_API_URL || '').trim()) return null;
+  let descriptor;
+  try {
+    descriptor = JSON.parse(fs.readFileSync(managedServicePath, 'utf8'));
+  } catch {
+    return null;
+  }
+  if (descriptor?.deploymentMode !== 'managed-web' || !descriptor?.loopbackUrl) return null;
+  if (descriptor.apiProtocol !== SERVICE_PROTOCOL) {
+    throw new Error(`托管 Web 服务协议不兼容（服务 ${descriptor.apiProtocol || '未知'}，桌面 ${SERVICE_PROTOCOL}）。请先更新 Frakio Work。`);
+  }
+  if (!await requestHealth(descriptor.loopbackUrl)) return null;
+  return descriptor;
+}
+
+function requestDesktopSession(url, secret) {
+  return new Promise((resolve, reject) => {
+    const target = new URL('/api/auth/desktop-session', `${url}/`);
+    const client = target.protocol === 'https:' ? https : http;
+    const request = client.request(target, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Content-Length': '2',
+        'X-Frakio-Desktop-Secret': secret,
+      },
+    }, (response) => {
+      response.resume();
+      if (response.statusCode < 200 || response.statusCode >= 300) {
+        reject(new Error(`托管 Web 桌面会话初始化失败（${response.statusCode}）。`));
+        return;
+      }
+      const setCookie = response.headers['set-cookie']?.[0] || '';
+      const pair = setCookie.split(';')[0];
+      const separator = pair.indexOf('=');
+      resolve(separator > 0 ? { name: pair.slice(0, separator), value: decodeURIComponent(pair.slice(separator + 1)) } : null);
+    });
+    request.once('error', reject);
+    request.end('{}');
+  });
+}
+
+async function authenticateManagedDesktop(url) {
+  const secret = fs.readFileSync(desktopSessionSecretPath, 'utf8').trim();
+  const cookie = await requestDesktopSession(url, secret);
+  if (!cookie || !mainWindow) throw new Error('托管 Web 服务没有返回桌面会话。');
+  await mainWindow.webContents.session.cookies.set({
+    url,
+    name: cookie.name,
+    value: cookie.value,
+    path: '/',
+    httpOnly: true,
+    sameSite: 'strict',
+    secure: new URL(url).protocol === 'https:',
+  });
+}
+
 async function waitForHealth(url) {
   const startedAt = Date.now();
   while (Date.now() - startedAt < HEALTH_TIMEOUT_MS) {
     if (await requestHealth(url)) return true;
+    await wait(HEALTH_INTERVAL_MS);
+  }
+  return false;
+}
+
+async function waitForPage(url) {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < HEALTH_TIMEOUT_MS) {
+    if (await requestPage(url)) return true;
     await wait(HEALTH_INTERVAL_MS);
   }
   return false;
@@ -217,6 +311,36 @@ async function startApi() {
   return startingPromise;
 }
 
+async function resolveRendererUrl() {
+  const managed = await discoverManagedService();
+  if (managed) {
+    apiUrl = managed.loopbackUrl;
+    rendererUrl = apiUrl;
+    await authenticateManagedDesktop(apiUrl);
+    writeDesktopLog(`Using managed Web service at ${apiUrl}`);
+    return rendererUrl;
+  }
+  const runtimeTarget = desktopRuntimeTarget({
+    packaged: app.isPackaged,
+    devServerUrl: process.env.FRAKIO_WORK_DEV_SERVER_URL,
+    externalApiUrl: process.env.FRAKIO_WORK_EXTERNAL_API_URL,
+    embeddedApiUrl: apiUrl,
+  });
+  if (runtimeTarget.spawnApi) return startApi();
+
+  apiUrl = runtimeTarget.apiUrl;
+  writeDesktopLog(`Using development API at ${apiUrl}`);
+  if (!await waitForHealth(apiUrl)) {
+    throw new Error(`开发 API 未启动：${apiUrl}。请先运行 npm run dev。`);
+  }
+  writeDesktopLog(`Waiting for Vite at ${runtimeTarget.rendererUrl}`);
+  if (!await waitForPage(runtimeTarget.rendererUrl)) {
+    throw new Error(`Vite 开发服务器未启动：${runtimeTarget.rendererUrl}。请先运行 npm run dev。`);
+  }
+  writeDesktopLog(`Vite ready at ${runtimeTarget.rendererUrl}`);
+  return runtimeTarget.rendererUrl;
+}
+
 function createWindow() {
   mainWindow = new BrowserWindow({
     width: 1280,
@@ -225,10 +349,14 @@ function createWindow() {
     minHeight: 680,
     title: APP_NAME,
     show: false,
-    backgroundColor: '#f7faf8',
+    backgroundColor: process.platform === 'darwin' ? '#00000000' : '#f7faf8',
     titleBarStyle: 'hidden',
     trafficLightPosition: { x: 18, y: 18 },
     acceptFirstMouse: true,
+    ...(process.platform === 'darwin' ? {
+      vibrancy: 'sidebar',
+      visualEffectState: 'followWindow',
+    } : {}),
     webPreferences: {
       preload: path.join(__dirname, 'preload.cjs'),
       nodeIntegration: false,
@@ -242,7 +370,7 @@ function createWindow() {
     return { action: 'deny' };
   });
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (url.startsWith(apiUrl) || url.startsWith('data:text/html')) return;
+    if (url.startsWith(apiUrl) || url.startsWith(rendererUrl) || url.startsWith('data:text/html')) return;
     event.preventDefault();
     if (isAllowedExternalUrl(url)) shell.openExternal(url);
   });
@@ -264,8 +392,15 @@ function createWindow() {
 async function loadApp() {
   if (!mainWindow) createWindow();
   try {
-    const url = await startApi();
-    await mainWindow.loadURL(url);
+    const url = await resolveRendererUrl();
+    rendererUrl = url;
+    const launchQaMode = !app.isPackaged
+      ? String(process.env.FRAKIO_WORK_LAUNCH_QA || '').trim()
+      : '';
+    const loadUrl = ['logo', 'installing', 'welcome'].includes(launchQaMode)
+      ? `${url}${url.includes('?') ? '&' : '?'}launchQa=${launchQaMode}`
+      : url;
+    await mainWindow.loadURL(loadUrl);
   } catch (error) {
     startupError = error?.message || String(error);
     writeDesktopLog(`Load failed: ${startupError}`);
@@ -279,6 +414,9 @@ function showErrorPage() {
     .replace(/&/g, '&amp;')
     .replace(/</g, '&lt;')
     .replace(/>/g, '&gt;');
+  const developmentStartup = !app.isPackaged && Boolean(String(process.env.FRAKIO_WORK_DEV_SERVER_URL || '').trim());
+  const errorTitle = developmentStartup ? 'Frakio Work 开发服务器没有启动' : 'Frakio Work 本地服务没有启动';
+  const retryLabel = developmentStartup ? '重新检测' : '重试启动';
   mainWindow.loadURL(`data:text/html;charset=utf-8,${encodeURIComponent(`<!doctype html>
 <html lang="zh-CN">
 <head>
@@ -297,11 +435,11 @@ function showErrorPage() {
 </head>
 <body>
   <main>
-    <h1>Frakio Work 本地服务没有启动</h1>
+    <h1>${errorTitle}</h1>
     <p>${cleanError}</p>
     <p>可以重试启动，或者打开日志目录查看 <code>desktop.log</code> 和 <code>api.log</code>。</p>
     <div class="actions">
-      <button class="primary" onclick="window.frakioDesktop.restartService()">重试启动</button>
+      <button class="primary" onclick="window.frakioDesktop.restartService()">${retryLabel}</button>
       <button onclick="window.frakioDesktop.openLogs()">打开日志目录</button>
     </div>
   </main>
@@ -329,6 +467,14 @@ async function stopApi() {
 async function restartApiAndReload() {
   await stopApi();
   await loadApp();
+}
+
+async function openUpdateInstallerAndQuit(installerPath) {
+  const error = await shell.openPath(installerPath);
+  if (error) throw new Error(error);
+  quitting = true;
+  await stopApi();
+  app.quit();
 }
 
 function openLogsDir() {
@@ -415,6 +561,16 @@ ipcMain.handle('frakio:set-login-startup', (_event, enabled) => {
   return { enabled: loginStartupEnabled() };
 });
 
+ipcMain.handle('frakio:get-appearance', () => appearanceState(nativeTheme));
+
+ipcMain.handle('frakio:set-appearance', (_event, appearance) => {
+  const state = applyAppearance(nativeTheme, appearance);
+  for (const window of BrowserWindow.getAllWindows()) {
+    if (!window.isDestroyed()) window.webContents.send('frakio:appearance-changed', state);
+  }
+  return state;
+});
+
 ipcMain.handle('frakio:select-folder', async (_event) => {
   const target = BrowserWindow.fromWebContents(_event.sender) || mainWindow;
   const result = await dialog.showOpenDialog(target, {
@@ -459,6 +615,23 @@ ipcMain.handle('frakio:open-external', async (_event, targetUrl) => {
   return { ok: true };
 });
 
+ipcMain.handle('frakio:get-update-state', () => desktopUpdateService?.getState() || {
+  supported: false,
+  packaged: app.isPackaged,
+  platform: process.platform,
+  arch: process.arch,
+  phase: 'idle',
+  currentVersion: app.getVersion(),
+  latestVersion: '',
+  checkedAt: '',
+  progress: { percent: 0, transferred: 0, total: 0, bytesPerSecond: 0 },
+});
+
+ipcMain.handle('frakio:check-for-updates', () => desktopUpdateService?.checkForUpdates());
+ipcMain.handle('frakio:download-update', () => desktopUpdateService?.downloadUpdate());
+ipcMain.handle('frakio:cancel-update-download', () => desktopUpdateService?.cancelDownload());
+ipcMain.handle('frakio:open-downloaded-update', () => desktopUpdateService?.openDownloadedInstaller());
+
 app.on('second-instance', () => {
   showOrLoadMainWindow();
 });
@@ -481,13 +654,34 @@ function showOrLoadMainWindow() {
 
 app.whenReady().then(async () => {
   ensureLogsDir();
+  nativeTheme.themeSource = 'system';
+  nativeTheme.on('updated', () => {
+    const state = appearanceState(nativeTheme);
+    for (const window of BrowserWindow.getAllWindows()) {
+      if (!window.isDestroyed()) window.webContents.send('frakio:appearance-changed', state);
+    }
+  });
+  desktopUpdateService = createDesktopUpdateService({
+    app,
+    getApiUrl: () => apiUrl,
+    broadcast: (state) => {
+      for (const window of BrowserWindow.getAllWindows()) {
+        if (!window.isDestroyed()) window.webContents.send('frakio:update-state-changed', state);
+      }
+    },
+    openInstallerAndQuit: openUpdateInstallerAndQuit,
+    log: writeDesktopLog,
+  });
+  await desktopUpdateService.initialize();
   buildMenu();
   await loadApp();
+  desktopUpdateService.start();
 }).catch((error) => {
   dialog.showErrorBox(APP_NAME, error?.message || String(error));
 });
 
 app.on('will-quit', async (event) => {
+  desktopUpdateService?.stop();
   if (apiProcess) {
     event.preventDefault();
     await stopApi();

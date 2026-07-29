@@ -28,28 +28,55 @@ Frakio Work 是一个以 Hermes Agent 为核心的多 Agent 工作台，我个�
 
 <img src="docs/assets/readme/qrcode_1784508398505.jpg" alt="Frakio Work 沟通群" width="200">
 
-## 快速配置
+## 快速安装
 
-1. 如果你只是想直接使用 Frakio Work，推荐下载桌面版。打开 [GitHub Releases](https://github.com/MadsGao/frakio-work/releases)，目前桌面版仅支持苹果版本，完美适配 M 系列芯片。。当前 macOS 安装包尚未经 Apple 签名与公证，首次打开时如果系统提示该应用没有签名，所以 Mac用户第一次打卡有可能出现“已损坏，无法打开”的问题，可以在应用安装后，打开终端，输入：
+macOS 桌面版可以从 [GitHub Releases](https://github.com/MadsGao/frakio-work/releases) 下载。Apple Silicon 下载 `arm64`，Intel Mac 下载 `x64`。当前安装包尚未经 Apple 签名与公证；如果 macOS 阻止首次打开，请在 Finder 中按住 Control 点击应用并选择“打开”。也可以在安装后执行：
 
 ```bash
 xattr -dr com.apple.quarantine "/Applications/Frakio Work.app"
 ```
 
-就能解决无法打开的问题。
+### 自托管 Web UI
 
-2. 因为作者暂时没有 Windows 电脑，所以无法测试 Windows 的桌面版本，Windows 的用户可以先使用 Web Ui 的版本
+Web UI 与桌面版使用同一套工作台。原生自托管包内置 Node、Python、Hermes Runtime 和 Bridge，不需要预装 Node、Python 或 Hermes Agent。当前提供 macOS ARM64/x64、Windows x64 与 Linux x64 包。
 
-如果你是开发者，或者正在 Linux 上使用，可以从源码启动 Web UI。需要 Node.js 24、npm 和 Git；使用 Hermes 功能时，还需要本机已有可用的 Hermes Agent 环境，或者按应用内引导准备 Runtime。
+macOS 或 Linux：
+
+```bash
+curl -fsSL https://github.com/MadsGao/frakio-work/releases/latest/download/install.sh | sh
+```
+
+Windows PowerShell：
+
+```powershell
+irm https://github.com/MadsGao/frakio-work/releases/latest/download/install.ps1 | iex
+```
+
+安装完成后，服务会自动启动并只显示一次管理员密码。本机访问 `http://127.0.0.1:8787`，同一可信局域网内的设备可以使用主机局域网地址登录。可信局域网 HTTP 适合私有网络；如需公网访问，请自行通过 HTTPS 反向代理接入。服务管理命令为 `frakio-work start`、`stop`、`restart`、`status`、`logs`、`update`、`rollback` 和 `password reset`。
+
+Linux x64 还可以使用同一项目发布的 Docker 镜像：
+
+```bash
+docker run -d --name frakio-work \
+  -p 8787:8787 \
+  -v frakio-work-data:/data \
+  -v "$PWD:/workspace" \
+  ghcr.io/madsgao/frakio-work:latest
+```
+
+### 从源码开发
+
+源码开发需要 Node.js 24、npm、Git 和 uv：
 
 ```bash
 git clone https://github.com/MadsGao/frakio-work.git
 cd frakio-work
 npm ci
+npm run runtime:build
 npm run dev
 ```
 
-源码启动后，Web UI 默认位于 `http://127.0.0.1:5173`，本地 API 位于 `http://127.0.0.1:8787`。用户数据、密钥、日志、Runtime 和备份统一保存在 `~/.frakio-work`，不会写入源码仓库。
+开发模式的 Web UI 位于 `http://127.0.0.1:5173`，API 位于 `http://127.0.0.1:8787`。用户数据、密钥、日志、Runtime 和备份统一保存在 `~/.frakio-work`，不会写入源码仓库。
 
 
 ---

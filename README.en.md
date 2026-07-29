@@ -7,14 +7,45 @@ Frakio Work is a multi-agent workspace built around Hermes Agent. I have persona
 
 If you just want to use Frakio Work directly, the desktop app is recommended. Open [GitHub Releases](https://github.com/MadsGao/frakio-work/releases) and download the DMG that matches your computer architecture. Apple Silicon users should download `arm64`; Intel users should download `x64`. The current macOS installer is not yet Apple-signed or notarized. If macOS says it cannot verify the developer on first launch, right-click Frakio Work in Finder and choose **Open**.
 
-The desktop app includes the Web UI, the local API, and the Runtime files prepared with the package. You do not need to run `npm run dev` manually. When a new version is available, you can check GitHub Releases from the Settings page and open the matching download page.
+The desktop app includes the Web UI, local API, and bundled Runtime. You do not need to run `npm run dev` manually. When a new version is available, you can check GitHub Releases from Settings and open the matching download page.
 
-If you are a developer, or if you are using Windows or Linux, you can start the Web UI from source. You need Node.js 24, npm, and Git. To use Hermes features, you also need a working local Hermes Agent environment, or you can prepare the Runtime through the in-app guide.
+### Self-hosted Web UI
+
+The Web UI uses the same workbench as the desktop app. Native self-hosted packages include Node, Python, Hermes Runtime, and Bridge, so Node, Python, and Hermes Agent do not need to be installed separately. Packages are available for macOS ARM64/x64, Windows x64, and Linux x64.
+
+macOS or Linux:
+
+```bash
+curl -fsSL https://github.com/MadsGao/frakio-work/releases/latest/download/install.sh | sh
+```
+
+Windows PowerShell:
+
+```powershell
+irm https://github.com/MadsGao/frakio-work/releases/latest/download/install.ps1 | iex
+```
+
+The service starts automatically and prints the generated administrator password once. Open `http://127.0.0.1:8787` locally, or use the host's private LAN address from another device on the same trusted network. Trusted-LAN HTTP is intended for private networks; use your own HTTPS reverse proxy for public access. The `frakio-work` command supports `start`, `stop`, `restart`, `status`, `logs`, `update`, `rollback`, and `password reset`.
+
+Linux x64 also supports the Docker image published from this repository:
+
+```bash
+docker run -d --name frakio-work \
+  -p 8787:8787 \
+  -v frakio-work-data:/data \
+  -v "$PWD:/workspace" \
+  ghcr.io/madsgao/frakio-work:latest
+```
+
+### Development from source
+
+Source development requires Node.js 24, npm, Git, and uv.
 
 ```bash
 git clone https://github.com/MadsGao/frakio-work.git
 cd frakio-work
 npm ci
+npm run runtime:build
 npm run dev
 ```
 

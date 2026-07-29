@@ -25,6 +25,20 @@ await page.route('**/api/hermes/weixin/qrcode', async (route) => {
     body: JSON.stringify({ qrcode: 'frakio-e2e-weixin', qrcode_url: 'https://weixin.qq.com/x/frakio-e2e-weixin' }),
   });
 });
+await page.route('**/api/hermes-runtime/releases', async (route) => {
+  await route.fulfill({
+    status: 200,
+    contentType: 'application/json',
+    body: JSON.stringify({
+      releases: [{
+        tag: 'v2026.7.20',
+        releaseDate: '2026-07-20',
+        label: 'Hermes v2026.7.20',
+        url: 'https://github.com/NousResearch/hermes-agent/releases/tag/v2026.7.20',
+      }],
+    }),
+  });
+});
 
 try {
   await page.goto(baseUrl, { waitUntil: 'networkidle' });
@@ -46,11 +60,14 @@ try {
   }
   await page.screenshot({ path: 'output/playwright/frakio-release-workbench.png', fullPage: true });
   await page.getByRole('button', { name: '打开用户菜单' }).click();
-  await page.getByRole('button', { name: '设置', exact: true }).click();
+  await page.getByRole('menuitem', { name: '设置', exact: true }).click();
   await page.waitForTimeout(1000);
-  const updatesHeading = page.getByRole('heading', { name: '版本与更新' });
+  await page.getByRole('button', { name: '版本更新', exact: true }).click();
+  const updatesHeading = page.getByRole('heading', { name: '版本更新', exact: true });
   await updatesHeading.scrollIntoViewIfNeeded();
   assert.equal(await updatesHeading.isVisible(), true, '设置页未显示版本更新区域');
+  assert.equal(await page.getByText('更新由 Frakio Work 管理的 Hermes Agent 源码与运行配置。').count(), 0, '版本页仍显示 Hermes Agent 源码更新模块');
+  assert.equal(await page.getByLabel('官方稳定版本').count(), 1, '版本页缺少 Runtime 官方版本选择器');
   await page.screenshot({ path: 'output/playwright/frakio-release-updates.png', fullPage: true });
   await page.getByRole('button', { name: '频道', exact: true }).click();
   await page.getByRole('heading', { name: '频道', exact: true }).waitFor({ state: 'visible' });
@@ -59,7 +76,7 @@ try {
   const weixinDialog = page.getByRole('dialog', { name: '微信扫码登录' });
   await weixinDialog.waitFor({ state: 'visible' });
   assert.equal(await weixinDialog.locator('.weixin-qr-code svg').count(), 1, '微信登录弹窗未显示内嵌二维码');
-  assert.equal(await weixinDialog.getByText('请使用微信扫码登录。').isVisible(), true, '微信登录弹窗未显示等待状态');
+  await weixinDialog.getByText('请使用微信扫码登录。').waitFor({ state: 'visible' });
   await page.screenshot({ path: 'output/playwright/frakio-release-weixin-qr.png', fullPage: true });
   await weixinDialog.getByRole('button', { name: '关闭' }).click();
   await weixinDialog.waitFor({ state: 'hidden' });

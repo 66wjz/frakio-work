@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { appUpdateStatus, compareVersions, resetAppUpdateCache, selectReleaseAsset } from './app-update.mjs';
+import { appUpdateStatus, compareVersions, resetAppUpdateCache, selectChecksumAsset, selectReleaseAsset } from './app-update.mjs';
 
 test('semantic versions compare numerically', () => {
   assert.equal(compareVersions('0.10.0', '0.9.9'), 1);
@@ -19,6 +19,16 @@ test('release asset selection matches desktop platform and architecture', () => 
   assert.equal(selectReleaseAsset(assets, { platform: 'win32', arch: 'arm64' }), null);
 });
 
+test('checksum asset selection matches the mac architecture', () => {
+  const assets = [
+    { name: 'Frakio-Work-mac-x64-SHA256SUMS.txt' },
+    { name: 'Frakio-Work-mac-arm64-SHA256SUMS.txt' },
+  ];
+  assert.equal(selectChecksumAsset(assets, { platform: 'darwin', arch: 'arm64' })?.name, assets[1].name);
+  assert.equal(selectChecksumAsset(assets, { platform: 'darwin', arch: 'x64' })?.name, assets[0].name);
+  assert.equal(selectChecksumAsset(assets, { platform: 'win32', arch: 'x64' }), null);
+});
+
 test('update status maps a GitHub release without network access', async () => {
   resetAppUpdateCache();
   const status = await appUpdateStatus({
@@ -26,10 +36,14 @@ test('update status maps a GitHub release without network access', async () => {
     packaged: true,
     platform: 'darwin',
     arch: 'arm64',
-    fetchImpl: async () => ({ ok: true, json: async () => [{ tag_name: 'v0.2.0', prerelease: true, html_url: 'https://github.com/MadsGao/frakio-work/releases/tag/v0.2.0', assets: [{ name: 'Frakio Work-0.2.0-arm64.dmg', browser_download_url: 'https://github.com/MadsGao/frakio-work/releases/download/v0.2.0/app.dmg' }] }] }),
+    fetchImpl: async () => ({ ok: true, json: async () => [{ tag_name: 'v0.2.0', prerelease: true, html_url: 'https://github.com/MadsGao/frakio-work/releases/tag/v0.2.0', assets: [
+      { name: 'Frakio Work-0.2.0-arm64.dmg', browser_download_url: 'https://github.com/MadsGao/frakio-work/releases/download/v0.2.0/app.dmg' },
+      { name: 'Frakio-Work-mac-arm64-SHA256SUMS.txt', browser_download_url: 'https://github.com/MadsGao/frakio-work/releases/download/v0.2.0/Frakio-Work-mac-arm64-SHA256SUMS.txt' },
+    ] }] }),
   });
   assert.equal(status.updateAvailable, true);
   assert.equal(status.asset.name, 'Frakio Work-0.2.0-arm64.dmg');
+  assert.equal(status.checksumAsset.name, 'Frakio-Work-mac-arm64-SHA256SUMS.txt');
 });
 
 test('update status falls back to the public releases feed when API rate limited', async () => {
@@ -47,6 +61,20 @@ test('update status falls back to the public releases feed when API rate limited
   assert.equal(status.latestVersion, '0.2.0');
   assert.equal(status.updateAvailable, true);
   assert.match(status.asset.browser_download_url, /x64\.dmg$/);
+  assert.match(status.checksumAsset.browser_download_url, /mac-x64-SHA256SUMS\.txt$/);
+});
+
+test('release notes preserve detailed content up to the expanded limit', async () => {
+  resetAppUpdateCache();
+  const notes = 'x'.repeat(12000);
+  const status = await appUpdateStatus({
+    currentVersion: '0.1.0',
+    packaged: true,
+    platform: 'darwin',
+    arch: 'arm64',
+    fetchImpl: async () => ({ ok: true, json: async () => [{ tag_name: 'v0.2.0', body: notes, assets: [] }] }),
+  });
+  assert.equal(status.notes.length, notes.length);
 });
 
 test('release feed fallback exposes the Windows x64 installer', async () => {

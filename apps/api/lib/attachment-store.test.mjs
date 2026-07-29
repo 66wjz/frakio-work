@@ -37,6 +37,23 @@ test('attachment claims persist and claimed files cannot be removed as drafts', 
   await assert.rejects(store.metadataFor(attachment.id), { status: 404 });
 });
 
+test('attachment clones have independent files and ownership', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-attachments-'));
+  const store = createAttachmentStore(root);
+  const source = await store.save({ name: 'notes.md', mimeType: 'text/markdown', data: Buffer.from('# Branch-safe notes') });
+  const [sourceMetadata] = await store.resolveMany([source.id]);
+  await store.claim([sourceMetadata], 'thread-source', 'message-source');
+
+  const [cloned] = await store.cloneMany([source.id], 'thread-branch', 'message-branch');
+  assert.notEqual(cloned.id, source.id);
+  assert.equal((await store.metadataFor(cloned.id)).threadId, 'thread-branch');
+  assert.deepEqual(await readFile((await store.content(cloned.id)).filePath), Buffer.from('# Branch-safe notes'));
+
+  await store.removeForThreads(['thread-source']);
+  await assert.rejects(store.content(source.id), { status: 404 });
+  assert.deepEqual(await readFile((await store.content(cloned.id)).filePath), Buffer.from('# Branch-safe notes'));
+});
+
 test('attachment content rejects a stored path outside its attachment directory', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-attachments-'));
   const store = createAttachmentStore(root);

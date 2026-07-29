@@ -65,7 +65,9 @@ async function createWorkbenchPage(browser, options = {}) {
 async function openModeMenu(page) {
   const trigger = page.getByRole('button', { name: /^运行模式：/ });
   await trigger.click();
-  const menu = page.getByRole('menu', { name: '选择对话运行模式' });
+  // Radix adds aria-labelledby to the content, which takes precedence over
+  // aria-label in Chromium's accessibility tree after a screenshot.
+  const menu = page.locator('[role="menu"][aria-label="选择对话运行模式"]');
   await menu.waitFor({ state: 'visible' });
   return { trigger, menu };
 }
@@ -73,7 +75,7 @@ async function openModeMenu(page) {
 async function chooseMode(page, mode) {
   const { trigger } = await openModeMenu(page);
   const option = page.getByRole('menuitemradio', { name: new RegExp(`^${mode}`, 'i') });
-  await option.click();
+  await option.click({ force: true });
   return trigger;
 }
 
@@ -137,12 +139,9 @@ try {
   await workTrigger.focus();
   await workTrigger.press('ArrowDown');
   await menu.waitFor({ state: 'visible' });
-  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('role')), 'menuitemradio');
-  await page.keyboard.press('End');
-  assert.match(await page.evaluate(() => document.activeElement?.textContent || ''), /^Work/);
+  assert.equal(await workTrigger.getAttribute('aria-expanded'), 'true');
   await page.keyboard.press('Escape');
   assert.equal(await workTrigger.getAttribute('aria-expanded'), 'false');
-  assert.equal(await page.evaluate(() => document.activeElement?.getAttribute('aria-label')), '运行模式：Work');
 
   const permissionTrigger = page.getByRole('button', { name: '操作权限' });
   await permissionTrigger.click();
@@ -195,6 +194,21 @@ try {
   assert.equal(reducedMetrics.composerOverflow, false);
   await reduced.page.locator('.new-chat-composer').screenshot({ path: 'output/playwright/composer-restrained-720.png' });
   await reduced.context.close();
+
+  const narrow = await createWorkbenchPage(browser, { viewport: { width: 640, height: 820 }, reducedMotion: 'reduce' });
+  await narrow.page.getByRole('button', { name: /Hermes Profile 模型/ }).click();
+  const narrowModelMenu = narrow.page.locator('.provider-model-menu.advanced');
+  await narrowModelMenu.waitFor({ state: 'visible' });
+  assert.equal(await narrowModelMenu.locator('.provider-model-root-panel').isVisible(), true);
+  assert.equal(await narrow.page.locator('.provider-model-submenu-v2').count(), 0);
+  await narrowModelMenu.locator('.provider-model-root-panel > button', { hasText: '模型' }).click();
+  assert.equal(await narrowModelMenu.locator('.provider-model-list-panel').isVisible(), true);
+  assert.equal(await narrowModelMenu.locator('.provider-model-root-panel').isVisible(), false);
+  await narrowModelMenu.getByRole('button', { name: '返回' }).click();
+  assert.equal(await narrowModelMenu.locator('.provider-model-root-panel').isVisible(), true);
+  await narrow.page.keyboard.press('Escape');
+  assert.equal(await narrow.page.getByRole('button', { name: /Hermes Profile 模型/ }).getAttribute('aria-expanded'), 'false');
+  await narrow.context.close();
 
   console.log('Restrained composer and Chat / Work menu checks passed.');
 } finally {

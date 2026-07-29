@@ -14,6 +14,21 @@ test('normalizes file, search, command and collaboration tools into semantic act
   assert.equal(normalizeRunActivityItem({ tool_name: 'mcp__workbench__hermes_workbench_collaboration_plan_get', args: { workflowId: 'flow-1' } }).kind, 'collaboration');
 });
 
+test('prefers model semantics and classifies common commands without exposing secrets', () => {
+  const modeled = normalizeRunActivityItem({
+    tool_name: 'exec_command',
+    display_name: '查看版本记录',
+    intent: '确认 sk-12345678901234567890 最近有哪些重大更新',
+    args: { command: 'git log --oneline -20' },
+  }, 'completed');
+  assert.equal(modeled.displayName, '查看版本记录');
+  assert.equal(modeled.intent, '确认 sk-*** 最近有哪些重大更新');
+
+  const fallback = normalizeRunActivityItem({ tool_name: 'exec_command', args: { command: 'rg -n "version" .' } }, 'completed');
+  assert.equal(fallback.displayName, '搜索了');
+  assert.equal(fallback.intent, '在项目中查找匹配内容');
+});
+
 test('redacts and bounds persisted result previews', () => {
   const preview = activityResultPreview(`authorization: Bearer secret-value\napi_key=hidden-value\nsk-abcdefghijklmnop\n${Array.from({ length: 30 }, (_, index) => `line ${index}`).join('\n')}`);
   assert.doesNotMatch(preview, /secret-value|hidden-value|abcdefghijklmnop/);

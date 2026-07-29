@@ -22,7 +22,7 @@ function createRequestBody(modelId, patch = {}) {
   return { model: modelId, input: 'Reply OK.', max_output_tokens: 8, ...patch };
 }
 
-export async function probeResponsesCapabilities({ modelId, request, deadlineMs = 90000 }) {
+export async function probeResponsesCapabilities({ modelId, request, deadlineMs = 90000, onStage = () => {} }) {
   const startedAt = Date.now();
   const send = async (patch = {}) => {
     if (Date.now() - startedAt >= deadlineMs) return { ok: false, status: 0, error: '能力探测超过整体时间限制。' };
@@ -33,6 +33,7 @@ export async function probeResponsesCapabilities({ modelId, request, deadlineMs 
     }
   };
 
+  onStage('正在验证连接');
   const baseline = await send();
   const baselineStatus = classifyProbeResult(baseline);
   if (!baseline.ok) {
@@ -43,6 +44,7 @@ export async function probeResponsesCapabilities({ modelId, request, deadlineMs 
 
   const results = [{ kind: 'connection', option: 'standard', mappedValue: 'standard', status: 'accepted', error: '' }];
   const reasoningMap = {};
+  onStage('正在探测推理档位');
   for (const level of REASONING_LEVELS) {
     const mappedValue = level === 'off' ? 'none' : level;
     const result = probeResult('reasoning', level, mappedValue, await send({ reasoning: { effort: mappedValue } }));
@@ -56,6 +58,7 @@ export async function probeResponsesCapabilities({ modelId, request, deadlineMs 
     else if (result.status === 'unsupported') reasoningMap[level] = null;
   }
 
+  onStage('正在检测快速模式');
   const priorityResult = probeResult('service_tier', 'priority', 'priority', await send({ service_tier: 'priority' }));
   if (priorityResult.status === 'auth_failed') {
     const error = new Error(`配置验证失败：${priorityResult.error}`);

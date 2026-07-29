@@ -31,7 +31,8 @@ async function startFakeBridge(t) {
       } else {
         response = { ok: false, error: `Unsupported fake action: ${request.action}` };
       }
-      setTimeout(() => socket.end(`${JSON.stringify(response)}\n`), request.action === 'chat' ? 30 : 0);
+      const delayMs = request.action === 'chat' ? 30 : request.action === 'get_output' ? 250 : 0;
+      setTimeout(() => socket.end(`${JSON.stringify(response)}\n`), delayMs);
     });
   });
   server.listen(0, '127.0.0.1');
@@ -107,6 +108,8 @@ test('two conversations can run concurrently without losing either thread state'
   for (const [index, { thread }] of conversations.entries()) {
     const completedThread = await fetch(`${baseUrl}/api/threads/${thread.id}`).then((response) => response.json());
     assert.equal(completedThread.thread.runStatus, 'idle');
-    assert.ok(completedThread.thread.messages.some((message) => message.content === `reply for ${runs[index].runId}`));
+    const completedMessage = completedThread.thread.messages.find((message) => message.content === `reply for ${runs[index].runId}`);
+    assert.ok(completedMessage);
+    assert.ok(completedMessage.processingDurationMs > 0);
   }
 });

@@ -19,6 +19,16 @@ test('runtime build targets select native Node archives', () => {
     nodeArchiveName: 'node-v24.16.0-win-arm64.zip',
     pythonExecutableParts: ['python.exe'],
   });
+  assert.deepEqual(runtimeBuildTarget('linux', 'x64', '24.16.0'), {
+    runtimePlatform: 'linux-x64',
+    nodeArchiveName: 'node-v24.16.0-linux-x64.tar.gz',
+    pythonExecutableParts: ['bin', 'python3'],
+  });
+  assert.deepEqual(runtimeBuildTarget('linux', 'arm64', '24.16.0'), {
+    runtimePlatform: 'linux-arm64',
+    nodeArchiveName: 'node-v24.16.0-linux-arm64.tar.gz',
+    pythonExecutableParts: ['bin', 'python3'],
+  });
 });
 
 test('portable Python roots match native managed layouts', () => {

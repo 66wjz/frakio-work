@@ -1,0 +1,11 @@
+export type PreviewItem = { src: string; title?: string; label?: string };
+export type PreviewSpec = PreviewItem & { items?: PreviewItem[] };
+export type DataValue = string | number | boolean | null;
+export type ColumnDef = { key: string; label?: string; type?: string };
+export type DataSpec = { title?: string; filename?: string; sheetName?: string; columns?: Array<string | ColumnDef>; rows?: Array<DataValue[] | Record<string, DataValue>>; src?: string; groupBy?: string };
+export function splitStreamingMarkdown(content: string, streaming?: boolean): string[];
+export function hasUnclosedMarkdownFence(content: string): boolean;
+export function remarkCjkStrong(): (tree: any) => void;
+export function markStreamRevealTail(tree: any, appendedGraphemes: number, revision: number): boolean;
+export function normalizePreviewSpec(source: string): PreviewSpec | null;
+export function normalizeDataSpec(spec: DataSpec): { columns: string[]; columnDefs: Array<{ key: string; label: string; type: string }>; rows: DataValue[][] };

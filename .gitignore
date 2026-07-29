@@ -27,6 +27,8 @@ preview*.png
 design-qa.md
 playwright-report/
 test-results/
+artifacts/
+qa-*.png
 
 # Operating-system and language caches
 .DS_Store

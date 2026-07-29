@@ -41,3 +41,39 @@ test('session cookie and request header authorize same-origin writes', () => {
   }, response(), () => { passed = true; });
   assert.equal(passed, true);
 });
+
+test('managed Web accepts matching private LAN origins and rejects public hosts', () => {
+  const security = createLocalSecurity({ port: 8787, development: false, managedWeb: true });
+  let privatePassed = false;
+  security.protect({
+    method: 'GET',
+    get(name) {
+      if (name === 'Origin') return 'http://192.168.1.20:8787';
+      if (name === 'Host') return '192.168.1.20:8787';
+      return '';
+    },
+  }, response(), () => { privatePassed = true; });
+  assert.equal(privatePassed, true);
+
+  let privateTlsPassed = false;
+  security.protect({
+    method: 'GET',
+    get(name) {
+      if (name === 'Origin') return 'https://192.168.1.20:8787';
+      if (name === 'Host') return '192.168.1.20:8787';
+      return '';
+    },
+  }, response(), () => { privateTlsPassed = true; });
+  assert.equal(privateTlsPassed, true);
+
+  const publicResponse = response();
+  security.protect({
+    method: 'GET',
+    get(name) {
+      if (name === 'Origin') return 'http://203.0.113.10:8787';
+      if (name === 'Host') return '203.0.113.10:8787';
+      return '';
+    },
+  }, publicResponse, () => assert.fail('public origin reached handler'));
+  assert.equal(publicResponse.statusCode, 403);
+});

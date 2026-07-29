@@ -6,19 +6,21 @@ import os from 'node:os';
 import path from 'node:path';
 import { promisify } from 'node:util';
 import { fileURLToPath } from 'node:url';
+import { pinnedHermesRelease } from './hermes-runtime-version.mjs';
 import { portablePythonRoot, runtimeBuildTarget } from './runtime-build-platform.mjs';
 
 const execFileAsync = promisify(execFile);
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const projectRoot = path.resolve(__dirname, '..');
 const officialRepo = 'https://github.com/NousResearch/hermes-agent.git';
-const bridgeProtocolVersion = 2;
+const bridgeProtocolVersion = 3;
 const pythonVersion = process.env.FRAKIO_PYTHON_VERSION || '3.12.12';
 const nodeVersion = process.env.FRAKIO_NODE_VERSION || '24.16.0';
-const pinnedHermesTag = process.env.HERMES_AGENT_TAG || 'v2026.7.7.2';
+const pinnedHermesTag = process.env.HERMES_AGENT_TAG || pinnedHermesRelease.tag;
 const aiohttpVersion = '3.14.1';
 const mcpVersion = '1.26.0';
 const starletteVersion = '1.0.1';
+const ddgsVersion = '9.14.4';
 
 const targetArch = process.env.FRAKIO_WORK_TARGET_ARCH || process.arch;
 const buildTarget = runtimeBuildTarget(process.platform, targetArch, nodeVersion);
@@ -144,6 +146,16 @@ async function installPortableNode(staging, downloadsRoot) {
   const extracted = path.join(downloadsRoot, archiveName.replace(/\.(?:tar\.gz|zip)$/, ''));
   await command('tar', [archiveName.endsWith('.zip') ? '-xf' : '-xzf', archivePath, '-C', downloadsRoot]);
   await cp(extracted, path.join(staging, 'node'), { recursive: true, dereference: true, preserveTimestamps: true });
+  if (process.platform !== 'win32') {
+    const bin = path.join(staging, 'node', 'bin');
+    for (const [name, target] of [
+      ['npm', '../lib/node_modules/npm/bin/npm-cli.js'],
+      ['npx', '../lib/node_modules/npm/bin/npx-cli.js'],
+    ]) {
+      await unlink(path.join(bin, name)).catch(() => null);
+      await symlink(target, path.join(bin, name));
+    }
+  }
 }
 
 async function checkoutHermes(sourceDir) {
@@ -187,21 +199,27 @@ await mkdir(staging, { recursive: true });
 
 try {
   const commit = await checkoutHermes(sourceDir);
+  if (!process.env.HERMES_AGENT_TAG && commit !== pinnedHermesRelease.commit) {
+    throw new Error(`Hermes Agent ${pinnedHermesRelease.tag} resolved to unexpected commit ${commit}.`);
+  }
   const pyproject = await readFile(path.join(sourceDir, 'pyproject.toml'), 'utf8');
   const version = pyproject.match(/^version\s*=\s*"([^"]+)"/m)?.[1] || '';
   if (!version) throw new Error(`Cannot read Hermes Agent version from ${pinnedHermesTag}.`);
+  if (!process.env.HERMES_AGENT_TAG && version !== pinnedHermesRelease.version) {
+    throw new Error(`Hermes Agent ${pinnedHermesRelease.tag} reports unexpected version ${version}.`);
+  }
   const python = await installPortablePython(staging);
   await installPortableNode(staging, downloadsRoot);
   const portablePythonEnv = { HERMES_AGENT_ROOT: path.join(staging, 'python'), PIP_BREAK_SYSTEM_PACKAGES: '1' };
   await command(python, ['-m', 'ensurepip', '--upgrade'], { cwd: staging, env: portablePythonEnv });
-  await command(python, ['-m', 'pip', 'install', '--upgrade', '--force-reinstall', '--no-cache-dir', `${sourceDir}[mcp]`, `aiohttp==${aiohttpVersion}`, `mcp==${mcpVersion}`, `starlette==${starletteVersion}`], {
+  await command(python, ['-m', 'pip', 'install', '--upgrade', '--force-reinstall', '--no-cache-dir', `${sourceDir}[mcp]`, `aiohttp==${aiohttpVersion}`, `mcp==${mcpVersion}`, `starlette==${starletteVersion}`, `ddgs==${ddgsVersion}`], {
     cwd: sourceDir,
     env: portablePythonEnv,
   });
   await rewritePythonEntrypoints(staging);
   const versionOutput = await command(python, ['-m', 'hermes_cli.main', '--version'], { cwd: staging, timeout: 30000, env: { HERMES_AGENT_ROOT: path.join(staging, 'python') } });
   if (!versionOutput.includes(version)) throw new Error(`Built runtime version mismatch: ${versionOutput}`);
-  await command(python, ['-c', `import aiohttp, hermes_cli, hermes_cli.main, importlib.metadata as metadata, mcp, starlette; assert aiohttp.__version__ == "${aiohttpVersion}"; assert metadata.version("mcp") == "${mcpVersion}"; assert starlette.__version__ == "${starletteVersion}"; print("Hermes, aiohttp and MCP imports ready")`], { cwd: staging, timeout: 30000 });
+  await command(python, ['-c', `import aiohttp, ddgs, hermes_cli, hermes_cli.main, importlib.metadata as metadata, mcp, starlette; assert aiohttp.__version__ == "${aiohttpVersion}"; assert metadata.version("mcp") == "${mcpVersion}"; assert starlette.__version__ == "${starletteVersion}"; assert metadata.version("ddgs") == "${ddgsVersion}"; from tools.web_tools import _ensure_web_plugins_loaded; _ensure_web_plugins_loaded(); from agent.web_search_registry import get_provider; provider = get_provider("ddgs"); assert provider is not None and provider.is_available() and provider.supports_search(); print("Hermes, aiohttp, MCP and DDGS imports ready")`], { cwd: staging, timeout: 30000 });
   const bridgeScript = path.join(projectRoot, 'runtime', 'agent-bridge', 'python', 'hermes_bridge.py');
   await command(python, ['-m', 'py_compile', bridgeScript], { cwd: staging, timeout: 30000 });
   await verifyRuntimeApi(python, path.join(staging, 'python'));
@@ -216,7 +234,7 @@ try {
     sourceCommit: commit,
     pythonVersion,
     nodeVersion,
-    pythonDependencies: { aiohttp: aiohttpVersion, mcp: mcpVersion, starlette: starletteVersion },
+    pythonDependencies: { aiohttp: aiohttpVersion, mcp: mcpVersion, starlette: starletteVersion, ddgs: ddgsVersion },
     builtAt: new Date().toISOString(),
     bridgeProtocolVersion,
   };

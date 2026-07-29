@@ -78,9 +78,25 @@ test('fresh install stays blank until Hermes profiles are explicitly synchronize
   });
   assert.equal(conversationResponse.status, 200);
   const conversation = await conversationResponse.json();
+  assert.deepEqual(conversation.thread.messages, []);
   assert.deepEqual(conversation.thread.agentRunOverrides, {
     'local-agent': { reasoningEffort: 'high', speedMode: 'fast' },
   });
+  const workspaceResponse = await fetch(`${ctx.baseUrl}/api/workspaces`, {
+    method: 'POST',
+    headers: { ...ctx.writeHeaders, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Clean project', mode: 'create', parentPath: ctx.parent }),
+  });
+  assert.equal(workspaceResponse.status, 200);
+  const workspace = await workspaceResponse.json();
+  assert.deepEqual(workspace.thread.messages, []);
+  const workspaceThreadResponse = await fetch(`${ctx.baseUrl}/api/workspaces/${workspace.workspace.id}/threads`, {
+    method: 'POST',
+    headers: { ...ctx.writeHeaders, 'content-type': 'application/json' },
+    body: JSON.stringify({ title: 'Clean project thread' }),
+  });
+  assert.equal(workspaceThreadResponse.status, 200);
+  assert.deepEqual((await workspaceThreadResponse.json()).thread.messages, []);
   const patchResponse = await fetch(`${ctx.baseUrl}/api/threads/${conversation.thread.id}`, {
     method: 'PATCH',
     headers: { ...ctx.writeHeaders, 'content-type': 'application/json' },
@@ -107,6 +123,7 @@ test('creating a model-less Agent writes no implicit model and persists gateway 
   const config = await readFile(path.join(ctx.hermesHome, 'profiles', 'fresh-agent', 'config.yaml'), 'utf8');
   assert.doesNotMatch(config, /(^|\n)model:/);
   assert.doesNotMatch(config, /gpt-|deepseek|Hermes default/i);
+  assert.match(config, /approvals:\s*\n\s+mode: smart/);
   const state = JSON.parse(await readFile(path.join(ctx.home, 'data', 'workbench-state.json'), 'utf8'));
   assert.equal(state.agents.length, 1);
   assert.equal(state.ui.defaultAgentId, 'fresh-agent');
@@ -204,10 +221,10 @@ test('legacy cleanup removes only untouched built-in content and creates an idem
   await module.createApp();
   const cleaned = JSON.parse(await readFile(path.join(dataDir, 'workbench-state.json'), 'utf8'));
   assert.deepEqual(cleaned.agents.map((agent) => agent.id), ['max']);
-  assert.deepEqual(cleaned.models.map((model) => model.id), ['model_hermes_reasoning']);
+  assert.deepEqual(cleaned.models.map((model) => model.id), []);
   assert.deepEqual(cleaned.threads, []);
   assert.deepEqual(cleaned.vaults, []);
-  assert.equal(cleaned.ui.defaultAgentId, '');
+  assert.equal(cleaned.ui.defaultAgentId, 'max');
   assert.equal(cleaned.ui.defaultModel, '');
   assert.equal(cleaned.workspaces[0].activeThreadId, null);
   assert.equal(cleaned.workspaces[0].vaultId, null);

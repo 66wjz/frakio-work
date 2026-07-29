@@ -5,6 +5,8 @@ import asyncio
 import json
 import os
 import queue
+import re
+import shlex
 import sys
 import threading
 import time
@@ -12,6 +14,7 @@ import traceback
 import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
@@ -43,6 +46,7 @@ from bridge_runtime import (
     _title_user_message,
     _tool_names_from_definitions,
 )
+from rich_tool_metadata import enrich_tool_definitions, is_metadata_schema_error, strip_tool_metadata
 
 
 _PROTECTED_RUN_OVERRIDE_KEYS = {
@@ -51,15 +55,121 @@ _PROTECTED_RUN_OVERRIDE_KEYS = {
     "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
 }
 
+_PLAN_READ_TOOLS = {
+    "read_file",
+    "search_files",
+    "file_search",
+    "find_files",
+    "list_directory",
+    "grep",
+    "glob",
+    "web_search",
+    "web_extract",
+    "web_fetch",
+    "browser_navigate",
+    "browser_snapshot",
+    "browser_scroll",
+    "browser_back",
+    "browser_get_images",
+    "browser_vision",
+    "view_image",
+    "image_view",
+    "hermes_workbench_protocol_get",
+    "hermes_workbench_use_threads_list",
+    "hermes_workbench_use_thread_get",
+    "hermes_workbench_use_projects_list",
+    "hermes_workbench_use_agents_list",
+    "hermes_workbench_use_models_list",
+    "hermes_workbench_use_runtime_status",
+    "hermes_workbench_use_mcp_servers_list",
+    "hermes_workbench_use_user_profile_get",
+    "hermes_workbench_collaboration_context_resolve",
+    "hermes_workbench_collaboration_plan_get",
+    "hermes_workbench_plan_user_input_request",
+    "hermes_workbench_plan_submit",
+    "hermes_workbench_api_catalog_get",
+}
+
+_VERIFIED_WORKBENCH_MCP_SERVERS = {
+    "hermes_workbench_use",
+    "hermes_workbench_api",
+}
+_MCP_TOOL_NAME_PATTERN = re.compile(
+    r"mcp__(?P<server>[a-zA-Z0-9][a-zA-Z0-9_-]*)__"
+    r"(?P<tool>[a-zA-Z0-9][a-zA-Z0-9_-]*)"
+)
+
+
+def _canonical_plan_tool_name(tool_name: Any) -> str:
+    name = str(tool_name or "").strip()
+    if not name.startswith("mcp__"):
+        return name
+    match = _MCP_TOOL_NAME_PATTERN.fullmatch(name)
+    if not match or match.group("server") not in _VERIFIED_WORKBENCH_MCP_SERVERS:
+        return name
+    return match.group("tool")
+
+
+def _safe_plan_terminal_command(raw_command: Any) -> bool:
+    command = str(raw_command or "").strip()
+    if not command or any(token in command for token in ("\n", "\r", "|", ">", "<", ";", "&&", "||", "`", "$(", "${")):
+        return False
+    try:
+        parts = shlex.split(command, posix=True)
+    except ValueError:
+        return False
+    if parts == ["pwd"]:
+        return True
+    if len(parts) < 2 or parts[0] != "git":
+        return False
+    subcommand = parts[1]
+    args = parts[2:]
+    if subcommand == "branch":
+        return args == ["--show-current"]
+    if subcommand not in {"status", "diff", "log", "show", "rev-parse", "ls-files"}:
+        return False
+    forbidden = {
+        "--output",
+        "--ext-diff",
+        "--textconv",
+        "--exec-path",
+        "--git-dir",
+        "--work-tree",
+        "--config-env",
+    }
+    for arg in args:
+        normalized = str(arg).split("=", 1)[0]
+        if normalized in forbidden or arg == "-c" or arg.startswith("-c"):
+            return False
+    return True
+
+
+def _plan_tool_allowed(tool_name: Any, args: Any) -> bool:
+    name = _canonical_plan_tool_name(tool_name)
+    if name in _PLAN_READ_TOOLS:
+        return True
+    if name == "hermes_workbench_api_request":
+        payload = args if isinstance(args, dict) else {}
+        method = str(payload.get("method") or "GET").strip().upper()
+        return method == "GET"
+    if name in {"terminal", "terminal_tool", "run_terminal_command"}:
+        payload = args if isinstance(args, dict) else {}
+        return _safe_plan_terminal_command(payload.get("command") or payload.get("cmd"))
+    return False
+
 
 @contextmanager
 def _temporary_run_overrides(agent: Any, reasoning_effort: str | None = None, speed_mode: str | None = None, speed_provider_mode: str | None = None, runtime_overrides: dict[str, Any] | None = None):
     saved_reasoning_config = getattr(agent, "reasoning_config", None)
     saved_service_tier = getattr(agent, "service_tier", None)
     saved_request_overrides = dict(getattr(agent, "request_overrides", {}) or {})
+    saved_tools = getattr(agent, "tools", None)
     did_override_reasoning = False
     did_override_speed = speed_mode in {"standard", "fast"}
     runtime_overrides = runtime_overrides if isinstance(runtime_overrides, dict) else {}
+    disable_tools = runtime_overrides.get("disable_tools") is True
+    if disable_tools:
+        agent.tools = []
     direct_reasoning = runtime_overrides.get("reasoning_config")
     direct_service_tier = runtime_overrides.get("service_tier")
     direct_request_overrides = runtime_overrides.get("request_overrides")
@@ -101,6 +211,8 @@ def _temporary_run_overrides(agent: Any, reasoning_effort: str | None = None, sp
     try:
         yield
     finally:
+        if disable_tools:
+            agent.tools = saved_tools
         if did_override_reasoning:
             agent.reasoning_config = saved_reasoning_config
         if did_override_speed:
@@ -205,13 +317,84 @@ class AgentPool:
         self._approval_requests: dict[str, queue.Queue[str]] = {}
         self._gateway_approval_requests: dict[str, str] = {}
         self._gateway_approval_pattern_keys: dict[str, list[str]] = {}
+        self._approval_allowed_choices: dict[str, set[str]] = {}
         self._compression_requests: dict[str, queue.Queue[dict[str, Any]]] = {}
         self._clarify_requests: dict[str, queue.Queue[str]] = {}
         self._run_context = threading.local()
         self._approval_handlers: dict[str, Callable[..., str]] = {}
         self._tool_progress_events: dict[tuple[str, str, str], list[dict[str, Any]]] = {}
+        self._tool_semantics: dict[tuple[str, str], dict[str, str]] = {}
+        self._plan_mode_sessions: set[str] = set()
+        self._install_rich_tool_middleware()
         self._exec_ask_depth = 0
         self._exec_ask_previous: str | None = None
+
+    def _install_rich_tool_middleware(self) -> None:
+        try:
+            from hermes_cli.plugins import get_plugin_manager
+
+            manager = get_plugin_manager()
+            callbacks = manager._middleware.setdefault("tool_request", [])
+            if not any(getattr(callback, "_frakio_rich_tool_metadata", False) for callback in callbacks):
+                def capture(**kwargs):
+                    cleaned, metadata = strip_tool_metadata(kwargs.get("args"))
+                    session_id = str(kwargs.get("session_id") or "")
+                    tool_call_id = str(kwargs.get("tool_call_id") or "")
+                    if session_id and tool_call_id and (metadata["display_name"] or metadata["intent"]):
+                        with self._lock:
+                            self._tool_semantics[(session_id, tool_call_id)] = metadata
+                    return {"args": cleaned, "middleware": "frakio.rich-tool-metadata"}
+
+                capture._frakio_rich_tool_metadata = True
+                callbacks.append(capture)
+            execution_callbacks = manager._middleware.setdefault("tool_execution", [])
+            execution_callbacks[:] = [callback for callback in execution_callbacks if not getattr(callback, "_frakio_plan_guard", False)]
+
+            def guard(**kwargs):
+                next_call = kwargs.get("next_call")
+                args = kwargs.get("args") if isinstance(kwargs.get("args"), dict) else {}
+                session_id = str(kwargs.get("session_id") or "")
+                tool_name = str(kwargs.get("tool_name") or "")
+                with self._lock:
+                    plan_mode = session_id in self._plan_mode_sessions
+                if plan_mode and not _plan_tool_allowed(tool_name, args):
+                    self._append_event(session_id, {
+                        "event": "plan.guard.blocked",
+                        "tool_name": tool_name,
+                    })
+                    return json.dumps({
+                        "ok": False,
+                        "error": "PLAN_MUTATION_BLOCKED",
+                        "message": "计划模式只允许只读调查和受控计划工具。请先提交计划并等待用户批准后再执行。",
+                        "tool": tool_name,
+                    }, ensure_ascii=False)
+                if callable(next_call):
+                    return next_call(args)
+                return args
+
+            guard._frakio_plan_guard = True
+            execution_callbacks.insert(0, guard)
+        except Exception as exc:
+            print(f"[hermes_bridge] rich tool middleware unavailable: {exc}", file=sys.stderr, flush=True)
+
+    def _tool_semantic_fields(self, session_id: str, tool_call_id: Any, consume: bool = False) -> dict[str, str]:
+        key = (session_id, str(tool_call_id or ""))
+        with self._lock:
+            semantics = getattr(self, "_tool_semantics", None)
+            if not isinstance(semantics, dict):
+                return {}
+            metadata = semantics.pop(key, {}) if consume else semantics.get(key, {})
+        return dict(metadata or {})
+
+    def _configure_rich_tool_descriptions(self, session: AgentSession, enabled: bool) -> None:
+        original = session.config.get("original_tools")
+        if not isinstance(original, list):
+            original = copy.deepcopy(getattr(session.agent, "tools", None) or [])
+            session.config["original_tools"] = original
+        api_mode = str(session.config.get("api_mode") or "").lower()
+        supported = "acp" not in api_mode
+        session.config["rich_tool_descriptions"] = bool(enabled and supported)
+        session.agent.tools = enrich_tool_definitions(original, bool(enabled and supported))
 
     def get_or_create(
         self,
@@ -219,23 +402,29 @@ class AgentPool:
         profile: str | None = None,
         model: str | None = None,
         provider: str | None = None,
+        runtime_revision: str | None = None,
     ) -> AgentSession:
         requested_model = str(model or "").strip()
         requested_provider = str(provider or "").strip()
+        requested_revision = str(runtime_revision or "").strip()
         with self._lock:
             existing = self._sessions.get(session_id)
             if existing is not None:
                 # If profile changed, destroy old session and recreate
                 profile_changed = bool(profile and existing.config.get("profile") != profile)
+                revision_changed = bool(
+                    requested_revision
+                    and str(existing.config.get("runtime_revision") or "") != requested_revision
+                )
                 runtime_changed = bool(
                     (requested_model and existing.config.get("model") != requested_model)
-                    or (requested_provider and existing.config.get("provider") != requested_provider)
+                    or (requested_provider and existing.config.get("requested_provider") != requested_provider)
                 )
-                config_changed = profile_changed or runtime_changed
+                config_changed = profile_changed or runtime_changed or revision_changed
                 if config_changed:
-                    if profile_changed and not existing.running:
+                    if (profile_changed or revision_changed) and not existing.running:
                         self._destroy_session(session_id)
-                    elif profile_changed:
+                    elif profile_changed or revision_changed:
                         existing.last_used_at = time.time()
                         return existing
                     elif not existing.running:
@@ -324,9 +513,11 @@ class AgentPool:
                         "requested_session_id": session_id,
                         "profile": profile or "default",
                         "model": resolved_model,
+                        "requested_provider": requested_provider,
                         "provider": runtime.get("provider"),
                         "base_url": runtime.get("base_url"),
                         "api_mode": runtime.get("api_mode"),
+                        "runtime_revision": requested_revision,
                         "platform": _bridge_platform(),
                         "resumed": False,
                         "resumed_message_count": 0,
@@ -335,6 +526,7 @@ class AgentPool:
                         "db_error": self._db.error,
                     },
                 )
+                session.config["original_tools"] = copy.deepcopy(getattr(agent, "tools", None) or [])
                 self._sessions[session_id] = session
                 return session
 
@@ -406,6 +598,7 @@ class AgentPool:
         session.config.update({
             "profile": target_profile,
             "model": requested_model,
+            "requested_provider": requested_provider,
             "provider": resolved_provider,
             "base_url": runtime.get("base_url"),
             "api_mode": runtime.get("api_mode"),
@@ -694,9 +887,10 @@ class AgentPool:
         profile: str | None = None,
         model: str | None = None,
         provider: str | None = None,
+        runtime_revision: str | None = None,
         workspace: str | None = None,
     ) -> dict[str, Any]:
-        session = self.get_or_create(session_id, profile=profile, model=model, provider=provider)
+        session = self.get_or_create(session_id, profile=profile, model=model, provider=provider, runtime_revision=runtime_revision)
         session_cwd_bound = _bind_session_workspace_cwd(session.session_id, workspace)
         try:
             context_info = self._estimate_context_info(session.agent, messages or [], instructions)
@@ -792,12 +986,14 @@ class AgentPool:
     def _tool_start_callback(self, session_id: str):
         def callback(tool_call_id, function_name, function_args):
             progress = self._consume_tool_progress(session_id, "tool.started", function_name)
+            semantics = self._tool_semantic_fields(session_id, tool_call_id)
             self._append_event(session_id, {
                 "event": "tool.started",
                 "tool_call_id": str(tool_call_id) if tool_call_id else "",
                 "tool_name": str(function_name) if function_name else "",
                 "args": _jsonable(function_args) if function_args else {},
                 "args_preview": progress.get("preview") or None,
+                **semantics,
                 "timestamp": progress.get("timestamp") or time.time(),
             })
 
@@ -806,6 +1002,7 @@ class AgentPool:
     def _tool_complete_callback(self, session_id: str):
         def callback(tool_call_id, function_name, function_args, function_result=None):
             progress = self._consume_tool_progress(session_id, "tool.completed", function_name)
+            semantics = self._tool_semantic_fields(session_id, tool_call_id, consume=True)
             result_text = "" if function_result is None else str(function_result)
             print(
                 "[hermes_bridge] tool_complete_callback "
@@ -825,6 +1022,7 @@ class AgentPool:
                 "duration": progress.get("duration") or 0,
                 "is_error": bool(progress.get("is_error") or progress.get("error")),
                 "error": progress.get("error") or None,
+                **semantics,
                 "timestamp": progress.get("timestamp") or time.time(),
             })
 
@@ -955,19 +1153,31 @@ class AgentPool:
         return callback
 
     def _approval_callback(self, session_id: str):
-        def callback(command: str, description: str, *, allow_permanent: bool = True) -> str:
+        def callback(
+            command: str,
+            description: str,
+            *,
+            allow_permanent: bool = True,
+            smart_denied: bool = False,
+        ) -> str:
             approval_id = uuid.uuid4().hex
             response_queue: queue.Queue[str] = queue.Queue(maxsize=1)
+            choices = (
+                ["once", "deny"]
+                if smart_denied
+                else (["once", "session", "always", "deny"] if allow_permanent else ["once", "session", "deny"])
+            )
             with self._lock:
                 self._approval_requests[approval_id] = response_queue
-            choices = ["once", "session", "always", "deny"] if allow_permanent else ["once", "session", "deny"]
+                self._approval_allowed_choices[approval_id] = set(choices)
             self._append_event(session_id, {
                 "event": "approval.requested",
                 "approval_id": approval_id,
                 "command": str(command or ""),
                 "description": str(description or ""),
                 "choices": choices,
-                "allow_permanent": bool(allow_permanent),
+                "allow_permanent": bool(allow_permanent and not smart_denied),
+                "smart_denied": bool(smart_denied),
                 "timeout_ms": APPROVAL_TIMEOUT_MS,
             })
             try:
@@ -977,6 +1187,7 @@ class AgentPool:
             finally:
                 with self._lock:
                     self._approval_requests.pop(approval_id, None)
+                    self._approval_allowed_choices.pop(approval_id, None)
             self._append_event(session_id, {
                 "event": "approval.resolved",
                 "approval_id": approval_id,
@@ -1053,11 +1264,27 @@ class AgentPool:
     def _gateway_approval_notify(self, session_id: str):
         def callback(approval_data: dict[str, Any]) -> None:
             approval_id = uuid.uuid4().hex
-            choices = ["once", "session", "always", "deny"]
+            smart_denied = bool(approval_data.get("smart_denied"))
+            allow_permanent = bool(approval_data.get("allow_permanent", not smart_denied)) and not smart_denied
+            requested_choices = [
+                str(choice).strip().lower()
+                for choice in (approval_data.get("choices") or [])
+                if str(choice).strip().lower() in {"once", "session", "always", "deny"}
+            ]
+            choices = (
+                ["once", "deny"]
+                if smart_denied
+                else (requested_choices or (["once", "session", "always", "deny"] if allow_permanent else ["once", "session", "deny"]))
+            )
+            if not allow_permanent:
+                choices = [choice for choice in choices if choice != "always"]
+            if "deny" not in choices:
+                choices.append("deny")
             pattern_keys = _approval_pattern_keys(approval_data)
             with self._lock:
                 self._gateway_approval_requests[approval_id] = session_id
                 self._gateway_approval_pattern_keys[approval_id] = pattern_keys
+                self._approval_allowed_choices[approval_id] = set(choices)
             self._append_event(session_id, {
                 "event": "approval.requested",
                 "approval_id": approval_id,
@@ -1065,7 +1292,8 @@ class AgentPool:
                 "description": str(approval_data.get("description") or ""),
                 "pattern_keys": pattern_keys,
                 "choices": choices,
-                "allow_permanent": True,
+                "allow_permanent": allow_permanent,
+                "smart_denied": smart_denied,
                 "timeout_ms": 300_000,
             })
 
@@ -1316,14 +1544,16 @@ class AgentPool:
         force_compress: bool = False,
         model: str | None = None,
         provider: str | None = None,
+        runtime_revision: str | None = None,
         workspace: str | None = None,
         source: str | None = None,
         reasoning_effort: str | None = None,
         speed_mode: str | None = None,
         speed_provider_mode: str | None = None,
         runtime_overrides: dict[str, Any] | None = None,
+        ephemeral: bool = False,
     ) -> RunRecord:
-        session = self.get_or_create(session_id, profile=profile, model=model, provider=provider)
+        session = self.get_or_create(session_id, profile=profile, model=model, provider=provider, runtime_revision=runtime_revision)
         with session.lock:
             if session.running:
                 raise RuntimeError(f"session {session_id} is already running")
@@ -1345,14 +1575,14 @@ class AgentPool:
 
         thread = threading.Thread(
             target=self._run_chat,
-            args=(session, record, message, storage_message, attachments, instructions, conversation_history, profile, force_compress, workspace, source, reasoning_effort, speed_mode, speed_provider_mode, runtime_overrides),
+            args=(session, record, message, storage_message, attachments, instructions, conversation_history, profile, force_compress, workspace, source, reasoning_effort, speed_mode, speed_provider_mode, runtime_overrides, ephemeral),
             daemon=True,
             name=f"hermes-bridge-run-{run_id[:8]}",
         )
         thread.start()
         return record
 
-    def _run_chat(self, session: AgentSession, record: RunRecord, message: Any, storage_message: Any | None = None, attachments: list[dict[str, Any]] | None = None, instructions: str | None = None, conversation_history: list[dict[str, Any]] | None = None, profile: str | None = None, force_compress: bool = False, workspace: str | None = None, source: str | None = None, reasoning_effort: str | None = None, speed_mode: str | None = None, speed_provider_mode: str | None = None, runtime_overrides: dict[str, Any] | None = None) -> None:
+    def _run_chat(self, session: AgentSession, record: RunRecord, message: Any, storage_message: Any | None = None, attachments: list[dict[str, Any]] | None = None, instructions: str | None = None, conversation_history: list[dict[str, Any]] | None = None, profile: str | None = None, force_compress: bool = False, workspace: str | None = None, source: str | None = None, reasoning_effort: str | None = None, speed_mode: str | None = None, speed_provider_mode: str | None = None, runtime_overrides: dict[str, Any] | None = None, ephemeral: bool = False) -> None:
         with _profile_env(profile):
             _refresh_approval_allowlist()
             _install_execute_code_approval_memory_patch()
@@ -1382,6 +1612,9 @@ class AgentPool:
             tail_synced = False
             try:
                 session_cwd_bound = _bind_session_workspace_cwd(session.session_id, workspace)
+                if (runtime_overrides or {}).get("plan_mode") is True:
+                    with self._lock:
+                        self._plan_mode_sessions.add(session.session_id)
                 try:
                     self._enter_exec_ask_scope()
                     exec_ask_scope_entered = True
@@ -1399,10 +1632,23 @@ class AgentPool:
                     registered_gateway_approval_session = session.session_id
                 except Exception:
                     pass
-                self._prepersist_user_message(session, message, storage_message, conversation_history, profile, source)
-                db_count_after_prepersist = self._session_db_message_count(session.session_id, profile)
+                if not ephemeral:
+                    self._prepersist_user_message(session, message, storage_message, conversation_history, profile, source)
+                    db_count_after_prepersist = self._session_db_message_count(session.session_id, profile)
                 prepared_message = self._prepare_attachment_message(session, message, attachments, profile)
                 agent_message = self._prepend_pending_model_switch_note(session, prepared_message)
+                rich_tool_descriptions = (
+                    (runtime_overrides or {}).get("rich_tool_descriptions", True) is not False
+                    and not session.config.get("rich_tool_schema_rejected")
+                )
+                self._configure_rich_tool_descriptions(session, rich_tool_descriptions)
+                if session.config.get("rich_tool_descriptions"):
+                    metadata_instruction = (
+                        "For every tool call, include the required _displayName and _intent fields. "
+                        "They are UI metadata only: use 2-4 words for _displayName and one or two short sentences for _intent, "
+                        "following the current conversation language."
+                    )
+                    instructions = f"{instructions}\n\n{metadata_instruction}" if instructions else metadata_instruction
                 if force_compress:
                     compress = getattr(session.agent, "_compress_context", None)
                     if callable(compress):
@@ -1425,19 +1671,25 @@ class AgentPool:
                 if conversation_history is not None:
                     kwargs["conversation_history"] = conversation_history
                 with _temporary_run_overrides(session.agent, reasoning_effort, speed_mode, speed_provider_mode, runtime_overrides):
-                    result = session.agent.run_conversation(
-                        agent_message,
-                        **kwargs,
-                    )
+                    try:
+                        result = session.agent.run_conversation(agent_message, **kwargs)
+                    except Exception as first_error:
+                        tool_started = any(event.get("event") == "tool.started" for event in record.events)
+                        if not session.config.get("rich_tool_descriptions") or tool_started or not is_metadata_schema_error(first_error):
+                            raise
+                        self._configure_rich_tool_descriptions(session, False)
+                        session.config["rich_tool_schema_rejected"] = True
+                        result = session.agent.run_conversation(agent_message, **kwargs)
                 result = _jsonable(result if isinstance(result, dict) else {"value": result})
                 result_for_tail_sync = result
-                self._sync_result_tail_to_session_db(
-                    session,
-                    result,
-                    conversation_history,
-                    profile,
-                    db_count_after_prepersist,
-                )
+                if not ephemeral:
+                    self._sync_result_tail_to_session_db(
+                        session,
+                        result,
+                        conversation_history,
+                        profile,
+                        db_count_after_prepersist,
+                    )
                 tail_synced = True
                 final_response = str(
                     result.get("final_response")
@@ -1447,7 +1699,7 @@ class AgentPool:
                     or ""
                 ).strip()
                 title_db = self._db.get_for_profile(profile)
-                if title_db is not None and final_response and not result.get("failed") and not result.get("partial"):
+                if not ephemeral and title_db is not None and final_response and not result.get("failed") and not result.get("partial"):
                     try:
                         from agent.title_generator import maybe_auto_title
 
@@ -1491,7 +1743,7 @@ class AgentPool:
                     session.last_used_at = time.time()
                 self._apply_pending_session_model_switch(session)
             except Exception as exc:
-                if not tail_synced:
+                if not ephemeral and not tail_synced:
                     try:
                         fallback_result = result_for_tail_sync or self._result_from_agent_messages_for_sync(session)
                         if fallback_result is not None:
@@ -1516,6 +1768,10 @@ class AgentPool:
             finally:
                 with self._lock:
                     self._approval_handlers.pop(session.session_id, None)
+                    self._plan_mode_sessions.discard(session.session_id)
+                    semantics = getattr(self, "_tool_semantics", {})
+                    for key in [key for key in semantics if key[0] == session.session_id]:
+                        semantics.pop(key, None)
                 try:
                     del self._run_context.session_id
                 except AttributeError:
@@ -1564,14 +1820,24 @@ class AgentPool:
 
     def respond_approval(self, approval_id: str, choice: str) -> dict[str, Any]:
         cleaned = str(choice or "deny").strip().lower()
-        if cleaned not in {"once", "session", "always", "deny"}:
-            cleaned = "deny"
         with self._lock:
             response_queue = self._approval_requests.get(approval_id)
+            allowed_choices = self._approval_allowed_choices.get(approval_id)
+        if cleaned not in {"once", "session", "always", "deny"} or (
+            allowed_choices is not None and cleaned not in allowed_choices
+        ):
+            return {
+                "approval_id": approval_id,
+                "resolved": False,
+                "choice": cleaned,
+                "allowed_choices": sorted(allowed_choices or []),
+                "error": "approval choice is not allowed for this request",
+            }
         if response_queue is None:
             with self._lock:
                 gateway_session_id = self._gateway_approval_requests.pop(approval_id, None)
                 pattern_keys = self._gateway_approval_pattern_keys.pop(approval_id, [])
+                self._approval_allowed_choices.pop(approval_id, None)
             if gateway_session_id is None:
                 return {"approval_id": approval_id, "resolved": False, "choice": cleaned}
             try:
@@ -1624,6 +1890,37 @@ class AgentPool:
             except Exception:
                 title = None
         return {"session_id": session_id, "title": str(title or "")}
+
+    def generate_title(
+        self,
+        transcript: str,
+        profile: str | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        content = str(transcript or "").strip()
+        if not content:
+            raise ValueError("transcript is required")
+        if len(content) > 6000:
+            content = content[-6000:]
+
+        instructions = (
+            "为下面的对话生成一个简短、具体的标题。标题必须使用用户主要使用的语言，"
+            "中文控制在 3 到 12 个汉字，其他语言控制在 3 到 7 个词。"
+            "只返回标题，不要引号、前缀、解释、Markdown 或结尾标点。"
+        )
+        with _profile_env(profile):
+            _refresh_worker_profile_env()
+            from agent.oneshot import run_oneshot
+
+            title = run_oneshot(
+                instructions=instructions,
+                user_input=content,
+                task="title_generation",
+                max_tokens=120,
+                temperature=0.3,
+                timeout=max(1.0, min(float(timeout or 30.0), 60.0)),
+            )
+        return {"title": str(title or "").strip()}
 
     def dispatch_command(self, session_id: str, command: str, profile: str | None = None) -> dict[str, Any]:
         raw = str(command or "").strip()
@@ -2036,6 +2333,118 @@ class AgentPool:
                 "last_used_at": session.last_used_at,
                 "message_count": len(session.history),
                 "config": session.config,
+            }
+
+    def network_status(self, profile: str | None = None) -> dict[str, Any]:
+        with _profile_env(profile):
+            _ensure_agent_imports()
+            enabled_toolsets = _load_enabled_toolsets()
+            web_enabled = enabled_toolsets is None or "web" in enabled_toolsets
+            browser_enabled = enabled_toolsets is None or "browser" in enabled_toolsets
+
+            search_provider = None
+            extract_provider = None
+            search_ready = False
+            extract_ready = False
+            search_source = "unconfigured"
+            search_detail = "tool_disabled" if not web_enabled else "provider_not_configured"
+            extract_detail = "tool_disabled" if not web_enabled else "provider_not_configured"
+            try:
+                from tools import web_tools
+                from agent.web_search_registry import (
+                    get_active_extract_provider,
+                    get_active_search_provider,
+                )
+
+                web_tools._ensure_web_plugins_loaded()
+                search = get_active_search_provider()
+                extract = get_active_extract_provider()
+                web_config = web_tools._load_web_config()
+                explicitly_configured = bool(
+                    web_config.get("search_backend") or web_config.get("backend")
+                )
+                if search is not None:
+                    search_provider = str(getattr(search, "name", "") or "") or None
+                    try:
+                        search_ready = web_enabled and bool(search.is_available())
+                    except Exception:
+                        search_ready = False
+                    search_source = (
+                        "configured"
+                        if explicitly_configured
+                        else "free"
+                        if search_provider in {"ddgs", "brave-free", "searxng"}
+                        else "automatic"
+                    )
+                    if not web_enabled:
+                        search_detail = "tool_disabled"
+                    elif search_ready and search_provider == "ddgs":
+                        search_detail = "free_provider_ready"
+                    elif search_ready:
+                        search_detail = "ready"
+                    else:
+                        search_detail = "provider_unavailable"
+                if extract is not None:
+                    extract_provider = str(getattr(extract, "name", "") or "") or None
+                    try:
+                        extract_ready = web_enabled and bool(extract.is_available())
+                    except Exception:
+                        extract_ready = False
+                    extract_detail = (
+                        "ready"
+                        if extract_ready
+                        else "tool_disabled"
+                        if not web_enabled
+                        else "provider_unavailable"
+                    )
+            except Exception:
+                if web_enabled:
+                    search_detail = "provider_probe_failed"
+                    extract_detail = "provider_probe_failed"
+
+            browser_cli_ready = False
+            chromium_ready = False
+            browser_detail = "tool_disabled" if not browser_enabled else "browser_cli_missing"
+            try:
+                from tools.browser_tool import _chromium_installed, _find_agent_browser
+
+                _find_agent_browser(validate=False)
+                browser_cli_ready = True
+                chromium_ready = bool(_chromium_installed())
+                if not browser_enabled:
+                    browser_detail = "tool_disabled"
+                elif not chromium_ready:
+                    browser_detail = "chromium_missing"
+                else:
+                    browser_detail = "ready"
+            except Exception:
+                if browser_enabled:
+                    browser_detail = "browser_cli_missing"
+
+            browser_ready = browser_enabled and browser_cli_ready and chromium_ready
+            return {
+                "profile": str(profile or os.environ.get("HERMES_AGENT_BRIDGE_WORKER_PROFILE") or "default"),
+                "online_read_ready": bool(search_ready or browser_ready),
+                "search": {
+                    "enabled": web_enabled,
+                    "ready": search_ready,
+                    "provider": search_provider,
+                    "source": search_source,
+                    "detail": search_detail,
+                },
+                "extract": {
+                    "enabled": web_enabled,
+                    "ready": extract_ready,
+                    "provider": extract_provider,
+                    "detail": extract_detail,
+                },
+                "browser": {
+                    "enabled": browser_enabled,
+                    "ready": browser_ready,
+                    "chromium_ready": chromium_ready,
+                    "detail": browser_detail,
+                },
+                "checked_at": datetime.now(timezone.utc).isoformat(),
             }
 
     def list_sessions(self) -> dict[str, Any]:

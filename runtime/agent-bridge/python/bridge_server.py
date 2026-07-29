@@ -66,6 +66,7 @@ class BridgeServer:
             profile = req.get("profile")
             model = req.get("model")
             provider = req.get("provider")
+            runtime_revision = req.get("runtime_revision")
             workspace = req.get("workspace")
             source = req.get("source")
             # Local patch (reasoning-effort): per-session reasoning effort override (Web UI brain button).
@@ -84,12 +85,14 @@ class BridgeServer:
                 bool(req.get("force_compress")),
                 model,
                 provider,
+                runtime_revision,
                 workspace,
                 source,
                 reasoning_effort,
                 speed_mode,
                 speed_provider_mode,
                 runtime_overrides,
+                bool(req.get("ephemeral")),
             )
             if req.get("wait"):
                 timeout = float(req.get("timeout", 0) or 0)
@@ -113,6 +116,7 @@ class BridgeServer:
                 profile=req.get("profile"),
                 model=req.get("model"),
                 provider=req.get("provider"),
+                runtime_revision=req.get("runtime_revision"),
                 workspace=req.get("workspace"),
             )
 
@@ -171,6 +175,13 @@ class BridgeServer:
                 req.get("profile"),
             )
 
+        if action == "title_generate":
+            return self.pool.generate_title(
+                str(req.get("transcript") or ""),
+                req.get("profile"),
+                float(req.get("timeout") or 30.0),
+            )
+
         if action == "command":
             session_id = str(req.get("session_id") or "").strip()
             if not session_id:
@@ -183,6 +194,9 @@ class BridgeServer:
 
         if action == "skills_reload":
             return self._reload_skills(req.get("profile"))
+
+        if action == "network_status":
+            return self.pool.network_status(req.get("profile"))
 
         if action == "switch_session_model":
             session_id = str(req.get("session_id") or "").strip()
