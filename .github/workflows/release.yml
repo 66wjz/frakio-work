@@ -70,6 +70,8 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
+      - name: Remove Docker build record
+        run: find artifacts -type f -name '*.dockerbuild' -delete
       - name: Verify complete release artifact set
         run: npm run verify:release-artifacts -- artifacts
       - name: Publish GitHub release
