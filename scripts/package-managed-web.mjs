@@ -55,7 +55,11 @@ await writeFile(path.join(staging, 'package.json'), `${JSON.stringify({
   type: 'module',
   dependencies: { ...sourcePackage.dependencies, ...apiPackage.dependencies },
 }, null, 2)}\n`);
-await execFileAsync('npm', ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'], { cwd: staging, timeout: 10 * 60 * 1000 });
+const installCommand = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm';
+const installArgs = process.platform === 'win32'
+  ? ['/d', '/s', '/c', 'npm.cmd install --omit=dev --ignore-scripts --no-audit --no-fund']
+  : ['install', '--omit=dev', '--ignore-scripts', '--no-audit', '--no-fund'];
+await execFileAsync(installCommand, installArgs, { cwd: staging, timeout: 10 * 60 * 1000 });
 const npmCommand = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm';
 const npmArgs = process.platform === 'win32'
   ? ['/d', '/s', '/c', 'npm.cmd sbom --sbom-format cyclonedx']
