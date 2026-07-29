@@ -3,7 +3,20 @@ import path from 'node:path';
 
 const artifactDir = path.resolve(process.argv[2] || 'release');
 const packageVersion = JSON.parse(await (await import('node:fs/promises')).readFile(path.resolve('package.json'), 'utf8')).version;
-const names = new Set(await readdir(artifactDir));
+async function collectFiles(directory) {
+  const files = new Map();
+  for (const entry of await readdir(directory, { withFileTypes: true })) {
+    const fullPath = path.join(directory, entry.name);
+    if (entry.isDirectory()) {
+      for (const [name, nestedPath] of await collectFiles(fullPath)) files.set(name, nestedPath);
+    } else if (entry.isFile()) {
+      files.set(entry.name, fullPath);
+    }
+  }
+  return files;
+}
+
+const files = await collectFiles(artifactDir);
 const required = [
   `Frakio.Work-${packageVersion}-arm64.dmg`,
   `Frakio.Work-${packageVersion}-arm64.zip`,
@@ -17,13 +30,13 @@ const required = [
   'install.sh',
   'install.ps1',
   ...['mac-arm64', 'mac-x64', 'win-x64', 'linux-x64'].flatMap((platform) => [
-    `Frakio.Work.Web-${packageVersion}-${platform}.tar.gz`,
+    `Frakio.Work.Web-${packageVersion}-${platform}${platform === 'win-x64' ? '.zip' : '.tar.gz'}`,
     `Frakio.Work.Web-${packageVersion}-${platform}.SHA256SUMS.txt`,
     `Frakio.Work.Web-${packageVersion}-${platform}.sbom.json`,
   ]),
 ];
 
-const missing = required.filter((name) => !names.has(name));
+const missing = required.filter((name) => !files.has(name));
 if (missing.length) throw new Error(`Release artifacts are incomplete: ${missing.join(', ')}`);
-for (const name of required) await access(path.join(artifactDir, name));
+for (const name of required) await access(files.get(name));
 console.log(`Verified ${required.length} Frakio Work ${packageVersion} release artifacts in ${artifactDir}.`);
