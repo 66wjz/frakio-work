@@ -37,6 +37,18 @@ const node = path.join(runtimeRoot, version.name, platformName(), 'node', proces
 const cli = path.join(root, 'bin', 'frakio-work-service.mjs');
 const env = { ...process.env, FRAKIO_WORK_HOME: home, FRAKIO_WORK_ADMIN_PASSWORD: password, PORT: String(port) };
 
+async function removeTemporaryPackage() {
+  for (let attempt = 1; attempt <= 5; attempt += 1) {
+    try {
+      await rm(temporary, { recursive: true, force: true });
+      return;
+    } catch (error) {
+      if (error?.code !== 'EBUSY' || attempt === 5) throw error;
+      await new Promise((resolve) => setTimeout(resolve, attempt * 250));
+    }
+  }
+}
+
 try {
   const { stdout: startOutput } = await execFileAsync(node, [cli, 'start'], { cwd: root, env, timeout: 60_000 });
   assert.match(startOutput, /ready/);
@@ -56,5 +68,5 @@ try {
   throw new Error(`${error instanceof Error ? error.message : String(error)}\nManaged Web log:\n${log.slice(-5000)}`);
 } finally {
   await execFileAsync(node, [cli, 'stop'], { cwd: root, env, timeout: 15_000 }).catch(() => {});
-  await rm(temporary, { recursive: true, force: true });
+  await removeTemporaryPackage();
 }
