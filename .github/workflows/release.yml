@@ -46,7 +46,17 @@ jobs:
         shell: bash
         run: PATH="$HOME/.local/bin:$PATH" npm run runtime:build
       - run: npm run notices:generate
-      - run: npm run ${{ matrix.package_script }}
+      - name: Build macOS DMG
+        shell: bash
+        run: |
+          for attempt in 1 2 3; do
+            npm run ${{ matrix.package_script }} && exit 0
+            if [ "$attempt" -eq 3 ]; then
+              exit 1
+            fi
+            echo "DMG creation failed; retrying after macOS volume cleanup settles."
+            sleep 15
+          done
       - name: Verify packaged desktop API
         run: npm run verify:desktop-package -- "$(find release -type d -name 'Frakio Work.app' -print -quit)"
       - name: Generate checksums and SBOM
