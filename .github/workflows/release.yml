@@ -105,6 +105,9 @@ jobs:
           - runner: windows-2025
             platform: win
             arch: x64
+          - runner: windows-11-arm
+            platform: win
+            arch: arm64
           - runner: ubuntu-24.04
             platform: linux
             arch: x64
@@ -124,6 +127,7 @@ jobs:
         run: test "v$(node -p "require('./package.json').version")" = "${{ github.event.inputs.tag || github.ref_name }}"
       - run: npm run runtime:build
       - run: npm run web:package
+      - run: npm run test:smoke:managed-package
       - uses: actions/upload-artifact@v7
         with:
           name: web-${{ matrix.platform }}-${{ matrix.arch }}

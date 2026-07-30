@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { access, mkdtemp, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -19,6 +19,15 @@ export function desktopPackagePaths(appPath) {
     serverEntry: path.join(appRoot, 'apps', 'api', 'server.mjs'),
     webDist: path.join(appRoot, 'dist'),
     mermaidPackage: path.join(appRoot, 'node_modules', 'beautiful-mermaid', 'package.json'),
+    piWorker: path.join(appRoot, 'apps', 'api', 'runtime', 'workers', 'pi-worker.mjs'),
+    codexAdapter: path.join(appRoot, 'apps', 'api', 'runtime', 'codex-app-server.mjs'),
+    claudeAdapter: path.join(appRoot, 'apps', 'api', 'runtime', 'claude-agent-sdk.mjs'),
+    geminiAdapter: path.join(appRoot, 'apps', 'api', 'runtime', 'gemini-acp.mjs'),
+    piCorePackage: path.join(appRoot, 'node_modules', '@earendil-works', 'pi-agent-core', 'package.json'),
+    piCodingPackage: path.join(appRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'package.json'),
+    claudeSdkPackage: path.join(appRoot, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'),
+    acpSdkPackage: path.join(appRoot, 'node_modules', '@agentclientprotocol', 'sdk', 'package.json'),
+    braceExpansionPackage: path.join(appRoot, 'node_modules', 'brace-expansion', 'package.json'),
   };
 }
 
@@ -29,7 +38,18 @@ export async function assertDesktopPackageLayout(appPath) {
     access(paths.serverEntry),
     access(paths.webDist),
     access(paths.mermaidPackage),
+    access(paths.piWorker),
+    access(paths.codexAdapter),
+    access(paths.claudeAdapter),
+    access(paths.geminiAdapter),
+    access(paths.piCorePackage),
+    access(paths.piCodingPackage),
+    access(paths.claudeSdkPackage),
+    access(paths.acpSdkPackage),
+    access(paths.braceExpansionPackage),
   ]);
+  const braceExpansion = JSON.parse(await readFile(paths.braceExpansionPackage, 'utf8'));
+  assert.equal(braceExpansion.version, '5.0.8', 'Packaged Pi dependency must include the patched brace-expansion version.');
   return paths;
 }
 

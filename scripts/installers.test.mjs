@@ -24,4 +24,6 @@ test('Windows installer selects the release asset digest instead of a checksum d
   assert.match(script, /\$Release\.assets \| Where-Object/);
   assert.match(script, /\.digest\.StartsWith\(\"sha256:\"\)/);
   assert.doesNotMatch(script, /ChecksumAsset/);
+  assert.match(script, /"Arm64" \{ "arm64" \}/);
+  assert.match(script, /supports x64 and ARM64 only/);
 });

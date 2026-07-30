@@ -98,8 +98,13 @@ function requestHealth(url) {
     const target = new URL('/api/health', `${url}/`);
     const client = target.protocol === 'https:' ? https : http;
     const req = client.get(target, (res) => {
-      res.resume();
-      resolve(res.statusCode >= 200 && res.statusCode < 500);
+      const chunks = [];
+      res.on('data', (chunk) => chunks.push(chunk));
+      res.on('end', () => {
+        let body = {};
+        try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {}
+        resolve(res.statusCode >= 200 && res.statusCode < 500 && Number(body.apiProtocol || 0) >= 2);
+      });
     });
     req.once('error', () => resolve(false));
     req.setTimeout(1500, () => {

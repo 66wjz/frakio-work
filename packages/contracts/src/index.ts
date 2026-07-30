@@ -4,6 +4,173 @@ export type ApiError = {
   details?: Record<string, unknown>;
 };
 
+export type RuntimeId = 'hermes' | 'pi' | 'codex' | 'claude' | 'gemini' | (string & {});
+
+export type RuntimeCapability = {
+  streaming: boolean;
+  tools: boolean;
+  approvals: boolean;
+  steering: boolean;
+  cancellation: boolean;
+  sessionResume: boolean;
+  customModels: boolean;
+  managedCredentials: boolean;
+  workTasks: boolean;
+};
+
+export type RuntimeInstallation = {
+  runtimeId: RuntimeId;
+  kind: 'core' | 'channel';
+  status: 'ready' | 'missing' | 'needs_login' | 'incompatible' | 'disabled' | 'error';
+  installed: boolean;
+  version: string;
+  command?: string;
+  authMode?: 'frakio-managed' | 'native' | 'none';
+  detail?: string;
+  checkedAt: string;
+};
+
+export type RuntimeDefinition = {
+  id: RuntimeId;
+  name: string;
+  kind: 'core' | 'channel';
+  bundled: boolean;
+  enabled: boolean;
+  capabilities: RuntimeCapability;
+  installation?: RuntimeInstallation;
+};
+
+export type AgentRuntimePolicy = {
+  defaultRuntimeId: RuntimeId;
+  allowedRuntimeIds: RuntimeId[];
+  permissionProfileId: string;
+};
+
+export type RuntimeModelCompatibility = {
+  status: 'ready' | 'partial' | 'unsupported' | 'missing_credentials';
+  credentialStatus: 'ready' | 'missing' | 'not_required';
+  usableModelIds: string[];
+  unsupportedModelIds: string[];
+  reason: string;
+};
+
+export type RuntimeModelCatalogEntry = {
+  id: string;
+  name: string;
+  provider: string;
+  defaultModelId: string;
+  models: string[];
+  compatibility: RuntimeModelCompatibility;
+};
+
+export type RuntimeModelCatalog = {
+  runtimeId: RuntimeId;
+  source: 'frakio-model-center' | 'native-account';
+  models: RuntimeModelCatalogEntry[];
+  usableModelCount?: number;
+};
+
+export type RuntimeFeatureFlags = {
+  runtimeRouterV1: boolean;
+  piRuntime: boolean;
+  runtimeNeutralWork: boolean;
+  memoryLedger: boolean;
+  externalCliChannels: boolean;
+};
+
+export type AgentProfileSnapshot = {
+  agentId: string;
+  revision: string;
+  name: string;
+  role: string;
+  soul: string;
+  scope: string;
+  userProfile: string;
+  runtimePolicy: AgentRuntimePolicy;
+  createdAt: string;
+};
+
+export type RuntimeSession = {
+  id: string;
+  runtimeId: RuntimeId;
+  threadId: string;
+  agentId: string;
+  workspaceId: string;
+  nativeSessionId: string;
+  profileRevision: string;
+  status: 'active' | 'idle' | 'closed' | 'failed';
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RuntimeRunStatus = 'starting' | 'running' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled';
+
+export type RuntimeRun = {
+  id: string;
+  sessionId: string;
+  runtimeId: RuntimeId;
+  threadId: string;
+  agentId: string;
+  turnId: string;
+  profileRevision: string;
+  modelId: string;
+  status: RuntimeRunStatus;
+  error: string;
+  startedAt: string;
+  completedAt?: string | null;
+};
+
+export type RuntimeEventType =
+  | 'run.started'
+  | 'message.delta'
+  | 'reasoning.summary'
+  | 'tool.started'
+  | 'tool.updated'
+  | 'tool.completed'
+  | 'approval.requested'
+  | 'approval.resolved'
+  | 'artifact.published'
+  | 'run.completed'
+  | 'run.failed'
+  | 'run.cancelled';
+
+export type RuntimeEvent = {
+  id: string;
+  cursor: number;
+  runId: string;
+  sessionId: string;
+  runtimeId: RuntimeId;
+  type: RuntimeEventType;
+  payload: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type MemoryEntryStatus = 'candidate' | 'accepted' | 'superseded' | 'rejected';
+
+export type MemoryProvenance = {
+  runtimeId?: RuntimeId;
+  runId?: string;
+  threadId?: string;
+  source: string;
+  createdAt: string;
+};
+
+export type MemoryEntry = {
+  id: string;
+  scope: 'user' | 'agent' | 'workspace';
+  subjectId: string;
+  fact: string;
+  provenance: MemoryProvenance[];
+  confidence: number;
+  status: MemoryEntryStatus;
+  validFrom: string | null;
+  validUntil: string | null;
+  supersedesId: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
+
 export type AttachmentKind = 'image' | 'text' | 'document' | 'audio' | 'video' | 'archive';
 
 export type Attachment = {

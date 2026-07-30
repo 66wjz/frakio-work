@@ -2703,6 +2703,12 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 }
 .composer-model { max-width: 220px; color: #3f4845; }
 .composer-model select { max-width: 136px; color: #3f4845; }
+.composer-native-runtime-model {
+  color: #58645f;
+  font-size: 12px;
+  font-weight: 650;
+  white-space: nowrap;
+}
 .composer-agent-model { gap: 6px; }
 .composer-agent-model span { max-width: 70px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; color: #52625d; font-size: 12px; font-weight: 700; }
 .provider-model-picker {
@@ -3098,9 +3104,26 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .new-chat-page {
   display: grid;
   place-items: center;
+  position: relative;
   min-height: 100%;
   padding: 68px 28px 118px;
   background: #fff;
+}
+.new-chat-panel-header {
+  position: absolute;
+  top: 0;
+  right: 0;
+  left: 0;
+  z-index: 2;
+  height: 42px;
+  pointer-events: none;
+}
+.new-chat-panel-header .runtime-switcher {
+  right: 20px;
+}
+.new-chat-panel-header .runtime-switcher-trigger,
+.new-chat-panel-header .runtime-switcher-popover {
+  pointer-events: auto;
 }
 .new-chat-center {
   display: grid;
@@ -7124,6 +7147,13 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .icon-btn.danger:hover { border-color: #e0afa8; background: #fff5f3; }
 .model-card strong { font-size: 18px; }
 .model-card p { margin: 0; overflow: hidden; color: #5f6d68; text-overflow: ellipsis; white-space: nowrap; font-size: 13px; }
+.model-runtime-compatibility { display: flex; flex-wrap: wrap; gap: 6px; }
+.model-runtime-compatibility span { padding: 3px 7px; border-radius: 999px; color: #6a7773; background: #f0f3f2; font-size: 11px; }
+.model-runtime-compatibility span.checking { color: #6a7773; background: #f0f3f2; }
+.model-runtime-compatibility span.ready { color: #0c7456; background: #e7f6ef; }
+.model-runtime-compatibility span.partial { color: #8a5a12; background: #fff5da; }
+.model-runtime-compatibility span.missing_credentials,
+.model-runtime-compatibility span.unsupported { color: #a33b2d; background: #fff0ed; }
 .model-tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: auto; }
 .model-tags span { padding: 4px 7px; border: 1px solid #e0e6e3; border-radius: 6px; color: #52605c; background: #f7faf8; font-size: 11px; }
 .model-tags-models { align-content: start; max-height: 86px; overflow: auto; margin-top: 2px; }
@@ -7374,6 +7404,32 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   padding: 10px 12px;
   background: #fbfcfb;
 }
+.agent-runtime-policy {
+  display: grid;
+  gap: 10px;
+  margin: 12px 0;
+  border: 1px solid #e2e9e5;
+  border-radius: 8px;
+  padding: 12px;
+  background: #fbfcfb;
+}
+.agent-runtime-policy-head,
+.agent-runtime-policy-head > div,
+.agent-runtime-policy-item,
+.agent-runtime-policy-item label,
+.agent-runtime-policy-item label > span { display: flex; }
+.agent-runtime-policy-head { align-items: start; justify-content: space-between; gap: 12px; }
+.agent-runtime-policy-head > div,
+.agent-runtime-policy-item label > span { flex-direction: column; gap: 2px; }
+.agent-runtime-policy-head small,
+.agent-runtime-policy-item small { color: #7a8782; font-size: 12px; line-height: 1.35; }
+.agent-runtime-default { display: grid; gap: 5px; color: #596965; font-size: 12px; }
+.agent-runtime-default select { height: 34px; border: 1px solid #d4dbd8; border-radius: 7px; padding: 0 8px; color: #1f312b; background: #fff; }
+.agent-runtime-policy-list { display: grid; gap: 6px; }
+.agent-runtime-policy-item { align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid #edf1ef; padding-top: 8px; }
+.agent-runtime-policy-item label { min-width: 0; flex: 1; align-items: center; gap: 8px; }
+.agent-runtime-policy-item label input { width: auto; height: auto; }
+.agent-runtime-policy-item label > span { min-width: 0; }
 .agent-runtime-row > span {
   position: relative;
   display: grid;
@@ -7895,6 +7951,27 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   display: grid;
   gap: 10px;
 }
+.agent-runtime-choices {
+  border: 1px solid #d4dbd8;
+  border-radius: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+  margin: 0;
+  padding: 10px;
+}
+.agent-runtime-choices legend {
+  color: #6d7a76;
+  font-size: 12px;
+  padding: 0 4px;
+}
+.agent-runtime-choices label {
+  align-items: center;
+  display: inline-flex;
+  flex-direction: row;
+  gap: 6px;
+}
+.agent-runtime-choices input { height: auto; width: auto; }
 .agent-fields label {
   display: grid;
   gap: 5px;
@@ -7910,6 +7987,25 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   min-height: 74px;
   padding: 10px;
   resize: vertical;
+}
+.composer-runtime-picker {
+  align-items: center;
+  border: 1px solid #d9dfdc;
+  border-radius: 9px;
+  color: #4f5b57;
+  display: inline-flex;
+  gap: 4px;
+  min-height: 34px;
+  padding: 0 7px;
+}
+.composer-runtime-picker select {
+  appearance: none;
+  background: transparent;
+  border: 0;
+  color: inherit;
+  font: inherit;
+  max-width: 88px;
+  outline: 0;
 }
 .pricing-fields {
   display: grid;
@@ -13408,6 +13504,26 @@ body.resizing-columns .app:not(.workspace-create-mode) > .resize-handle.left,
   grid-template-columns: 0 0 minmax(0, 1fr) 0 var(--context-width);
 }
 
+/* Responsive compact mode is a temporary drawer, distinct from a user's
+   persisted collapsed preference. */
+.desktop-shell.mac-conversation-shell.sidebar-auto-collapsed,
+.desktop-shell.mac-conversation-shell.sidebar-auto-collapsed.has-right-rail:not(.right-rail-open) {
+  grid-template-columns: 0 0 minmax(0, 1fr) 0 0;
+}
+
+.desktop-shell.mac-conversation-shell.sidebar-auto-collapsed.right-rail-open {
+  grid-template-columns: 0 0 minmax(0, 1fr) 0 var(--context-width);
+}
+
+.desktop-shell.mac-conversation-shell.sidebar-auto-collapsed > .sidebar {
+  padding-right: 0;
+  padding-left: 0;
+  opacity: 0;
+  transform: translateX(-14px);
+  filter: blur(.5px);
+  pointer-events: none;
+}
+
 .desktop-shell.mac-conversation-shell:not(.settings-mode):not(.workspace-create-mode) > .sidebar,
 .desktop-shell.mac-conversation-shell > .context {
   border: 0;
@@ -13693,6 +13809,137 @@ body.resizing-columns .app:not(.workspace-create-mode) > .resize-handle.left,
   background: transparent;
 }
 
+.runtime-label {
+  display: inline-flex;
+  min-width: 0;
+  align-items: center;
+  gap: 7px;
+}
+
+.runtime-label img,
+.runtime-label > svg {
+  display: block;
+  flex: 0 0 auto;
+  width: 16px;
+  height: 16px;
+  object-fit: contain;
+}
+
+.runtime-switcher {
+  position: absolute;
+  top: 50%;
+  right: 20px;
+  transform: translateY(-50%);
+}
+
+.runtime-switcher-trigger {
+  display: inline-flex;
+  height: 32px;
+  align-items: center;
+  border: 0;
+  border-radius: 8px;
+  padding: 0 8px;
+  color: var(--mac-text, #202124);
+  background: transparent;
+  cursor: pointer;
+}
+
+.runtime-switcher-trigger:hover,
+.runtime-switcher-trigger[aria-expanded='true'] {
+  background: var(--mac-control);
+}
+
+.runtime-switcher-trigger:focus-visible {
+  outline: 2px solid color-mix(in srgb, var(--mac-focus) 72%, transparent);
+  outline-offset: 1px;
+}
+
+.runtime-switcher-trigger:disabled {
+  cursor: default;
+  opacity: .52;
+}
+
+.runtime-switcher-mark {
+  position: relative;
+  display: grid;
+  width: 16px;
+  height: 16px;
+  place-items: center;
+}
+
+.runtime-switcher-mark .runtime-label {
+  display: contents;
+}
+
+.runtime-switcher-spinner {
+  position: absolute;
+  inset: 2px;
+  padding: 1px;
+  border-radius: 50%;
+  color: var(--mac-text, #202124);
+  background: var(--mac-surface, #fff);
+}
+
+.runtime-switcher-popover {
+  display: grid;
+  width: 260px;
+  gap: 2px;
+}
+
+.runtime-switcher-summary {
+  padding: 7px 9px 5px;
+  color: var(--mac-muted);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.runtime-switcher-option {
+  display: flex;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 8px;
+}
+
+.runtime-switcher-option .runtime-label {
+  flex: 1;
+}
+
+.runtime-switcher-option em {
+  color: var(--mac-muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+.runtime-switcher-footer {
+  display: grid;
+  gap: 7px;
+  margin-top: 5px;
+  padding: 8px 9px 4px;
+  border-top: 1px solid var(--mac-border);
+}
+
+.runtime-switcher-footer small {
+  color: var(--mac-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+.runtime-switcher-footer button {
+  width: fit-content;
+  border: 0;
+  border-radius: 6px;
+  padding: 3px 5px;
+  color: var(--mac-text, #202124);
+  background: transparent;
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.runtime-switcher-footer button:hover {
+  background: var(--mac-control);
+}
+
 .conversation-title-menu {
   display: flex;
   min-width: 0;
@@ -13745,6 +13992,18 @@ body.resizing-columns .app:not(.workspace-create-mode) > .resize-handle.left,
 
 .conversation-title-trigger[aria-expanded='true'] svg {
   transform: rotate(180deg);
+}
+
+@media (max-width: 720px) {
+  .conversation-panel-header {
+    padding-right: 52px;
+  }
+
+  .runtime-switcher {
+    right: 12px;
+  }
+
+  .runtime-switcher-trigger { padding: 0 6px; }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -14663,6 +14922,15 @@ body:has(.mac-desktop-shell) :is(.provider-model-menu, .mention-menu, .provider-
   font-weight: 450;
   line-height: 1.35;
 }
+.thread-runtime-sub-trigger { min-height: 30px; font-weight: 450; }
+.thread-runtime-submenu { display: grid; width: 264px; gap: 2px; }
+.thread-runtime-option { min-height: 32px; }
+.thread-runtime-option > span { flex: 1; }
+.thread-runtime-option > em { color: var(--overlay-muted); font-size: 11px; font-style: normal; }
+.thread-runtime-option.selected { background: var(--overlay-selected); font-weight: 500; }
+.thread-runtime-note { padding: 6px 7px 1px; color: var(--overlay-muted); font-size: 11px; line-height: 1.4; }
+.runtime-center-row-actions { display: grid; justify-items: end; gap: 7px; }
+.runtime-center-detail-link { min-height: 28px; white-space: nowrap; }
 
 .app-dialog-backdrop {
   position: fixed;
@@ -14874,6 +15142,211 @@ body:has(.mac-desktop-shell) :is(.provider-model-menu, .mention-menu, .provider-
 
 .desktop-shell.mac-conversation-shell .rail-list {
   gap: 2px;
+}
+
+/* Agent editor: keep this working form deliberately solid and separate from the glassy dialog family. */
+.agent-editor {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(640px, calc(100vw - 40px));
+  max-height: min(820px, calc(100dvh - 40px));
+  overflow: hidden;
+  border-color: var(--overlay-outline);
+  color: var(--overlay-text);
+  background: var(--overlay-surface-solid);
+  box-shadow: var(--overlay-dialog-shadow);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.agent-editor > .modal-head {
+  min-height: 72px;
+  padding: 18px 20px;
+  border-color: var(--overlay-outline);
+  background: var(--overlay-surface-solid);
+}
+
+.agent-editor > .modal-head h2 { color: var(--overlay-text); }
+.agent-editor > .modal-head p { color: var(--overlay-muted); }
+
+.agent-editor-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 18px 20px 20px;
+  background: var(--overlay-surface-solid);
+}
+
+.agent-editor-footer {
+  padding: 14px 20px 18px;
+  border-top: 1px solid var(--overlay-outline);
+  background: var(--overlay-surface-solid);
+}
+
+.agent-editor-footer .send-btn.full {
+  min-height: 40px;
+  margin-top: 0;
+}
+
+.agent-fields { gap: 14px; }
+.agent-fields > label { color: var(--overlay-muted); font-weight: 650; }
+.agent-fields input,
+.agent-fields select,
+.agent-fields textarea {
+  border: 1px solid var(--overlay-outline);
+  color: var(--overlay-text);
+  background: var(--overlay-surface-solid);
+  box-shadow: none;
+}
+.agent-fields input:focus,
+.agent-fields select:focus,
+.agent-fields textarea:focus {
+  border-color: var(--mac-focus, #1769e0);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mac-focus, #1769e0) 18%, transparent);
+}
+.agent-fields textarea { min-height: 96px; }
+
+.agent-runtime-section {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+  border: 1px solid var(--overlay-outline);
+  border-radius: 12px;
+  background: color-mix(in srgb, var(--overlay-surface-solid) 94%, var(--overlay-hover));
+}
+
+.agent-runtime-section-head {
+  display: flex;
+  align-items: end;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.agent-runtime-section-head > div { display: grid; gap: 3px; }
+.agent-runtime-section-head strong { color: var(--overlay-text); font-size: 13px; }
+.agent-runtime-section-head > div > span { color: var(--overlay-muted); font-size: 12px; line-height: 1.45; }
+
+.agent-runtime-default {
+  display: grid;
+  flex: 0 0 190px;
+  gap: 5px;
+  color: var(--overlay-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.agent-runtime-default select {
+  width: 100%;
+  height: 34px;
+  border: 1px solid var(--overlay-outline);
+  border-radius: 8px;
+  padding: 0 9px;
+  color: var(--overlay-text);
+  background: var(--overlay-surface-solid);
+  outline: none;
+  font: inherit;
+  font-size: 12px;
+}
+
+.agent-runtime-default select:focus { border-color: var(--mac-focus, #1769e0); box-shadow: 0 0 0 3px color-mix(in srgb, var(--mac-focus, #1769e0) 18%, transparent); }
+
+.agent-runtime-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.agent-runtime-card {
+  position: relative;
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr) auto;
+  align-items: center;
+  min-height: 66px;
+  gap: 9px;
+  overflow: hidden;
+  border: 1px solid var(--overlay-outline);
+  border-radius: 10px;
+  padding: 10px;
+  color: var(--overlay-text);
+  background: var(--overlay-surface-solid);
+  cursor: pointer;
+  transition: border-color .16s ease, background .16s ease, box-shadow .16s ease, transform .16s ease;
+}
+
+.agent-runtime-card:hover {
+  border-color: color-mix(in srgb, var(--overlay-text) 20%, var(--overlay-outline));
+  background: var(--overlay-hover);
+}
+
+.agent-runtime-card:has(input:focus-visible) {
+  border-color: var(--mac-focus, #1769e0);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mac-focus, #1769e0) 18%, transparent);
+}
+
+.agent-runtime-card.selected {
+  border-color: color-mix(in srgb, var(--mac-focus, #1769e0) 46%, var(--overlay-outline));
+  background: color-mix(in srgb, var(--mac-focus, #1769e0) 10%, var(--overlay-surface-solid));
+}
+
+.agent-runtime-card.default { cursor: default; }
+.agent-runtime-card.default:hover { background: color-mix(in srgb, var(--mac-focus, #1769e0) 10%, var(--overlay-surface-solid)); }
+.agent-runtime-card > input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
+
+.agent-runtime-card-icon {
+  display: grid;
+  width: 30px;
+  height: 30px;
+  place-items: center;
+  border: 1px solid var(--overlay-outline);
+  border-radius: 8px;
+  background: var(--overlay-surface-solid);
+}
+
+.agent-runtime-card-icon .runtime-label { display: grid; place-items: center; }
+.agent-runtime-card-icon .runtime-label img { width: 18px; height: 18px; object-fit: contain; }
+.agent-runtime-card-copy { display: grid; min-width: 0; gap: 3px; }
+.agent-runtime-card-copy strong,
+.agent-runtime-card-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.agent-runtime-card-copy strong { color: var(--overlay-text); font-size: 12px; }
+.agent-runtime-card-copy small { color: var(--overlay-muted); font-size: 11px; }
+
+.agent-runtime-check {
+  display: grid;
+  width: 20px;
+  height: 20px;
+  place-items: center;
+  border: 1px solid var(--overlay-outline);
+  border-radius: 999px;
+  color: transparent;
+  background: transparent;
+}
+.agent-runtime-card.selected .agent-runtime-check { border-color: transparent; color: #fff; background: var(--mac-focus, #1769e0); }
+
+.agent-runtime-default-badge {
+  border-radius: 999px;
+  padding: 3px 6px;
+  color: var(--mac-focus, #1769e0);
+  background: color-mix(in srgb, var(--mac-focus, #1769e0) 14%, transparent);
+  font-size: 10px;
+  font-weight: 720;
+}
+
+@media (max-width: 640px) {
+  .agent-editor {
+    width: 100%;
+    max-height: calc(100dvh - 12px);
+    border-right: 0;
+    border-bottom: 0;
+    border-left: 0;
+    border-radius: 16px 16px 0 0;
+  }
+
+  .agent-editor > .modal-head { min-height: 64px; padding: 15px 18px; }
+  .agent-editor-body { padding: 16px 18px; }
+  .agent-editor-footer { padding: 12px 18px 16px; }
+  .agent-runtime-section-head { align-items: stretch; flex-direction: column; gap: 10px; }
+  .agent-runtime-default { flex-basis: auto; }
+  .agent-runtime-grid { grid-template-columns: 1fr; }
 }
 
 .desktop-shell.mac-conversation-shell :is(.rail-item, .rail-item .rail-main) {

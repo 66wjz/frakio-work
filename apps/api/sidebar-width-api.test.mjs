@@ -10,7 +10,29 @@ test('state API persists the one-time macOS sidebar width migration', async (t) 
   const dataDir = path.join(home, 'data');
   const statePath = path.join(dataDir, 'workbench-state.json');
   await mkdir(dataDir, { recursive: true });
-  await writeFile(statePath, JSON.stringify({ version: 2, ui: { sidebarWidth: 240 } }));
+  await writeFile(statePath, JSON.stringify({
+    version: 4,
+    ui: { sidebarWidth: 240 },
+    agents: [{
+      id: 'iris',
+      name: 'Iris',
+      role: '助理',
+      color: '#0f766e',
+      profileName: 'iris',
+      runtimePolicy: { defaultRuntimeId: 'hermes', allowedRuntimeIds: ['hermes'], defaultModelByRuntime: { pi: 'deepseek-v4-flash' } },
+    }],
+    models: [{
+      id: 'model_deepseek',
+      name: 'DeepSeek',
+      provider: 'DeepSeek',
+      kind: 'official',
+      protocol: 'OpenAI Compatible',
+      model: 'deepseek-v4-pro',
+      models: ['deepseek-v4-pro', 'deepseek-v4-flash'],
+      baseUrl: 'https://api.deepseek.com',
+      apiMode: 'chat_completions',
+    }],
+  }));
 
   process.env.FRAKIO_WORK_HOME = home;
   process.env.FRAKIO_WORK_DISABLE_AUTOSTART = '1';
@@ -31,10 +53,24 @@ test('state API persists the one-time macOS sidebar width migration', async (t) 
   assert.equal(migrated.ui.sidebarWidth, 240);
   assert.equal(migrated.ui.macSidebarWidth, 224);
   assert.equal(migrated.ui.macSidebarWidthVersion, 1);
+  assert.equal(migrated.version, 6);
+  assert.deepEqual(migrated.features, {
+    runtimeRouterV1: true,
+    piRuntime: true,
+    piOAuthProviders: true,
+    piGeminiCodeAssistAdapter: false,
+    runtimeNeutralWork: true,
+    memoryLedger: true,
+    externalCliChannels: true,
+  });
 
   const stored = JSON.parse(await readFile(statePath, 'utf8'));
   assert.equal(stored.ui.macSidebarWidth, 224);
   assert.equal(stored.ui.macSidebarWidthVersion, 1);
+  assert.equal(stored.version, 6);
+  assert.deepEqual(stored.agents[0].runtimePolicy.allowedRuntimeIds, ['hermes', 'pi', 'codex', 'claude', 'gemini']);
+  assert.equal(stored.agents[0].runtimePolicy.defaultModelByRuntime, undefined);
+  assert.equal(stored.agents[0].model, 'model_deepseek::deepseek-v4-flash');
 
   const patchResponse = await fetch(`${baseUrl}/api/state/ui`, {
     method: 'PATCH',

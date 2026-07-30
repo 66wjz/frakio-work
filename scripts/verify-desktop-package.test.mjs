@@ -15,11 +15,31 @@ try {
     mkdir(path.dirname(paths.serverEntry), { recursive: true }),
     mkdir(paths.webDist, { recursive: true }),
     mkdir(path.dirname(paths.mermaidPackage), { recursive: true }),
+    ...[
+      paths.piWorker,
+      paths.codexAdapter,
+      paths.claudeAdapter,
+      paths.geminiAdapter,
+      paths.piCorePackage,
+      paths.piCodingPackage,
+      paths.claudeSdkPackage,
+      paths.acpSdkPackage,
+      paths.braceExpansionPackage,
+    ].map((target) => mkdir(path.dirname(target), { recursive: true })),
   ]);
   await Promise.all([
     writeFile(paths.executable, ''),
     writeFile(paths.serverEntry, ''),
     writeFile(paths.mermaidPackage, '{}'),
+    writeFile(paths.piWorker, ''),
+    writeFile(paths.codexAdapter, ''),
+    writeFile(paths.claudeAdapter, ''),
+    writeFile(paths.geminiAdapter, ''),
+    writeFile(paths.piCorePackage, '{}'),
+    writeFile(paths.piCodingPackage, '{}'),
+    writeFile(paths.claudeSdkPackage, '{}'),
+    writeFile(paths.acpSdkPackage, '{}'),
+    writeFile(paths.braceExpansionPackage, '{"version":"5.0.8"}'),
   ]);
   await assertDesktopPackageLayout(appPath);
 } finally {

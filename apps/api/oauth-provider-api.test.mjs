@@ -111,6 +111,20 @@ test('OAuth presets hide models before auth and Codex loads its account catalog 
   assert.equal(authorized.providers.find((provider) => provider.value === 'claude-oauth').catalog.source, 'frakio_builtin');
   assert.ok(authorized.providers.find((provider) => provider.value === 'google-gemini-cli').models.length > 0);
 
+  const accountsResponse = await fetch(`${baseUrl}/api/oauth-accounts`, { headers });
+  assert.equal(accountsResponse.status, 200);
+  const accounts = await accountsResponse.json();
+  const codexAccount = accounts.accounts.find((account) => account.providerKey === 'openai-codex');
+  assert.ok(codexAccount?.id);
+  assert.equal('access' in codexAccount, false);
+  assert.equal('refresh' in codexAccount, false);
+  assert.deepEqual(codexAccount.models, [{ id: 'model-codex', name: 'OpenAI Codex' }]);
+
+  const modelsAfterMigration = await fetch(`${baseUrl}/api/models`, { headers }).then((response) => response.json());
+  const migratedCodexModel = modelsAfterMigration.models.find((model) => model.id === 'model-codex');
+  assert.equal(migratedCodexModel.oauthAccountId, codexAccount.id);
+  assert.equal(migratedCodexModel.oauthAccountBindingRequired, false);
+
   const refreshedResponse = await fetch(`${baseUrl}/api/auth/codex/catalog`, { method: 'POST', headers, body: '{}' });
   assert.equal(refreshedResponse.status, 200);
   const refreshed = await refreshedResponse.json();

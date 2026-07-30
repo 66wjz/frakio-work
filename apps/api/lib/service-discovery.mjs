@@ -1,7 +1,7 @@
 import { mkdir, open, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 
-export const FRAKIO_SERVICE_PROTOCOL = 1;
+export const FRAKIO_SERVICE_PROTOCOL = 2;
 
 export function servicePaths(home) {
   const runtime = path.join(home, 'runtime');

@@ -176,7 +176,7 @@ test('assigning the first configured model materializes its provider in the Herm
   });
   assert.equal(assignResponse.status, 200);
   const assigned = await assignResponse.json();
-  assert.equal(assigned.agent.model, 'deepseek-v4-flash');
+  assert.equal(assigned.agent.model, `${model.id}::deepseek-v4-flash`);
   const profileDir = path.join(ctx.hermesHome, 'profiles', 'mark');
   const config = await readFile(path.join(profileDir, 'config.yaml'), 'utf8');
   const env = await readFile(path.join(profileDir, '.env'), 'utf8');

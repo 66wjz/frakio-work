@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.1.0 — 2026-07-30
+
+Agent 配置中的新建与编辑弹窗改为实体表单面板，浅色与暗色主题都有稳定的对比度；执行内核改为带图标、状态和默认标记的卡片选择，默认内核始终保持启用，其他运行时可以独立配置。
+
+工作台继续完善多运行时 Agent 协作、Knowledge 与 Memory 能力，并补齐当前 API、桌面端与 Web UI 的运行时策略、启动和回归覆盖。
+
+GitHub Release 新增 Windows ARM64 托管 Web UI 完整包。Linux x64、Windows x64、Windows ARM64 包均内置 Node、Python、Hermes Runtime、Bridge 与生产依赖，维持一行安装与本地启动方式。
+
+应用内 macOS 更新继续直接下载当前架构的 DMG 并校验对应 SHA256 清单；本版本不引入自动替换更新、代码签名或 Apple 公证。
+
 ## 1.0.1 — 2026-07-29
 
 补齐 `beautiful-mermaid 1.1.3`，并在 macOS 桌面端本地 API 提前退出时直接显示退出原因。发布构建会真实启动包内 API，避免依赖或资源遗漏直到用户安装后才暴露。

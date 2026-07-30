@@ -21,8 +21,11 @@ if ($Rollback) {
   exit 0
 }
 $DetectedArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture
-if ($DetectedArch -ne "X64") { throw "The Windows self-hosted package currently supports x64 only." }
-$Arch = "x64"
+$Arch = switch ($DetectedArch.ToString()) {
+  "X64" { "x64" }
+  "Arm64" { "arm64" }
+  default { throw "The Windows self-hosted package supports x64 and ARM64 only. Detected: $DetectedArch" }
+}
 $Platform = "win-$Arch"
 $Release = if ($env:FRAKIO_WORK_VERSION) {
   $RequestedTag = $env:FRAKIO_WORK_VERSION.Trim()

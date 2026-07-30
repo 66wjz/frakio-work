@@ -99,6 +99,29 @@ test('API owns Agent mention routing after the browser starts only the root run'
   const cookie = sessionResponse.headers.get('set-cookie')?.split(';')[0];
   const headers = { cookie, 'x-frakio-request': '1', 'content-type': 'application/json' };
   assert.equal((await fetch(`${baseUrl}/api/hermes-bootstrap/import`, { method: 'POST', headers })).status, 200);
+  const modelResponse = await fetch(`${baseUrl}/api/models`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      name: 'Local test model',
+      provider: 'Local',
+      kind: 'local',
+      protocol: 'OpenAI Compatible',
+      apiMode: 'chat_completions',
+      baseUrl: 'http://127.0.0.1:1234/v1',
+      model: 'test-model',
+      models: ['test-model'],
+    }),
+  });
+  assert.equal(modelResponse.status, 200);
+  const model = (await modelResponse.json()).model;
+  for (const agentId of ['iris', 'max']) {
+    assert.equal((await fetch(`${baseUrl}/api/agents/${agentId}`, {
+      method: 'PATCH',
+      headers,
+      body: JSON.stringify({ model: `${model.id}::test-model` }),
+    })).status, 200);
+  }
   const conversationResponse = await fetch(`${baseUrl}/api/conversations`, {
     method: 'POST',
     headers,
@@ -122,6 +145,7 @@ test('API owns Agent mention routing after the browser starts only the root run'
     const response = await fetch(`${baseUrl}/api/threads/${thread.id}`).then((item) => item.json());
     return response.thread.runStatus === 'idle'
       && response.thread.messages.some((message) => message.agentId === 'max')
+      && response.thread.activeRunGroup?.routes?.[0]?.status === 'completed'
       ? response.thread
       : null;
   });

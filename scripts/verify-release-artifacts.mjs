@@ -23,6 +23,7 @@ const required = [
   'Frakio-Work-mac-arm64-SHA256SUMS.txt',
   'Frakio-Work-mac-x64-SHA256SUMS.txt',
   `Frakio.Work.Web-${packageVersion}-win-x64.zip`,
+  `Frakio.Work.Web-${packageVersion}-win-arm64.zip`,
   `Frakio.Work.Web-${packageVersion}-linux-x64.tar.gz`,
 ];
 

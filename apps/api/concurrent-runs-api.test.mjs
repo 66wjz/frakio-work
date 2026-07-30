@@ -72,6 +72,27 @@ test('two conversations can run concurrently without losing either thread state'
 
   const importResponse = await fetch(`${baseUrl}/api/hermes-bootstrap/import`, { method: 'POST', headers });
   assert.equal(importResponse.status, 200);
+  const modelResponse = await fetch(`${baseUrl}/api/models`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify({
+      name: 'Local test model',
+      provider: 'Local',
+      kind: 'local',
+      protocol: 'OpenAI Compatible',
+      apiMode: 'chat_completions',
+      baseUrl: 'http://127.0.0.1:1234/v1',
+      model: 'test-model',
+      models: ['test-model'],
+    }),
+  });
+  assert.equal(modelResponse.status, 200);
+  const model = (await modelResponse.json()).model;
+  assert.equal((await fetch(`${baseUrl}/api/agents/iris`, {
+    method: 'PATCH',
+    headers,
+    body: JSON.stringify({ model: `${model.id}::test-model` }),
+  })).status, 200);
 
   const conversationResponses = await Promise.all(['First', 'Second'].map((title) => fetch(`${baseUrl}/api/conversations`, {
     method: 'POST',

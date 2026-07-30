@@ -61,6 +61,17 @@ import {
   resolvePlanQuestionBatch,
   submitPlanDraft,
 } from './lib/plan-mode.mjs';
+import { createRuntimeStore } from './runtime/store.mjs';
+import { createRuntimeRegistry, normalizeRuntimePolicy, runtimeForAgent } from './runtime/registry.mjs';
+import { modelNames as runtimeModelNames, modelSelectionValue, resolveModelSelection, resolveModelSelectionByPrecedence, splitModelSelection } from './runtime/model-selection.mjs';
+import { createPiBridge } from './runtime/pi-bridge.mjs';
+import { createCodexAppServerBridge } from './runtime/codex-app-server.mjs';
+import { createClaudeAgentSdkBridge } from './runtime/claude-agent-sdk.mjs';
+import { createGeminiAcpBridge } from './runtime/gemini-acp.mjs';
+import { createWorkScheduler } from './runtime/work-scheduler.mjs';
+import { createWorktreeManager } from './runtime/worktree-manager.mjs';
+import { createKnowledgeGateway } from './knowledge/gateway.mjs';
+import { createMemoryLedger } from './memory/ledger.mjs';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
@@ -79,6 +90,7 @@ const statePath = process.env.FRAKIO_WORK_STATE_PATH || path.join(frakioWorkHome
 const secretsPath = process.env.FRAKIO_WORK_SECRETS_PATH || path.join(frakioWorkHome, 'data/model-secrets.json');
 const telemetryPath = process.env.FRAKIO_WORK_TELEMETRY_PATH || path.join(frakioWorkHome, 'data/telemetry.json');
 const modelCatalogCachePath = process.env.FRAKIO_WORK_MODEL_CATALOG_PATH || path.join(frakioWorkHome, 'data/model-catalog-cache.json');
+const runtimeDatabasePath = process.env.FRAKIO_WORK_RUNTIME_DB_PATH || path.join(frakioWorkHome, 'data/frakio.db');
 const defaultProjectsRoot = process.env.FRAKIO_WORK_PROJECTS_ROOT || path.join(frakioWorkHome, 'projects');
 const serverDirectoryRoot = process.env.FRAKIO_WORK_PROJECTS_ROOT || homeDir;
 const webDistPath = process.env.FRAKIO_WORK_WEB_DIST || path.join(appRoot, 'dist');
@@ -135,6 +147,34 @@ const writeStateJson = createSerialJsonWriter(statePath, { mode: 0o600 });
 const writeSecretsJson = createSerialJsonWriter(secretsPath, { mode: 0o600 });
 const attachmentStore = createAttachmentStore(attachmentRoot);
 const modelCatalogCache = readCatalogCache(modelCatalogCachePath);
+const runtimeStore = createRuntimeStore(runtimeDatabasePath);
+const knowledgeGateway = createKnowledgeGateway({ store: runtimeStore });
+const memoryLedger = createMemoryLedger({ store: runtimeStore });
+const workScheduler = createWorkScheduler({ store: runtimeStore });
+const worktreeManager = createWorktreeManager({
+  root: path.join(frakioWorkHome, 'worktrees'),
+  execFile: execFileAsync,
+});
+const runtimeRegistry = createRuntimeRegistry({
+  resolveCommand: resolveRuntimeCommand,
+  execFile: execFileAsync,
+  piVersion: '0.83.0',
+  hermesStatus: hermesRuntimeStatus,
+});
+const piBridge = createPiBridge({
+  env: { FRAKIO_WORK_HOME: frakioWorkHome },
+  toolHandler: handlePiToolRequest,
+  credentialHandler: handlePiCredentialRequest,
+});
+const codexBridge = createCodexAppServerBridge({
+  commandResolver: resolveRuntimeCommand,
+});
+const claudeBridge = createClaudeAgentSdkBridge({
+  commandResolver: resolveRuntimeCommand,
+});
+const geminiBridge = createGeminiAcpBridge({
+  commandResolver: resolveRuntimeCommand,
+});
 void attachmentStore.cleanupOrphans().catch(() => {});
 let hermesApiProcess = null;
 let hermesBridgeProcess = null;
@@ -864,7 +904,16 @@ function runTelemetryProperties(thread) {
 
 function defaultState() {
   return {
-    version: 2,
+    version: 6,
+    features: {
+      runtimeRouterV1: true,
+      piRuntime: true,
+      piOAuthProviders: true,
+      piGeminiCodeAssistAdapter: false,
+      runtimeNeutralWork: true,
+      memoryLedger: true,
+      externalCliChannels: true,
+    },
     ui: { libraryCollapsed: false, pinnedNav: defaultPinnedNav, defaultAgentId: '', fallbackDecisionAgentId: '', defaultModel: '', density: 'comfortable', appearance: 'system', streamingResponses: true, showReasoning: true, richToolDescriptions: true, telemetryEnabled: false, telemetryNoticeSeenAt: '', agentMentionMaxDepth: 2, ...normalizeWorkbenchSidebarSettings() },
     userProfile: { avatarUrl: '', nickname: '', bio: '', age: '', hobbies: '', occupation: '', defaultAgentAddress: '', otherAgentAddress: '', completedAt: '', updatedAt: '' },
     observability: { modelUsage: [], modelRuns: [], systemEvents: [] },
@@ -891,7 +940,7 @@ function defaultState() {
     agents: [],
     models: [],
     spaces: [{ id: 'space_default', name: 'Frakio Work', iconKind: 'dot', iconValue: '', theme: defaultSpaceTheme, archivedAt: null, createdAt: now(), updatedAt: now(), lastOpenedAt: now() }],
-    workspaces: [{ id: 'workspace_default', spaceId: 'space_default', name: 'Frakio Work', rootPath: defaultVaultPath, vaultId: null, environment: 'local', activeThreadId: null, archivedAt: null, pinnedAt: null, createdAt: now(), updatedAt: now() }],
+    workspaces: [{ id: 'workspace_default', spaceId: 'space_default', name: 'Frakio Work', rootPath: defaultVaultPath, vaultId: null, primaryVaultId: null, sharedVaultIds: [], writableVaultIds: [], environment: 'local', activeThreadId: null, archivedAt: null, pinnedAt: null, createdAt: now(), updatedAt: now() }],
     vaults: [],
     threads: [],
   };
@@ -910,16 +959,189 @@ async function readState() {
     .some((key) => stored.ui?.[key] !== state.ui?.[key]);
   const removedConversationTransition = Object.prototype.hasOwnProperty.call(stored.ui || {}, 'conversationTransition');
   const approvalDefaultsChanged = await migrateHermes019ApprovalDefaults(state);
-  if (sidebarSettingsChanged || removedConversationTransition || approvalDefaultsChanged || (stored.spaces || []).some((space) => (Number(space?.theme?.renderVersion) || 0) < SPACE_THEME_RENDER_VERSION)) await writeState(state);
+  const oauthMigrationChanged = await migrateProfileOAuthToFrakio(state);
+  const oauthAccountBindingsChanged = await migrateModelOAuthAccountBindings(state);
+  const oauthModelStateChanged = (state.models || []).some((model) => {
+    if (!oauthProviderKeys.has(model.providerKey)) return false;
+    const authenticated = Boolean(model.oauthAccountId && getOAuthCredentialSync(model.providerKey, model.oauthAccountId)?.access);
+    const nextState = authenticated ? 'authorized' : '';
+    if (model.apiKeyState === nextState) return false;
+    model.apiKeyState = nextState;
+    return true;
+  });
+  const runtimeSchemaChanged = Number(stored.version || 0) < 6;
+  if (sidebarSettingsChanged || removedConversationTransition || approvalDefaultsChanged || oauthMigrationChanged || oauthAccountBindingsChanged || oauthModelStateChanged || runtimeSchemaChanged || (stored.spaces || []).some((space) => (Number(space?.theme?.renderVersion) || 0) < SPACE_THEME_RENDER_VERSION)) await writeState(state);
   return state;
 }
 
 async function readSecrets() {
-  return readJsonWithRecovery(secretsPath, () => ({ models: {} }));
+  return readJsonWithRecovery(secretsPath, () => ({ models: {}, oauth: {}, oauthAccounts: {}, oauthMigrationVersion: 0 }));
 }
 
 async function writeSecrets(secrets) {
-  await writeSecretsJson({ models: secrets.models || {} });
+  await writeSecretsJson({
+    models: secrets.models || {},
+    oauth: secrets.oauth || {},
+    oauthAccounts: secrets.oauthAccounts || {},
+    oauthMigrationVersion: Number(secrets.oauthMigrationVersion || 0),
+  });
+}
+
+function normalizeOAuthCredential(value = {}) {
+  const access = String(value.access || value.accessToken || value.access_token || '').trim();
+  const refresh = String(value.refresh || value.refreshToken || value.refresh_token || '').trim();
+  const expires = Number(value.expires || value.expiresAt || value.expires_at_ms || 0) || 0;
+  if (!access && !refresh) return null;
+  return {
+    id: String(value.id || value.accountId || value.account_id || '').trim(),
+    type: 'oauth',
+    access,
+    refresh,
+    expires,
+    accountId: String(value.accountId || value.account_id || '').trim(),
+    label: String(value.label || value.name || '').trim().slice(0, 80),
+    email: String(value.email || '').trim(),
+    codeAssist: value.codeAssist && typeof value.codeAssist === 'object' ? value.codeAssist : {},
+    updatedAt: String(value.updatedAt || value.last_refresh || now()),
+  };
+}
+
+function oauthAccountId(providerKey, credential = {}) {
+  const supplied = String(credential.id || credential.accountId || credential.account_id || '').trim();
+  if (supplied) return supplied;
+  const identity = String(credential.email || credential.accountId || '').trim();
+  const tokenIdentity = String(credential.access || credential.accessToken || credential.access_token || credential.refresh || credential.refreshToken || credential.refresh_token || '').trim();
+  const source = identity || tokenIdentity;
+  return `${providerKey}_${source ? createHash('sha256').update(source).digest('hex').slice(0, 12) : randomUUID().slice(0, 12)}`;
+}
+
+function oauthCredentialFingerprint(credential = {}) {
+  const normalized = normalizeOAuthCredential(credential);
+  if (!normalized) return '';
+  const identity = normalized.access || normalized.refresh;
+  return identity ? createHash('sha256').update(identity).digest('hex') : '';
+}
+
+function oauthAccountSummary(providerKey, credential = {}) {
+  const normalized = normalizeOAuthCredential(credential) || {};
+  const id = oauthAccountId(providerKey, normalized);
+  const identity = normalized.email || normalized.accountId || id.slice(-8);
+  return { id, providerKey, label: normalized.label || identity, identity, email: normalized.email || '', accountId: normalized.accountId || '', expiresAt: normalized.expires || 0, updatedAt: normalized.updatedAt || '', codeAssist: normalized.codeAssist || {} };
+}
+
+function migrateOAuthAccountsInSecrets(secrets, state = null) {
+  secrets.oauthAccounts = { ...(secrets.oauthAccounts || {}) };
+  let changed = false;
+  for (const [providerKey, legacy] of Object.entries(secrets.oauth || {})) {
+    const credential = normalizeOAuthCredential(legacy);
+    if (!credential) continue;
+    const accountId = oauthAccountId(providerKey, credential);
+    const accounts = { ...(secrets.oauthAccounts[providerKey] || {}) };
+    const existingAccountId = Object.entries(accounts)
+      .find(([, existing]) => oauthCredentialFingerprint(existing) === oauthCredentialFingerprint(credential))?.[0];
+    if (!accounts[accountId] && !existingAccountId) {
+      accounts[accountId] = { ...credential, id: accountId, accountId: credential.accountId || accountId, label: credential.label || credential.email || credential.accountId || `${providerKey} 账户` };
+      secrets.oauthAccounts[providerKey] = accounts;
+      changed = true;
+    }
+  }
+  if (state) {
+    for (const [providerKey, accounts] of Object.entries(secrets.oauthAccounts || {})) {
+      const canonicalByFingerprint = new Map();
+      const redirects = new Map();
+      for (const [accountId, account] of Object.entries(accounts || {})) {
+        const fingerprint = oauthCredentialFingerprint(account);
+        if (!fingerprint) continue;
+        const canonicalId = canonicalByFingerprint.get(fingerprint);
+        if (!canonicalId) {
+          canonicalByFingerprint.set(fingerprint, accountId);
+          continue;
+        }
+        redirects.set(accountId, canonicalId);
+        delete accounts[accountId];
+        changed = true;
+      }
+      if (redirects.size) {
+        for (const model of state.models || []) {
+          if (model.providerKey !== providerKey || !redirects.has(model.oauthAccountId)) continue;
+          model.oauthAccountId = redirects.get(model.oauthAccountId);
+          changed = true;
+        }
+      }
+    }
+  }
+  return changed;
+}
+
+async function getOAuthCredential(providerKey, accountId = '') {
+  const secrets = await readSecrets();
+  migrateOAuthAccountsInSecrets(secrets);
+  const accounts = secrets.oauthAccounts?.[providerKey] || {};
+  const selected = String(accountId || '').trim();
+  if (selected) return accounts[selected] ? normalizeOAuthCredential(accounts[selected]) : null;
+  return normalizeOAuthCredential(secrets.oauth?.[providerKey]) || normalizeOAuthCredential(Object.values(accounts)[0]);
+}
+
+function getOAuthCredentialSync(providerKey, accountId = '') {
+  try {
+    const secrets = JSON.parse(readFileSync(secretsPath, 'utf8')) || {};
+    migrateOAuthAccountsInSecrets(secrets);
+    const accounts = secrets.oauthAccounts?.[providerKey] || {};
+    if (accountId) return accounts[accountId] ? normalizeOAuthCredential(accounts[accountId]) : null;
+    return normalizeOAuthCredential(secrets.oauth?.[providerKey]) || normalizeOAuthCredential(Object.values(accounts)[0]);
+  } catch {
+    return null;
+  }
+}
+
+async function setOAuthCredential(providerKey, value, requestedAccountId = '') {
+  const credential = normalizeOAuthCredential(value);
+  if (!credential) throw new Error(`${providerKey} OAuth 凭据不完整。`);
+  const secrets = await readSecrets();
+  migrateOAuthAccountsInSecrets(secrets);
+  const accountId = String(requestedAccountId || credential.id || credential.accountId || '').trim() || oauthAccountId(providerKey, credential);
+  const current = normalizeOAuthCredential(secrets.oauthAccounts?.[providerKey]?.[accountId]) || {};
+  const stored = { ...current, ...credential, id: accountId, accountId: credential.accountId || current.accountId || accountId, label: credential.label || current.label || credential.email || credential.accountId || `${providerKey} 账户` };
+  secrets.oauthAccounts = { ...(secrets.oauthAccounts || {}), [providerKey]: { ...(secrets.oauthAccounts?.[providerKey] || {}), [accountId]: stored } };
+  // Legacy mirror is retained only for old Hermes installs. New Frakio runs use
+  // the account selected by the model configuration.
+  secrets.oauth = { ...(secrets.oauth || {}), [providerKey]: stored };
+  await writeSecrets(secrets);
+  return stored;
+}
+
+async function deleteOAuthCredential(providerKey, accountId = '') {
+  const secrets = await readSecrets();
+  migrateOAuthAccountsInSecrets(secrets);
+  if (accountId) {
+    if (!secrets.oauthAccounts?.[providerKey]?.[accountId]) return;
+    delete secrets.oauthAccounts[providerKey][accountId];
+    const remaining = Object.values(secrets.oauthAccounts[providerKey] || {}).map(normalizeOAuthCredential).filter(Boolean);
+    const mirror = normalizeOAuthCredential(secrets.oauth?.[providerKey]) || {};
+    if (!remaining.length) delete secrets.oauth[providerKey];
+    else if (oauthAccountId(providerKey, mirror) === accountId) secrets.oauth[providerKey] = remaining[0];
+  } else if (secrets.oauth?.[providerKey]) delete secrets.oauth[providerKey];
+  await writeSecrets(secrets);
+}
+
+async function listOAuthAccounts() {
+  const secrets = await readSecrets();
+  const changed = migrateOAuthAccountsInSecrets(secrets);
+  if (changed) await writeSecrets(secrets);
+  return Object.entries(secrets.oauthAccounts || {}).flatMap(([providerKey, accounts]) => Object.values(accounts || {}).map((credential) => oauthAccountSummary(providerKey, credential)));
+}
+
+async function migrateModelOAuthAccountBindings(state) {
+  const accounts = await listOAuthAccounts();
+  let changed = false;
+  for (const model of state.models || []) {
+    if (!oauthProviderKeys.has(model.providerKey) || model.oauthAccountId) continue;
+    const candidates = accounts.filter((item) => item.providerKey === model.providerKey);
+    if (candidates.length !== 1) continue;
+    model.oauthAccountId = candidates[0].id;
+    changed = true;
+  }
+  return changed;
 }
 
 async function getModelSecret(modelId) {
@@ -933,6 +1155,94 @@ async function getReusableModelSecret(selectedModel, models = []) {
   if (direct) return direct;
   const sameBaseUrl = normalizeModels(models || []).find((model) => model.id !== selectedModel.id && model.baseUrl && model.baseUrl === selectedModel.baseUrl);
   return sameBaseUrl?.id ? await getModelSecret(sameBaseUrl.id) : '';
+}
+
+function runtimeModelApiMode(model, modelName = '') {
+  return runtimeApiMode(model?.modelApiModes?.[modelName] || model?.apiMode || 'chat_completions') || 'chat_completions';
+}
+
+function runtimeSupportsModel(runtimeId, model, modelName = '') {
+  const apiMode = runtimeModelApiMode(model, modelName);
+  if (runtimeId === 'pi') return ['chat_completions', 'codex_responses', 'anthropic_messages'].includes(apiMode);
+  if (runtimeId === 'hermes') return ['chat_completions', 'codex_responses', 'anthropic_messages', 'bedrock_converse'].includes(apiMode);
+  return false;
+}
+
+function oauthCredentialProviderKey(model) {
+  const key = String(model?.providerKey || '').trim();
+  if (key === 'openai-codex' || key === 'claude-oauth' || key === geminiProviderKey) return key;
+  return '';
+}
+
+function piOAuthProviderId(providerKey) {
+  if (providerKey === 'openai-codex') return 'openai-codex';
+  if (providerKey === 'claude-oauth') return 'anthropic';
+  if (providerKey === geminiProviderKey) return 'frakio-gemini-code-assist';
+  return '';
+}
+
+function modelCredentialNotRequired(model) {
+  if (model?.kind === 'local') return true;
+  return /^(?:https?:\/\/)?(?:localhost|127\.0\.0\.1|\[::1\])(?::|\/|$)/i.test(String(model?.baseUrl || ''));
+}
+
+async function runtimeModelCredentialStatus(runtimeId, model, models = []) {
+  if (modelCredentialNotRequired(model)) return 'not_required';
+  if (await getReusableModelSecret(model, models)) return 'ready';
+  const providerKey = oauthCredentialProviderKey(model);
+  const oauth = providerKey ? await getOAuthCredential(providerKey, model?.oauthAccountId || '') : null;
+  if (oauth?.access && (runtimeId === 'hermes' || runtimeId === 'pi')) return 'ready';
+  return 'missing';
+}
+
+async function runtimeModelCompatibility(runtimeId, model, models = [], features = {}) {
+  const names = runtimeModelNames(model);
+  const supportedNames = names.filter((modelName) => runtimeSupportsModel(runtimeId, model, modelName));
+  const unsupportedModelIds = names.filter((modelName) => !supportedNames.includes(modelName));
+  const oauthProviderKey = oauthCredentialProviderKey(model);
+  if (oauthProviderKey && !model?.oauthAccountId) {
+    return {
+      status: 'missing_credentials', credentialStatus: 'missing', usableModelIds: [], unsupportedModelIds,
+      reason: '请在模型配置中选择一个 Frakio Work 授权账户。',
+    };
+  }
+  const credentialStatus = await runtimeModelCredentialStatus(runtimeId, model, models);
+  if (runtimeId === 'pi' && model?.providerKey === geminiProviderKey && !features.piGeminiCodeAssistAdapter) {
+    return {
+      status: 'unsupported',
+      credentialStatus,
+      usableModelIds: [],
+      unsupportedModelIds: names,
+      reason: 'Gemini Code Assist 的 Pi 适配器尚未开放。',
+    };
+  }
+  if (!supportedNames.length) {
+    return {
+      status: 'unsupported',
+      credentialStatus,
+      usableModelIds: [],
+      unsupportedModelIds,
+      reason: `${runtimeId === 'pi' ? 'Pi' : 'Hermes'} 不支持该配置使用的 API 协议。`,
+    };
+  }
+  if (credentialStatus === 'missing') {
+    return {
+      status: 'missing_credentials',
+      credentialStatus,
+      usableModelIds: [],
+      unsupportedModelIds,
+      reason: runtimeId === 'pi'
+        ? '缺少可供 Pi 使用的模型凭据。请在 Frakio Model Center 完成该 Provider 授权。'
+        : '缺少可供 Hermes 使用的模型凭据。',
+    };
+  }
+  return {
+    status: unsupportedModelIds.length ? 'partial' : 'ready',
+    credentialStatus,
+    usableModelIds: supportedNames,
+    unsupportedModelIds,
+    reason: unsupportedModelIds.length ? '部分模型的 API 协议不受当前运行时支持。' : '可直接使用 Frakio Model Center 配置。',
+  };
 }
 
 async function setModelSecret(modelId, apiKey) {
@@ -1048,6 +1358,33 @@ function normalizeSpace(space = {}, fallbackName = 'Frakio Work') {
   };
 }
 
+function agentProfileRevision(agent = {}) {
+  const runtimePolicy = normalizeRuntimePolicy(agent.runtimePolicy, { hasHermesProfile: Boolean(agent.profileName) });
+  return createHash('sha256').update(JSON.stringify({
+    name: String(agent.name || ''),
+    role: String(agent.role || ''),
+    soul: String(agent.soul || agent.scope || ''),
+    scope: String(agent.scope || ''),
+    userProfile: String(agent.userProfile || ''),
+    runtimePolicy,
+  })).digest('hex').slice(0, 20);
+}
+
+function agentProfileSnapshot(agent) {
+  const runtimePolicy = normalizeRuntimePolicy(agent?.runtimePolicy, { hasHermesProfile: Boolean(agent?.profileName) });
+  return {
+    agentId: agent.id,
+    revision: agentProfileRevision(agent),
+    name: agent.name,
+    role: agent.role || 'Agent',
+    soul: agent.soul || agent.scope || '',
+    scope: agent.scope || '',
+    userProfile: agent.userProfile || '',
+    runtimePolicy,
+    createdAt: now(),
+  };
+}
+
 function normalizeState(state) {
   const base = defaultState();
   const sidebarSettings = normalizeWorkbenchSidebarSettings(state?.ui || {});
@@ -1080,6 +1417,15 @@ function normalizeState(state) {
       name: String(workspace.name || 'Frakio Work').slice(0, 60),
       rootPath: path.resolve(String(workspace.rootPath || workspace.path || vault?.path || projectRoot)),
       vaultId: hasVaultId ? (sourceVaults.some((item) => item.id === workspace.vaultId) ? workspace.vaultId : null) : vault?.id || null,
+      primaryVaultId: sourceVaults.some((item) => item.id === (workspace.primaryVaultId || workspace.vaultId))
+        ? (workspace.primaryVaultId || workspace.vaultId)
+        : null,
+      sharedVaultIds: Array.from(new Set(Array.isArray(workspace.sharedVaultIds) ? workspace.sharedVaultIds : []))
+        .filter((vaultId) => sourceVaults.some((item) => item.id === vaultId)),
+      writableVaultIds: Array.from(new Set([
+        ...(Array.isArray(workspace.writableVaultIds) ? workspace.writableVaultIds : []),
+        workspace.primaryVaultId || workspace.vaultId || '',
+      ])).filter((vaultId) => sourceVaults.some((item) => item.id === vaultId)),
       environment: workspace.environment || 'local',
       activeThreadId: workspace.activeThreadId || null,
       archivedAt: workspace.archivedAt || null,
@@ -1096,7 +1442,11 @@ function normalizeState(state) {
   return {
     ...base,
     ...stateWithoutDivisions,
-    version: 2,
+    version: 6,
+    features: {
+      ...base.features,
+      ...(state.features || {}),
+    },
     integrations: {
       ...base.integrations,
       ...(state.integrations || {}),
@@ -1131,8 +1481,34 @@ function normalizeState(state) {
     spaces: normalizedSpaces,
     workspaces: normalizedWorkspaces,
     models: normalizedModels,
-    agents: agents.map((agent) => ({
-      ...agent,
+    agents: agents.map((agent) => {
+      const runtimePolicyInput = Number(state?.version || 0) < 5
+        ? {
+          ...(agent.runtimePolicy || {}),
+          allowedRuntimeIds: Array.from(new Set([
+            ...(Array.isArray(agent.runtimePolicy?.allowedRuntimeIds) ? agent.runtimePolicy.allowedRuntimeIds : []),
+            'hermes', 'pi', 'codex', 'claude', 'gemini',
+          ])),
+        }
+        : agent.runtimePolicy;
+      const normalizedAgent = {
+        ...agent,
+      model: (() => {
+        if (String(agent.model || '').trim()) {
+          const resolved = resolveModelSelection(agent.model, normalizedModels);
+          return resolved.selectionValue || String(agent.model).trim();
+        }
+        if (Number(state?.version || 0) >= 6) return '';
+        const legacyValues = [
+          agent.runtimePolicy?.defaultModelByRuntime?.hermes,
+          agent.runtimePolicy?.defaultModelByRuntime?.pi,
+        ].filter(Boolean);
+        for (const legacyValue of legacyValues) {
+          const resolved = resolveModelSelection(legacyValue, normalizedModels);
+          if (resolved.selectedModel) return resolved.selectionValue;
+        }
+        return '';
+      })(),
       soul: agent.soul || agent.scope || '',
       source: agent.source || 'demo',
       profileName: agent.profileName || '',
@@ -1146,7 +1522,10 @@ function normalizeState(state) {
       skills: Array.isArray(agent.skills) ? agent.skills : [],
       plugins: Array.isArray(agent.plugins) ? agent.plugins : [],
       avatarUrl: agent.avatarUrl || '',
-    })),
+      runtimePolicy: normalizeRuntimePolicy(runtimePolicyInput, { hasHermesProfile: Boolean(agent.profileName) }),
+      };
+      return { ...normalizedAgent, profileRevision: agentProfileRevision(normalizedAgent) };
+    }),
     vaults: sourceVaults,
     threads: (Array.isArray(state.threads) ? state.threads : base.threads).map((thread) => {
       const hasVaultId = Object.prototype.hasOwnProperty.call(thread, 'vaultId');
@@ -1173,11 +1552,15 @@ function normalizeState(state) {
       selectedAgents: Array.isArray(thread.selectedAgents) ? thread.selectedAgents.filter((agentId) => agentIds.has(agentId)) : [],
       agentModelOverrides: normalizeAgentModelOverrides(thread.agentModelOverrides, agents, normalizedModels),
       agentRunOverrides: normalizeAgentRunOverrides(thread.agentRunOverrides, agents),
+      agentRuntimeOverrides: normalizeAgentRuntimeOverrides(thread.agentRuntimeOverrides, agents),
       workflow: Array.isArray(thread.workflow) ? thread.workflow : [],
       proposals: Array.isArray(thread.proposals) ? thread.proposals : [],
       messages: Array.isArray(thread.messages) ? thread.messages : [],
       engine: ['simulate', 'hermes-studio', 'model-provider', 'workspace-group', 'hermes-agent'].includes(thread.engine) ? thread.engine : 'simulate',
       externalSessionId: thread.externalSessionId || null,
+      runtimeId: String(thread.runtimeId || 'hermes'),
+      runtimeSessionIds: thread.runtimeSessionIds && typeof thread.runtimeSessionIds === 'object' ? thread.runtimeSessionIds : {},
+      activeWorkRuns: thread.activeWorkRuns && typeof thread.activeWorkRuns === 'object' ? thread.activeWorkRuns : {},
       artifacts: Array.isArray(thread.artifacts) ? thread.artifacts : [],
       workflowState: Array.isArray(thread.workflowState) ? thread.workflowState : [],
       runTranscripts: normalizeRunTranscripts(thread.runTranscripts),
@@ -1229,6 +1612,17 @@ function normalizeAgentRunOverrides(overrides, agents = []) {
     }]);
   }
   return Object.fromEntries(normalized);
+}
+
+function normalizeAgentRuntimeOverrides(overrides, agents = []) {
+  const agentById = new Map((agents || []).map((agent) => [agent.id, agent]));
+  return Object.fromEntries(Object.entries(overrides && typeof overrides === 'object' ? overrides : {})
+    .map(([agentId, runtimeId]) => [agentId, String(runtimeId || '').trim()])
+    .filter(([agentId, runtimeId]) => {
+      const agent = agentById.get(agentId);
+      if (!agent || !runtimeId) return false;
+      return normalizeRuntimePolicy(agent.runtimePolicy, { hasHermesProfile: Boolean(agent.profileName) }).allowedRuntimeIds.includes(runtimeId);
+    }));
 }
 
 function isStudioBaseUrl(baseUrl) {
@@ -1338,6 +1732,7 @@ function normalizeModels(models) {
     source: ['demo', 'hermes-studio', 'hermes-profile', 'manual'].includes(model.source) ? model.source : 'manual',
     profileName: String(model.profileName || '').trim().slice(0, 80),
     providerKey: String(model.providerKey || '').trim().slice(0, 120),
+    oauthAccountId: String(model.oauthAccountId || '').trim().slice(0, 160),
     apiMode: runtimeApiMode(model.apiMode),
     apiModePreference: normalizeApiModePreference(model.apiModePreference, model.apiMode),
     modelsUrl: String(model.modelsUrl || '').trim().slice(0, 300),
@@ -1436,6 +1831,8 @@ function publicModel(model) {
     source: model.source || 'manual',
     profileName: model.profileName || '',
     providerKey: model.providerKey || '',
+    oauthAccountId: model.oauthAccountId || '',
+    oauthAccountBindingRequired: Boolean(oauthProviderKeys.has(model.providerKey) && !model.oauthAccountId),
     apiMode: model.apiMode || '',
     apiModePreference: normalizeApiModePreference(model.apiModePreference, model.apiMode),
     modelsUrl: model.modelsUrl || '',
@@ -2652,14 +3049,15 @@ function updateHermesModelProviderConfig(profileName, providerKey, model) {
   });
 }
 
-function saveCodexCliTokens(accessToken, refreshToken) {
-  const codexHome = process.env.CODEX_HOME || path.join(homeDir, '.codex');
-  const codexAuthPath = path.join(codexHome, 'auth.json');
-  mkdirSync(path.dirname(codexAuthPath), { recursive: true });
-  writeFileSync(codexAuthPath, `${JSON.stringify({ tokens: { access_token: accessToken, refresh_token: refreshToken }, last_refresh: new Date().toISOString() }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
-}
-
-async function saveCodexOAuthTokens(profileName, accessToken, refreshToken) {
+async function saveCodexOAuthTokens(profileName, accessToken, refreshToken, expiresAtMs = 0, accountId = '', accountRecordId = '', label = '') {
+  await setOAuthCredential('openai-codex', {
+    access: accessToken,
+    refresh: refreshToken,
+    expires: expiresAtMs,
+    accountId,
+    label,
+    updatedAt: now(),
+  }, accountRecordId);
   const authPath = authJsonPathForProfile(profileName);
   const auth = loadAuthJsonSync(authPath);
   auth.providers = auth.providers || {};
@@ -2667,7 +3065,6 @@ async function saveCodexOAuthTokens(profileName, accessToken, refreshToken) {
   auth.credential_pool = auth.credential_pool || {};
   auth.credential_pool['openai-codex'] = [{ id: `openai-codex-${Date.now()}`, label: 'OpenAI Codex', base_url: providerPresetByKey('openai-codex')?.baseUrl || '', access_token: accessToken, last_status: null }];
   saveAuthJsonSync(authPath, auth);
-  saveCodexCliTokens(accessToken, refreshToken);
 }
 
 function authEntryHasCredential(value) {
@@ -2679,13 +3076,20 @@ function authEntryHasCredential(value) {
   );
 }
 
-function oauthProviderAuthenticated(profileName, providerKey) {
+function oauthProviderAuthenticated(profileName, providerKey, accountId = '') {
+  if (getOAuthCredentialSync(providerKey, accountId)) return true;
+  if (accountId) return false;
   const auth = loadAuthJsonSync(authJsonPathForProfile(profileName));
   const aliases = providerKey === 'claude-oauth' ? ['claude-oauth', 'anthropic'] : [providerKey];
   return aliases.some((key) => authEntryHasCredential(auth.providers?.[key]) || authEntryHasCredential(auth.credential_pool?.[key]));
 }
 
-function oauthProviderAccessToken(profileName, providerKey) {
+function oauthProviderAccessToken(profileName, providerKey, accountId = '') {
+  // OAuth credentials are Frakio-wide. The Hermes Profile remains a compatibility
+  // mirror for existing Hermes runtimes and old installations.
+  const globalCredential = getOAuthCredentialSync(providerKey, accountId);
+  if (globalCredential?.access) return globalCredential.access;
+  if (accountId) return '';
   const auth = loadAuthJsonSync(authJsonPathForProfile(profileName));
   const aliases = providerKey === 'claude-oauth' ? ['claude-oauth', 'anthropic'] : [providerKey];
   for (const key of aliases) {
@@ -2698,15 +3102,114 @@ function oauthProviderAccessToken(profileName, providerKey) {
   return '';
 }
 
-function oauthCatalogModel(providerKey) {
-  const preset = providerPresetByKey(providerKey) || {};
-  return { providerKey, apiMode: preset.apiMode || '', baseUrl: preset.baseUrl || '' };
+async function migrateProfileOAuthToFrakio(state) {
+  const secrets = await readSecrets();
+  let changed = migrateOAuthAccountsInSecrets(secrets, state);
+  const profileNames = Array.from(new Set([
+    ...((state.agents || []).map((agent) => String(agent.profileName || '').trim())),
+    ...((state.models || []).map((model) => String(model.profileName || '').trim())),
+    String(state.integrations?.hermesStudio?.selectedProfile || '').trim(),
+  ].filter(Boolean)));
+  for (const profileName of profileNames) {
+    const auth = loadAuthJsonSync(authJsonPathForProfile(profileName));
+    const sourceFor = (keys) => keys.flatMap((key) => [auth.providers?.[key], ...(Array.isArray(auth.credential_pool?.[key]) ? auth.credential_pool[key] : [])])
+      .find((entry) => authEntryHasCredential(entry));
+    for (const [providerKey, source] of Object.entries({
+      'openai-codex': sourceFor(['openai-codex']),
+      'claude-oauth': sourceFor(['claude-oauth', 'anthropic']),
+      [geminiProviderKey]: sourceFor([geminiProviderKey]),
+    })) {
+      if (!source) continue;
+      const access = String(source.tokens?.access_token || source.access_token || source.accessToken || '').trim();
+      const credential = normalizeOAuthCredential({
+        id: access ? `${providerKey}_${createHash('sha256').update(access).digest('hex').slice(0, 16)}` : '',
+        access,
+        refresh: source.tokens?.refresh_token || source.refresh_token || source.refreshToken,
+        expires: source.tokens?.expires_at_ms || source.expires_at_ms || source.expiresAt,
+        email: source.email,
+        label: source.email || `${providerKey} 账户`,
+        codeAssist: source.code_assist,
+        updatedAt: source.last_refresh,
+      });
+      if (!credential) continue;
+      const existingAccount = Object.entries(secrets.oauthAccounts?.[providerKey] || {})
+        .find(([, item]) => normalizeOAuthCredential(item)?.access === credential.access);
+      if (existingAccount) continue;
+      const accountId = oauthAccountId(providerKey, credential);
+      const current = normalizeOAuthCredential(secrets.oauthAccounts?.[providerKey]?.[accountId]);
+      if (current?.access === credential.access) continue;
+      secrets.oauthAccounts = { ...(secrets.oauthAccounts || {}), [providerKey]: { ...(secrets.oauthAccounts?.[providerKey] || {}), [accountId]: { ...credential, id: accountId } } };
+      if (!secrets.oauth?.[providerKey]) secrets.oauth = { ...(secrets.oauth || {}), [providerKey]: { ...credential, id: accountId } };
+      changed = true;
+    }
+  }
+  if (Number(secrets.oauthMigrationVersion || 0) < 2) { secrets.oauthMigrationVersion = 2; changed = true; }
+  if (changed) await writeSecrets(secrets);
+  return changed;
 }
 
-function oauthProviderState(profileName, providerKey) {
+async function handlePiCredentialRequest(operation, piProviderId, rawCredential, accountId = '') {
+  const providerKey = piProviderId === 'openai-codex'
+    ? 'openai-codex'
+    : piProviderId === 'anthropic'
+      ? 'claude-oauth'
+      : piProviderId === 'frakio-gemini-code-assist'
+        ? geminiProviderKey
+        : '';
+  if (!providerKey) throw new Error(`Pi 请求了不受 Frakio 管理的凭据：${String(piProviderId || '')}`);
+  if (operation === 'read') return getOAuthCredential(providerKey, accountId);
+  if (operation === 'write') {
+    const current = await getOAuthCredential(providerKey, accountId);
+    if (!rawCredential || rawCredential.type !== 'oauth') throw new Error('Pi OAuth 凭据格式无效。');
+    return setOAuthCredential(providerKey, {
+      ...current,
+      access: rawCredential.access,
+      refresh: rawCredential.refresh,
+      expires: rawCredential.expires,
+      updatedAt: now(),
+    }, accountId);
+  }
+  if (operation === 'refresh') {
+    if (providerKey !== geminiProviderKey) throw new Error('该 Pi Provider 不使用 Frakio 刷新流程。');
+    const refreshToken = String(rawCredential?.refresh || rawCredential?.refresh_token || '').trim();
+    if (!refreshToken) throw new Error('Gemini OAuth 缺少 refresh token，请重新授权。');
+    const body = new URLSearchParams({
+      client_id: googleClientId,
+      refresh_token: refreshToken,
+      grant_type: 'refresh_token',
+    });
+    if (googleClientSecret) body.set('client_secret', googleClientSecret);
+    const response = await fetch(googleTokenEndpoint, {
+      method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body,
+    });
+    const tokenData = await response.json().catch(() => ({}));
+    if (!response.ok || !tokenData.access_token) throw new Error('Gemini OAuth 刷新失败，请重新授权。');
+    const current = await getOAuthCredential(providerKey, accountId);
+    return setOAuthCredential(providerKey, {
+      ...current,
+      access: tokenData.access_token,
+      refresh: tokenData.refresh_token || refreshToken,
+      expires: Date.now() + Math.max(60, Number(tokenData.expires_in || 3600)) * 1000,
+      updatedAt: now(),
+    }, accountId);
+  }
+  if (operation === 'delete') {
+    // Pi owns neither the account nor its lifetime. A runtime-side logout must
+    // not silently remove the Frakio-wide authorization record.
+    return undefined;
+  }
+  throw new Error(`未知的 Pi 凭据操作：${String(operation || '')}`);
+}
+
+function oauthCatalogModel(providerKey, accountId = '') {
+  const preset = providerPresetByKey(providerKey) || {};
+  return { providerKey: accountId ? `${providerKey}::${accountId}` : providerKey, apiMode: preset.apiMode || '', baseUrl: preset.baseUrl || '' };
+}
+
+function oauthProviderState(profileName, providerKey, accountId = '') {
   const preset = providerPresetByKey(providerKey);
-  const authenticated = Boolean(preset?.authType && oauthProviderAuthenticated(profileName, providerKey));
-  const cached = catalogStatus(modelCatalogCache, oauthCatalogModel(providerKey));
+  const authenticated = Boolean(preset?.authType && oauthProviderAuthenticated(profileName, providerKey, accountId));
+  const cached = catalogStatus(modelCatalogCache, oauthCatalogModel(providerKey, accountId));
   if (!authenticated) {
     return { authenticated: false, models: [], catalog: { ...cached, source: 'none', modelIds: [] } };
   }
@@ -2724,8 +3227,8 @@ function oauthProviderState(profileName, providerKey) {
   };
 }
 
-function oauthProviderPayload(profileName, providerKey) {
-  const state = oauthProviderState(profileName, providerKey);
+function oauthProviderPayload(profileName, providerKey, accountId = '') {
+  const state = oauthProviderState(profileName, providerKey, accountId);
   const preset = providerPresetByKey(providerKey) || {};
   const capabilityModel = normalizeModels([{
     id: 'oauth-catalog', name: preset.label || providerKey, provider: preset.label || providerKey,
@@ -2738,8 +3241,8 @@ function oauthProviderPayload(profileName, providerKey) {
   };
 }
 
-async function refreshCodexOAuthModels(accessToken) {
-  const provider = oauthCatalogModel('openai-codex');
+async function refreshCodexOAuthModels(accessToken, accountId = '') {
+  const provider = oauthCatalogModel('openai-codex', accountId);
   try {
     const normalized = await fetchCodexOAuthCatalog({ accessToken, endpoint: process.env.FRAKIO_WORK_CODEX_MODELS_URL || undefined });
     const parsed = parseCatalogResponse(normalized, provider);
@@ -2752,12 +3255,19 @@ async function refreshCodexOAuthModels(accessToken) {
   }
 }
 
-async function saveClaudeOAuthTokens(profileName, tokenData) {
+async function saveClaudeOAuthTokens(profileName, tokenData, accountRecordId = '', label = '') {
   const accessToken = String(tokenData.access_token || '').trim();
   const refreshToken = String(tokenData.refresh_token || '').trim();
   if (!accessToken) throw new Error('Claude OAuth 没有返回 access token。');
   const expiresAtMs = Date.now() + Math.max(60, Number(tokenData.expires_in || 3600)) * 1000;
   const lastRefresh = new Date().toISOString();
+  await setOAuthCredential('claude-oauth', {
+    access: accessToken,
+    refresh: refreshToken,
+    expires: expiresAtMs,
+    label,
+    updatedAt: lastRefresh,
+  }, accountRecordId);
   const profileDir = profileConfigDir(profileName);
   mkdirSync(profileDir, { recursive: true });
   writeFileSync(path.join(profileDir, '.anthropic_oauth.json'), `${JSON.stringify({ accessToken, refreshToken, expiresAt: expiresAtMs, tokenType: tokenData.token_type || 'Bearer', updatedAt: lastRefresh }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
@@ -2770,12 +3280,20 @@ async function saveClaudeOAuthTokens(profileName, tokenData) {
   saveAuthJsonSync(authPath, auth);
 }
 
-async function saveGeminiOAuthTokens(profileName, tokenData, email = '') {
+async function saveGeminiOAuthTokens(profileName, tokenData, email = '', accountRecordId = '', label = '') {
   const accessToken = String(tokenData.access_token || '').trim();
   const refreshToken = String(tokenData.refresh_token || '').trim();
   if (!accessToken || !refreshToken) throw new Error('Google OAuth 没有返回完整 token。');
   const expiresAtMs = Date.now() + Math.max(60, Number(tokenData.expires_in || 3600)) * 1000;
   const lastRefresh = new Date().toISOString();
+  await setOAuthCredential(geminiProviderKey, {
+    access: accessToken,
+    refresh: refreshToken,
+    expires: expiresAtMs,
+    email,
+    label,
+    updatedAt: lastRefresh,
+  }, accountRecordId);
   const googleAuthPath = path.join(profileConfigDir(profileName), 'auth', 'google_oauth.json');
   mkdirSync(path.dirname(googleAuthPath), { recursive: true });
   writeFileSync(googleAuthPath, `${JSON.stringify({ refresh: refreshToken, access: accessToken, expires: expiresAtMs, email }, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
@@ -2786,6 +3304,38 @@ async function saveGeminiOAuthTokens(profileName, tokenData, email = '') {
   auth.credential_pool = auth.credential_pool || {};
   auth.credential_pool[geminiProviderKey] = [{ id: `${geminiProviderKey}-${Date.now()}`, label: 'Google Gemini OAuth', auth_type: 'oauth', source: 'loopback_pkce', priority: 0, access_token: accessToken, refresh_token: refreshToken, expires_at_ms: expiresAtMs, email, base_url: 'cloudcode-pa://google' }];
   saveAuthJsonSync(authPath, auth);
+}
+
+async function materializeOAuthCredentialForHermes(profileName, providerKey, accountRecordId = '') {
+  const credential = await getOAuthCredential(providerKey, accountRecordId);
+  if (!credential?.access) return false;
+  const expiresIn = credential.expires
+    ? Math.max(60, Math.floor((Number(credential.expires) - Date.now()) / 1000))
+    : 3600;
+  if (providerKey === 'openai-codex') {
+    await saveCodexOAuthTokens(profileName, credential.access, credential.refresh, Number(credential.expires || 0), credential.accountId || '', accountRecordId, credential.label || '');
+    return true;
+  }
+  if (providerKey === 'claude-oauth') {
+    await saveClaudeOAuthTokens(profileName, {
+      access_token: credential.access,
+      refresh_token: credential.refresh,
+      expires_in: expiresIn,
+    }, accountRecordId, credential.label || '');
+    return true;
+  }
+  if (providerKey === geminiProviderKey) {
+    await saveGeminiOAuthTokens(profileName, {
+      access_token: credential.access,
+      refresh_token: credential.refresh,
+      expires_in: expiresIn,
+    }, credential.email || '', accountRecordId, credential.label || '');
+    if (credential.codeAssist && Object.keys(credential.codeAssist).length) {
+      saveGeminiCodeAssistState(profileName, credential.codeAssist);
+    }
+    return true;
+  }
+  return false;
 }
 
 function providerVerificationError(message, status = 400, code = 'provider_rejected') {
@@ -2800,8 +3350,8 @@ function officialOAuthBaseUrl(providerKey, requestedBaseUrl) {
   return expected;
 }
 
-function oauthTokenForVerification(profileName, providerKey) {
-  const token = oauthProviderAccessToken(profileName, providerKey);
+function oauthTokenForVerification(profileName, providerKey, accountId = '') {
+  const token = oauthProviderAccessToken(profileName, providerKey, accountId);
   if (!token) throw providerVerificationError('授权已失效，请重新授权。', 401, 'oauth_expired');
   return token;
 }
@@ -2816,11 +3366,11 @@ function throwNativeVerificationFailure(result, providerLabel) {
   throw providerVerificationError(`${providerLabel} 验证失败：${providerErrorMessage(result, `HTTP ${result.status || 502}`)}`, result.status || 502, 'provider_rejected');
 }
 
-async function verifyCodexOAuthProvider(profileName, modelId) {
-  const accessToken = oauthTokenForVerification(profileName, 'openai-codex');
+async function verifyCodexOAuthProvider(profileName, modelId, accountId = '') {
+  const accessToken = oauthTokenForVerification(profileName, 'openai-codex', accountId);
   let catalog;
   try {
-    catalog = await refreshCodexOAuthModels(accessToken);
+    catalog = await refreshCodexOAuthModels(accessToken, accountId);
   } catch (error) {
     if (error?.status === 401) throw providerVerificationError('OpenAI Codex 授权已失效，请重新授权。', 401, 'oauth_expired');
     if (error?.status === 403) throw providerVerificationError('OpenAI Codex 拒绝了当前账号请求。', 403, 'provider_rejected');
@@ -2833,8 +3383,8 @@ async function verifyCodexOAuthProvider(profileName, modelId) {
   return { verificationKind: 'codex_oauth', usageConsumed: false, catalog };
 }
 
-async function verifyClaudeOAuthProvider(profileName, modelId, baseUrl) {
-  const accessToken = oauthTokenForVerification(profileName, 'claude-oauth');
+async function verifyClaudeOAuthProvider(profileName, modelId, baseUrl, accountId = '') {
+  const accessToken = oauthTokenForVerification(profileName, 'claude-oauth', accountId);
   const url = process.env.FRAKIO_WORK_CLAUDE_VERIFY_URL || providerInferenceUrl({ baseUrl, apiMode: 'anthropic_messages' });
   const result = await fetchExternalJson(url, {
     method: 'POST',
@@ -2893,8 +3443,8 @@ async function geminiCodeAssistOperation(accessToken, name) {
   });
 }
 
-async function resolveGeminiCodeAssistAccount(profileName, accessToken) {
-  const saved = savedGeminiCodeAssistState(profileName);
+async function resolveGeminiCodeAssistAccount(profileName, accessToken, accountId = '') {
+  const saved = getOAuthCredentialSync(geminiProviderKey, accountId)?.codeAssist || savedGeminiCodeAssistState(profileName);
   const requestedProject = String(saved.projectId || '').trim();
   const load = await geminiCodeAssistRequest(accessToken, 'loadCodeAssist', {
     ...(requestedProject ? { cloudaicompanionProject: requestedProject } : {}),
@@ -2930,9 +3480,9 @@ async function resolveGeminiCodeAssistAccount(profileName, accessToken) {
   return { projectId, tierId: String(tier.id), tierName: String(tier.name || '') };
 }
 
-async function verifyGeminiOAuthProvider(profileName, modelId) {
-  const accessToken = oauthTokenForVerification(profileName, geminiProviderKey);
-  const account = await resolveGeminiCodeAssistAccount(profileName, accessToken);
+async function verifyGeminiOAuthProvider(profileName, modelId, accountId = '') {
+  const accessToken = oauthTokenForVerification(profileName, geminiProviderKey, accountId);
+  const account = await resolveGeminiCodeAssistAccount(profileName, accessToken, accountId);
   const result = await geminiCodeAssistRequest(accessToken, 'generateContent', {
     model: modelId,
     project: account.projectId,
@@ -2952,6 +3502,11 @@ async function verifyGeminiOAuthProvider(profileName, modelId) {
   }
   const verifiedAt = now();
   saveGeminiCodeAssistState(profileName, { projectId: account.projectId, tierId: account.tierId, tierName: account.tierName, verifiedAt });
+  const credential = await getOAuthCredential(geminiProviderKey, accountId);
+  if (credential) await setOAuthCredential(geminiProviderKey, {
+    ...credential,
+    codeAssist: { projectId: account.projectId, tierId: account.tierId, tierName: account.tierName, verifiedAt },
+  }, accountId);
   return { verificationKind: 'gemini_code_assist', usageConsumed: true, verifiedAt };
 }
 
@@ -3586,6 +4141,22 @@ async function createCollaborationRoot(state, thread, workflow, input = {}) {
   workflow.rootTaskIds = [...new Set([...(workflow.rootTaskIds || []), task.id].filter(Boolean))];
   workflow.currentRootTaskId = task.id || '';
   workflow.updatedAt = now();
+  if (task.id) {
+    const rootAgent = state.agents.find((item) => item.id === (input.assigneeAgentId || workflow.coordinatorAgentId));
+    runtimeStore.upsertWorkTask({
+      id: task.id,
+      workflowId: workflow.id,
+      title: task.title || title,
+      description: rootBody,
+      assigneeAgentId: input.assigneeAgentId || workflow.coordinatorAgentId,
+      runtimeId: rootAgent ? runtimeForAgent(rootAgent, thread.agentRuntimeOverrides?.[rootAgent.id] || '') : 'hermes',
+      dependencies: [],
+      status: 'planned',
+      attempt: 0,
+      idempotencyKey: String(input.idempotencyKey || `root:${task.id}`),
+      metadata: { root: true, hermesBoardSlug: workflow.boardSlug },
+    });
+  }
   const event = appendThreadCollaborationEvent(thread, { type: 'task.created', workflowId: workflow.id, taskId: task.id, actorAgentId: input.actorAgentId || workflow.coordinatorAgentId, title: task.title || title, detail: '协调 Agent 正在规划', payload: { root: true, planning: true } });
   const result = { task, event };
   rememberIdempotent(thread.collaboration, input.idempotencyKey, result);
@@ -3664,6 +4235,23 @@ async function publishApprovedWorkPlan(state, thread, planSession, draft) {
     const created = parseHermesJson((await runHermesCommand(args)).stdout, {});
     task.taskId = created.id;
     taskByKey.set(task.key, task);
+    const taskAgent = state.agents.find((item) => item.id === task.assigneeAgentId);
+    const taskRuntimeId = taskAgent
+      ? runtimeForAgent(taskAgent, thread.agentRuntimeOverrides?.[taskAgent.id] || '')
+      : 'hermes';
+    runtimeStore.upsertWorkTask({
+      id: created.id,
+      workflowId: workflow.id,
+      title: task.title,
+      description: body,
+      assigneeAgentId: task.assigneeAgentId,
+      runtimeId: taskRuntimeId,
+      dependencies: [],
+      status: task.dependsOnKeys.length ? 'blocked' : 'ready',
+      attempt: 0,
+      idempotencyKey: `approved-plan:${planSession.id}:${draft.revision}:${task.key}`,
+      metadata: { taskKey: task.key, approvedPlanId: planSession.id, hermesBoardSlug: workflow.boardSlug },
+    });
     const alreadyRecorded = (thread.collaboration?.events || []).some((event) => event.type === 'task.created' && event.taskId === created.id);
     if (!alreadyRecorded) {
       appendThreadCollaborationEvent(thread, {
@@ -3682,6 +4270,15 @@ async function publishApprovedWorkPlan(state, thread, planSession, draft) {
       const dependency = taskByKey.get(dependencyKey);
       if (!dependency?.taskId || !task.taskId) continue;
       await runHermesCommand(['kanban', '--board', workflow.boardSlug, 'link', dependency.taskId, task.taskId]);
+      const mirroredTask = runtimeStore.getWorkTask(task.taskId);
+      if (mirroredTask) {
+        runtimeStore.upsertWorkTask({
+          ...mirroredTask,
+          dependencies: Array.from(new Set([...(mirroredTask.dependencies || []), dependency.taskId])),
+          status: 'blocked',
+          idempotencyKey: mirroredTask.idempotencyKey,
+        });
+      }
       const alreadyRecorded = (thread.collaboration?.events || []).some((event) => event.type === 'dependency.created' && event.workflowId === workflow.id && event.taskId === task.taskId && event.payload?.parentTaskId === dependency.taskId);
       if (!alreadyRecorded) {
         appendThreadCollaborationEvent(thread, {
@@ -3716,6 +4313,7 @@ async function publishApprovedWorkPlan(state, thread, planSession, draft) {
   workflow.executionBindings = Object.fromEntries(plan.tasks.filter((task) => task.taskId).map((task) => [task.key, {
     taskId: task.taskId,
     agentId: task.assigneeAgentId,
+    runtimeId: runtimeStore.getWorkTask(task.taskId)?.runtimeId || 'hermes',
     revision: 1,
     sessionId: `work-task-${task.taskId}-${task.assigneeAgentId}`,
     runId: '',
@@ -3734,7 +4332,8 @@ async function publishApprovedWorkPlan(state, thread, planSession, draft) {
   });
   for (const agentId of [...new Set(activeTasks.map((task) => task.assigneeAgentId))]) {
     const agent = state.agents.find((item) => item.id === agentId);
-    if (agent) await ensureWorkbenchMcpServers(await resolveHermesProfileNameForAgent(agent));
+    const runtimeId = agent ? runtimeForAgent(agent, thread.agentRuntimeOverrides?.[agent.id] || '') : 'hermes';
+    if (agent && runtimeId === 'hermes') await ensureWorkbenchMcpServers(await resolveHermesProfileNameForAgent(agent));
   }
   thread.updatedAt = now();
   await writeState(state);
@@ -4207,24 +4806,6 @@ function selectedProviderConfig(config, providerKey) {
     return Object.fromEntries(customProviderEntries(config))[key] || config?.providers?.[key] || {};
   }
   return config?.providers?.[clean] || {};
-}
-
-function splitModelSelection(value) {
-  const raw = String(value || '').trim();
-  const separator = '::';
-  if (!raw.includes(separator)) return { modelId: raw, modelName: '' };
-  const [modelId, ...rest] = raw.split(separator);
-  return { modelId: modelId.trim(), modelName: rest.join(separator).trim() };
-}
-
-function resolveModelSelection(modelValue, models = []) {
-  const { modelId, modelName } = splitModelSelection(modelValue);
-  const normalized = normalizeModels(models || []);
-  const selectedModel = normalized.find((model) => model.id === modelId)
-    || normalized.find((model) => [model.id, model.name, model.model].includes(String(modelValue || '').trim()))
-    || normalized.find((model) => model.models?.includes(modelName));
-  const selectedName = modelName || selectedModel?.model || String(modelValue || '').trim();
-  return { selectedModel, selectedName };
 }
 
 async function readHermesProfileConfigs() {
@@ -6795,11 +7376,12 @@ async function syncUserProfileToHermesProfiles(state, userProfile) {
   }
 }
 
-async function uniqueProfileName(name) {
+async function uniqueProfileName(name, reservedIds = []) {
   const base = slug(name) || 'agent';
   let candidate = base;
   let index = 2;
-  while (await profileDirForName(candidate)) {
+  const reserved = new Set(reservedIds);
+  while (reserved.has(candidate) || await profileDirForName(candidate)) {
     candidate = `${base}-${index}`;
     index += 1;
   }
@@ -6879,6 +7461,9 @@ async function ensureModelProviderForProfile(profileName, rawModel, requestedMod
     const error = new Error('模型缺少可用的 Provider 或模型 ID。');
     error.status = 400;
     throw error;
+  }
+  if (oauthProviderKeys.has(selectedModel.providerKey)) {
+    await materializeOAuthCredentialForHermes(profileName, selectedModel.providerKey, selectedModel.oauthAccountId || '');
   }
   const configPath = path.join(dir, 'config.yaml');
   const config = await readYamlFile(configPath);
@@ -10335,9 +10920,482 @@ app.get('/api/agents', (_req, res) => {
   readState().then((state) => res.json({ agents: state.agents }));
 });
 
+app.get('/api/runtimes', async (_req, res) => {
+  try {
+    const runtimes = runtimeRegistry.snapshot();
+    void runtimeRegistry.refresh().catch(() => {});
+    res.json({ runtimes, databasePath: runtimeDatabasePath });
+  } catch (error) {
+    res.status(500).json({ error: error.message || '运行时状态读取失败。' });
+  }
+});
+
+app.post('/api/runtimes/:id/detect', async (req, res) => {
+  try {
+    const runtime = await runtimeRegistry.refresh(req.params.id);
+    if (!runtime) return res.status(404).json({ error: 'Runtime not found.' });
+    return res.json({ runtime });
+  } catch (error) {
+    return res.status(502).json({ error: error.message || '运行时检测失败。' });
+  }
+});
+
+app.get('/api/runtimes/:id/models', async (req, res) => {
+  try {
+    if (req.params.id === 'codex') return res.json({ runtimeId: 'codex', models: await codexBridge.listModels(), source: 'native-account' });
+    if (req.params.id === 'pi' || req.params.id === 'hermes') {
+      const state = await readState();
+      const models = await Promise.all(state.models.map(async (model) => ({
+        id: model.id,
+        name: model.name,
+        provider: model.provider,
+        defaultModelId: model.model,
+        models: model.models || [model.model].filter(Boolean),
+        compatibility: await runtimeModelCompatibility(req.params.id, model, state.models, state.features),
+      })));
+      return res.json({
+        runtimeId: req.params.id,
+        source: 'frakio-model-center',
+        models,
+        usableModelCount: models.reduce((total, model) => total + model.compatibility.usableModelIds.length, 0),
+      });
+    }
+    return res.status(409).json({ error: '该运行时尚未提供模型目录。', code: 'RUNTIME_MODELS_UNAVAILABLE' });
+  } catch (error) {
+    return res.status(502).json({ error: error.message || '运行时模型读取失败。' });
+  }
+});
+
+app.get('/api/runtime-sessions', (req, res) => {
+  res.json({
+    sessions: runtimeStore.listSessions({
+      threadId: String(req.query.threadId || ''),
+      agentId: String(req.query.agentId || ''),
+      runtimeId: String(req.query.runtimeId || ''),
+      limit: Number(req.query.limit || 100),
+    }),
+  });
+});
+
+app.post('/api/runtime-sessions', async (req, res) => {
+  const state = await readState();
+  const thread = state.threads.find((item) => item.id === req.body?.threadId);
+  const agent = state.agents.find((item) => item.id === req.body?.agentId);
+  if (!thread || !agent) return res.status(404).json({ error: '会话或 Agent 不存在。' });
+  const runtimeId = String(req.body?.runtimeId || runtimeForAgent(agent));
+  const policy = normalizeRuntimePolicy(agent.runtimePolicy, { hasHermesProfile: Boolean(agent.profileName) });
+  if (!policy.allowedRuntimeIds.includes(runtimeId)) return res.status(409).json({ error: 'Agent 没有启用该运行时。', code: 'RUNTIME_NOT_ALLOWED' });
+  const session = runtimeStore.upsertSession({
+    runtimeId,
+    threadId: thread.id,
+    agentId: agent.id,
+    workspaceId: thread.workspaceId || '',
+    profileRevision: agentProfileRevision(agent),
+    status: 'idle',
+    metadata: { createdBy: 'runtime-api' },
+  });
+  res.status(201).json({ session });
+});
+
+app.post('/api/runtime-sessions/:id/runs', async (req, res) => {
+  const session = runtimeStore.getSession(req.params.id);
+  if (!session) return res.status(404).json({ error: '运行会话不存在。' });
+  return startRuntimeRunRequest({
+    ...req,
+    params: { id: session.threadId },
+    body: { ...(req.body || {}), targetAgentId: session.agentId, runtimeId: session.runtimeId },
+  }, res);
+});
+
+app.post('/api/runtime-runs/:id/steer', async (req, res) => {
+  try {
+    const run = runtimeStore.getRun(req.params.id);
+    const session = run ? runtimeStore.getSession(run.sessionId) : null;
+    if (!run || !session) return res.status(404).json({ error: '运行不存在。' });
+    const message = String(req.body?.message || '').trim();
+    if (!message) return res.status(400).json({ error: '指令不能为空。' });
+    if (run.runtimeId === 'pi') await piBridge.steer(session.id, message);
+    else if (run.runtimeId === 'codex') await codexBridge.steer(session.id, message);
+    else if (run.runtimeId === 'claude') await claudeBridge.steer(session.id, message);
+    else if (run.runtimeId === 'gemini') await geminiBridge.steer(session.id, message);
+    else if (run.runtimeId === 'hermes') {
+      await requestHermesBridge({ action: 'steer', session_id: session.nativeSessionId, run_id: run.id, message }, { timeoutMs: 10000, retryMs: 1000 });
+    } else return res.status(409).json({ error: '该外部通道尚未启用 steering。' });
+    res.json({ ok: true });
+  } catch (error) {
+    res.status(502).json({ error: error.message || '运行指令发送失败。' });
+  }
+});
+
+app.post('/api/runtime-runs/:id/cancel', async (req, res) => {
+  try {
+    const run = runtimeStore.getRun(req.params.id);
+    const session = run ? runtimeStore.getSession(run.sessionId) : null;
+    if (!run || !session) return res.status(404).json({ error: '运行不存在。' });
+    if (run.runtimeId === 'pi') await piBridge.cancel(session.id);
+    else if (run.runtimeId === 'codex') await codexBridge.cancel(session.id);
+    else if (run.runtimeId === 'claude') await claudeBridge.cancel(session.id);
+    else if (run.runtimeId === 'gemini') await geminiBridge.cancel(session.id);
+    else if (run.runtimeId === 'hermes') {
+      await requestHermesBridge({ action: 'interrupt', session_id: session.nativeSessionId, run_id: run.id, message: '用户请求停止。' }, { timeoutMs: 10000, retryMs: 1000 });
+    } else return res.status(409).json({ error: '该外部通道尚未启用取消操作。' });
+    res.json({ ok: true, resolved: true });
+  } catch (error) {
+    res.status(502).json({ error: error.message || '停止运行失败。', resolved: false });
+  }
+});
+
+app.post('/api/runtime-runs/:id/approve', async (req, res) => {
+  try {
+    const run = runtimeStore.getRun(req.params.id);
+    const session = run ? runtimeStore.getSession(run.sessionId) : null;
+    if (!run || !session) return res.status(404).json({ error: '运行不存在。' });
+    const approvalId = String(req.body?.approvalId || '').trim();
+    if (!approvalId) return res.status(400).json({ error: 'approvalId 不能为空。' });
+    if (run.runtimeId === 'codex') {
+      const result = await codexBridge.resolveApproval(approvalId, req.body?.decision || 'approve_once');
+      return res.json({ ok: true, result });
+    }
+    if (run.runtimeId === 'claude') {
+      const result = await claudeBridge.resolveApproval(approvalId, req.body?.decision || 'approve_once');
+      return res.json({ ok: true, result });
+    }
+    if (run.runtimeId === 'gemini') {
+      const result = await geminiBridge.resolveApproval(approvalId, req.body?.decision || 'approve_once');
+      return res.json({ ok: true, result });
+    }
+    if (run.runtimeId !== 'hermes') return res.status(409).json({ error: '该运行时没有待处理的原生审批。' });
+    const result = await requestHermesBridge({
+      action: 'approval_respond',
+      approval_id: approvalId,
+      decision: req.body?.decision || 'approve_once',
+      session_id: session.nativeSessionId,
+      run_id: run.id,
+    }, { timeoutMs: 10000, retryMs: 1000 });
+    res.json({ ok: true, result });
+  } catch (error) {
+    res.status(502).json({ error: error.message || '审批响应失败。' });
+  }
+});
+
+app.get('/api/runtime-runs/:id/events', (req, res) => {
+  const run = runtimeStore.getRun(req.params.id);
+  if (!run) return res.status(404).json({ error: '运行不存在。' });
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache, no-transform',
+    Connection: 'keep-alive',
+  });
+  let cursor = Math.max(0, Number(req.query.cursor || req.headers['last-event-id'] || 0) || 0);
+  const send = () => {
+    for (const event of runtimeStore.eventsAfter(run.id, cursor)) {
+      cursor = event.cursor;
+      res.write(`id: ${event.cursor}\nevent: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`);
+    }
+    const latest = runtimeStore.getRun(run.id);
+    if (['completed', 'failed', 'cancelled'].includes(latest?.status)) {
+      clearInterval(timer);
+      res.end();
+    }
+  };
+  const timer = setInterval(send, 350);
+  send();
+  req.on('close', () => clearInterval(timer));
+});
+
+app.get('/api/workflows/:id/tasks', (req, res) => {
+  res.json({ tasks: runtimeStore.listWorkTasks(req.params.id) });
+});
+
+app.post('/api/workflows/:id/dispatch', async (req, res) => {
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => (item.collaboration?.workflows || []).some((workflow) => workflow.id === req.params.id));
+    if (!thread) return res.status(404).json({ error: 'Workflow 不存在。' });
+    const reconciliation = workScheduler.reconcile(req.params.id);
+    const concurrency = Math.max(1, Math.min(8, Number(req.body?.concurrency || 2)));
+    const candidates = workScheduler.runnable(req.params.id, {
+      concurrency,
+      runtimeLimits: {
+        pi: Math.max(1, Math.min(8, Number(req.body?.piConcurrency || concurrency))),
+        codex: Math.max(1, Math.min(8, Number(req.body?.codexConcurrency || concurrency))),
+        claude: Math.max(1, Math.min(8, Number(req.body?.claudeConcurrency || concurrency))),
+        gemini: Math.max(1, Math.min(8, Number(req.body?.geminiConcurrency || concurrency))),
+        hermes: 1,
+      },
+    });
+    const deferredToHermesGateway = candidates.filter((task) => task.runtimeId === 'hermes').map((task) => task.id);
+    const deferredToExternalChannels = candidates
+      .filter((task) => !['hermes', 'pi', 'codex', 'claude', 'gemini'].includes(task.runtimeId))
+      .map((task) => ({ taskId: task.id, runtimeId: task.runtimeId }));
+    const workspace = state.workspaces.find((item) => item.id === thread.workspaceId) || null;
+    const dispatched = [];
+    const failed = [];
+    for (const candidate of candidates.filter((task) => ['pi', 'codex', 'claude', 'gemini'].includes(task.runtimeId))) {
+      let task = candidate;
+      const needsWorktree = ['code', 'git'].includes(String(task.metadata?.outputKind || task.metadata?.artifactType || '').toLowerCase());
+      if (needsWorktree && workspace?.rootPath) {
+        try {
+          const isolated = await worktreeManager.create({
+            repositoryPath: workspace.rootPath,
+            workspaceId: workspace.id,
+            taskId: task.id,
+          });
+          task = runtimeStore.upsertWorkTask({
+            ...task,
+            worktreePath: isolated.worktreePath,
+            idempotencyKey: task.idempotencyKey,
+            metadata: { ...task.metadata, worktreeBranch: isolated.branch },
+          });
+        } catch (error) {
+          failed.push({ taskId: task.id, error: error.message || String(error), code: 'WORKTREE_CREATE_FAILED' });
+          continue;
+        }
+      }
+      task = workScheduler.claim(task.id, { worktreePath: task.worktreePath });
+      if (!task) continue;
+      const outcome = await new Promise((resolve) => {
+        let statusCode = 200;
+        const response = {
+          status(code) { statusCode = code; return this; },
+          json(payload) { resolve({ status: statusCode, payload }); return this; },
+        };
+        void startRuntimeRunRequest({
+          params: { id: thread.id },
+          body: {
+            message: task.description || task.title,
+            turnId: `task-${task.id}-${Date.now()}`,
+            targetAgentId: task.assigneeAgentId,
+            runtimeId: task.runtimeId,
+            taskId: task.id,
+            taskDispatch: true,
+          },
+          query: {},
+          headers: {},
+        }, response);
+      });
+      if (outcome.status >= 400) {
+        runtimeStore.upsertWorkTask({ ...task, status: 'failed', leaseExpiresAt: null, idempotencyKey: task.idempotencyKey });
+        failed.push({ taskId: task.id, ...outcome.payload });
+      } else {
+        dispatched.push({ taskId: task.id, worktreePath: task.worktreePath, ...outcome.payload });
+      }
+    }
+    res.status(dispatched.length ? 202 : 200).json({
+      dispatched,
+      failed,
+      deferredToHermesGateway,
+      deferredToExternalChannels,
+      recovered: reconciliation.recovered.map((task) => task.id),
+      promoted: reconciliation.promoted.map((task) => task.id),
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Workflow 调度失败。' });
+  }
+});
+
+app.get('/api/memory', (req, res) => {
+  res.json({
+    entries: runtimeStore.listMemory({
+      scope: String(req.query.scope || ''),
+      subjectId: String(req.query.subjectId || ''),
+      status: String(req.query.status || ''),
+      query: String(req.query.query || ''),
+      limit: Number(req.query.limit || 100),
+    }),
+  });
+});
+
+app.post('/api/memory', (req, res) => {
+  try {
+    const entry = memoryLedger.propose({
+      scope: req.body?.scope,
+      subjectId: req.body?.subjectId,
+      fact: req.body?.fact,
+      confidence: req.body?.confidence,
+      validFrom: req.body?.validFrom || null,
+      validUntil: req.body?.validUntil || null,
+      provenance: [{ source: 'user', threadId: req.body?.threadId || '' }],
+    });
+    res.status(201).json({ entry });
+  } catch (error) {
+    res.status(400).json({ error: error.message || '记忆候选创建失败。' });
+  }
+});
+
+app.patch('/api/memory/:id', (req, res) => {
+  const action = String(req.body?.action || '');
+  const entry = action === 'accept'
+    ? memoryLedger.accept(req.params.id, { confidence: req.body?.confidence, supersedesId: req.body?.supersedesId })
+    : action === 'reject'
+      ? memoryLedger.reject(req.params.id)
+      : runtimeStore.updateMemory(req.params.id, req.body || {});
+  if (!entry) return res.status(404).json({ error: '记忆不存在。' });
+  res.json({ entry });
+});
+
+app.post('/api/workspaces/:id/knowledge/initialize', async (req, res) => {
+  try {
+    const state = await readState();
+    const workspace = state.workspaces.find((item) => item.id === req.params.id);
+    if (!workspace) return res.status(404).json({ error: 'Workspace 不存在。' });
+    const vault = state.vaults.find((item) => item.id === (workspace.primaryVaultId || workspace.vaultId));
+    if (!vault) return res.status(409).json({ error: 'Workspace 尚未绑定主 Vault。' });
+    const initialized = await knowledgeGateway.initializeVault(vault);
+    const index = await knowledgeGateway.index(vault);
+    vault.index = { ...(vault.index || {}), ...index };
+    workspace.primaryVaultId = vault.id;
+    workspace.vaultId = vault.id;
+    workspace.writableVaultIds = Array.from(new Set([...(workspace.writableVaultIds || []), vault.id]));
+    workspace.updatedAt = now();
+    await writeState(state);
+    res.json({ workspace, vault, initialized, index });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Knowledge Vault 初始化失败。' });
+  }
+});
+
+app.get('/api/workspaces/:id/knowledge', async (req, res) => {
+  try {
+    const state = await readState();
+    const workspace = state.workspaces.find((item) => item.id === req.params.id);
+    const vault = state.vaults.find((item) => item.id === (workspace?.primaryVaultId || workspace?.vaultId));
+    if (!workspace || !vault) return res.status(404).json({ error: 'Workspace 或主 Vault 不存在。' });
+    const index = await knowledgeGateway.index(vault);
+    res.json({
+      workspace: {
+        id: workspace.id,
+        name: workspace.name,
+        primaryVaultId: workspace.primaryVaultId || workspace.vaultId,
+        sharedVaultIds: workspace.sharedVaultIds || [],
+        writableVaultIds: workspace.writableVaultIds || [],
+      },
+      vault,
+      index,
+      commits: runtimeStore.listKnowledgeCommits(workspace.id, Number(req.query.limit || 100)),
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Knowledge 状态读取失败。' });
+  }
+});
+
+app.post('/api/workspaces/:id/knowledge/index', async (req, res) => {
+  try {
+    const state = await readState();
+    const workspace = state.workspaces.find((item) => item.id === req.params.id);
+    const vault = state.vaults.find((item) => item.id === (workspace?.primaryVaultId || workspace?.vaultId));
+    if (!workspace || !vault) return res.status(404).json({ error: 'Workspace 或主 Vault 不存在。' });
+    const index = await knowledgeGateway.index(vault);
+    vault.index = { ...(vault.index || {}), ...index };
+    await writeState(state);
+    res.json({ index });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Knowledge 索引失败。' });
+  }
+});
+
+app.post('/api/workspaces/:id/knowledge/drafts', async (req, res) => {
+  try {
+    const state = await readState();
+    const workspace = state.workspaces.find((item) => item.id === req.params.id);
+    const vault = state.vaults.find((item) => item.id === (workspace?.primaryVaultId || workspace?.vaultId));
+    if (!workspace || !vault) return res.status(404).json({ error: 'Workspace 或主 Vault 不存在。' });
+    if (!(workspace.writableVaultIds || [workspace.primaryVaultId || workspace.vaultId]).includes(vault.id)) {
+      return res.status(403).json({ error: '主 Vault 当前是只读绑定。' });
+    }
+    const runId = String(req.body?.runId || `manual-${randomUUID()}`);
+    const draft = await knowledgeGateway.draftWrite({
+      workspace,
+      vault,
+      runId,
+      relativePath: req.body?.path,
+      content: req.body?.content,
+    });
+    res.status(201).json({ runId, draft });
+  } catch (error) {
+    res.status(error.status || 400).json({ error: error.message || 'Knowledge 草稿写入失败。' });
+  }
+});
+
+app.post('/api/workspaces/:id/knowledge/publish', async (req, res) => {
+  try {
+    const state = await readState();
+    const workspace = state.workspaces.find((item) => item.id === req.params.id);
+    const vault = state.vaults.find((item) => item.id === (workspace?.primaryVaultId || workspace?.vaultId));
+    if (!workspace || !vault) return res.status(404).json({ error: 'Workspace 或主 Vault 不存在。' });
+    if (!(workspace.writableVaultIds || [workspace.primaryVaultId || workspace.vaultId]).includes(vault.id)) {
+      return res.status(403).json({ error: '主 Vault 当前是只读绑定。' });
+    }
+    const published = await knowledgeGateway.publish({
+      workspace,
+      vault,
+      runId: String(req.body?.runId || ''),
+      draftPath: req.body?.draftPath,
+      targetPath: req.body?.targetPath || '',
+    });
+    res.json({ published });
+  } catch (error) {
+    res.status(error.status || 400).json({ error: error.message || 'Knowledge 发布失败。' });
+  }
+});
+
+app.get('/api/workspaces/:id/knowledge/search', async (req, res) => {
+  try {
+    const state = await readState();
+    const workspace = state.workspaces.find((item) => item.id === req.params.id);
+    const vault = state.vaults.find((item) => item.id === (workspace?.primaryVaultId || workspace?.vaultId));
+    if (!workspace || !vault) return res.status(404).json({ error: 'Workspace 或主 Vault 不存在。' });
+    const readableVaults = [vault, ...(workspace.sharedVaultIds || []).map((vaultId) => state.vaults.find((item) => item.id === vaultId)).filter(Boolean)];
+    const groups = await Promise.all(readableVaults.map(async (readableVault) => ({
+      vaultId: readableVault.id,
+      vaultName: readableVault.name,
+      results: await knowledgeGateway.search(readableVault, req.query.q, { limit: req.query.limit }),
+    })));
+    res.json({
+      results: groups.flatMap((group) => group.results.map((result) => ({ ...result, vaultId: group.vaultId, vaultName: group.vaultName }))),
+      commits: runtimeStore.listKnowledgeCommits(workspace.id, 30),
+    });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || '知识检索失败。' });
+  }
+});
+
 app.get('/api/models', async (_req, res) => {
   const state = await readState();
   res.json({ models: state.models.map(publicModel) });
+});
+
+app.get('/api/oauth-accounts', async (_req, res) => {
+  const state = await readState();
+  const accounts = await listOAuthAccounts();
+  res.json({ accounts: accounts.map((account) => ({
+    ...account,
+    models: state.models.filter((model) => model.providerKey === account.providerKey && model.oauthAccountId === account.id)
+      .map((model) => ({ id: model.id, name: model.name })),
+  })) });
+});
+
+app.patch('/api/oauth-accounts/:accountId', async (req, res) => {
+  const providerKey = String(req.body?.providerKey || '').trim();
+  const accountId = String(req.params.accountId || '').trim();
+  const label = String(req.body?.label || '').trim().slice(0, 80);
+  if (!oauthProviderKeys.has(providerKey) || !accountId || !label) return res.status(400).json({ error: '授权账户参数无效。' });
+  const credential = await getOAuthCredential(providerKey, accountId);
+  if (!credential) return res.status(404).json({ error: '授权账户不存在。' });
+  const stored = await setOAuthCredential(providerKey, { ...credential, label }, accountId);
+  res.json({ account: oauthAccountSummary(providerKey, stored) });
+});
+
+app.delete('/api/oauth-accounts/:accountId', async (req, res) => {
+  const providerKey = String(req.query?.providerKey || '').trim();
+  const accountId = String(req.params.accountId || '').trim();
+  if (!oauthProviderKeys.has(providerKey) || !accountId) return res.status(400).json({ error: '授权账户参数无效。' });
+  const state = await readState();
+  const linkedModels = state.models.filter((model) => model.providerKey === providerKey && model.oauthAccountId === accountId)
+    .map((model) => ({ id: model.id, name: model.name }));
+  if (linkedModels.length) return res.status(409).json({ error: '请先将关联模型迁移到其他账户，或删除这些模型配置。', code: 'OAUTH_ACCOUNT_IN_USE', models: linkedModels });
+  await deleteOAuthCredential(providerKey, accountId);
+  res.json({ deletedAccountId: accountId });
 });
 
 app.get('/api/model-capabilities', async (_req, res) => {
@@ -10849,9 +11907,9 @@ app.post('/api/models/:id/verify', async (req, res) => {
       const profileName = model.profileName || await requestedModelProfile(req);
       const officialBaseUrl = officialOAuthBaseUrl(model.providerKey, verificationModel.baseUrl);
       let nativeVerification;
-      if (model.providerKey === 'openai-codex') nativeVerification = await verifyCodexOAuthProvider(profileName, modelId);
-      else if (model.providerKey === 'claude-oauth') nativeVerification = await verifyClaudeOAuthProvider(profileName, modelId, officialBaseUrl);
-      else if (model.providerKey === geminiProviderKey) nativeVerification = await verifyGeminiOAuthProvider(profileName, modelId);
+      if (model.providerKey === 'openai-codex') nativeVerification = await verifyCodexOAuthProvider(profileName, modelId, model.oauthAccountId || '');
+      else if (model.providerKey === 'claude-oauth') nativeVerification = await verifyClaudeOAuthProvider(profileName, modelId, officialBaseUrl, model.oauthAccountId || '');
+      else if (model.providerKey === geminiProviderKey) nativeVerification = await verifyGeminiOAuthProvider(profileName, modelId, model.oauthAccountId || '');
       else throw providerVerificationError('当前 OAuth Provider 暂不支持原生验证。', 400, 'provider_rejected');
       if (saveOnSuccess) {
         await persistVerifiedModelDraft(state, model, verificationModel, '');
@@ -11038,11 +12096,19 @@ async function codexLoginWorker(session) {
         return;
       }
       const tokenData = await tokenRes.json();
-      await saveCodexOAuthTokens(session.profile, tokenData.access_token, tokenData.refresh_token || '');
+      await saveCodexOAuthTokens(
+        session.profile,
+        tokenData.access_token,
+        tokenData.refresh_token || '',
+        Date.now() + Math.max(60, Number(tokenData.expires_in || 3600)) * 1000,
+        extractChatGptAccountId(tokenData.access_token),
+        session.accountId || '',
+        session.accountLabel || '',
+      );
       try {
-        await refreshCodexOAuthModels(tokenData.access_token);
+        await refreshCodexOAuthModels(tokenData.access_token, session.accountId || '');
       } catch {}
-      const providerState = oauthProviderPayload(session.profile, 'openai-codex');
+      const providerState = oauthProviderPayload(session.profile, 'openai-codex', session.accountId || '');
       session.models = providerState.models;
       session.catalog = providerState.catalog;
       session.capabilities = providerState.capabilities;
@@ -11076,7 +12142,7 @@ app.post('/api/auth/codex/start', async (req, res) => {
       return res.status(502).json({ error: message, code: body?.error?.code || '' });
     }
     const data = await response.json();
-    const session = { id: randomUUID(), profile: await requestedModelProfile(req), userCode: data.user_code, deviceAuthId: data.device_auth_id, status: 'pending', createdAt: Date.now(), error: '' };
+    const session = { id: randomUUID(), profile: await requestedModelProfile(req), accountId: String(req.body?.accountId || '').trim(), accountLabel: String(req.body?.accountLabel || '').trim().slice(0, 80), userCode: data.user_code, deviceAuthId: data.device_auth_id, status: 'pending', createdAt: Date.now(), error: '' };
     codexAuthSessions.set(session.id, session);
     codexLoginWorker(session).catch((error) => {
       session.status = 'error';
@@ -11096,14 +12162,15 @@ app.get('/api/auth/codex/:sessionId', (req, res) => {
 
 app.post('/api/auth/codex/catalog', async (req, res) => {
   const profile = await requestedModelProfile(req);
-  const accessToken = oauthProviderAccessToken(profile, 'openai-codex');
+  const accountId = String(req.body?.accountId || '').trim();
+  const accessToken = oauthProviderAccessToken(profile, 'openai-codex', accountId);
   if (!accessToken) return res.status(401).json({ error: '请先完成 OpenAI Codex 授权。', authenticated: false, models: [] });
   try {
-    await refreshCodexOAuthModels(accessToken);
-    const state = oauthProviderPayload(profile, 'openai-codex');
+    await refreshCodexOAuthModels(accessToken, accountId);
+    const state = oauthProviderPayload(profile, 'openai-codex', accountId);
     res.json(state);
   } catch (error) {
-    const state = oauthProviderPayload(profile, 'openai-codex');
+    const state = oauthProviderPayload(profile, 'openai-codex', accountId);
     res.status(state.models.length ? 200 : 502).json({ ...state, error: error.message || 'Codex 模型目录获取失败。' });
   }
 });
@@ -11123,7 +12190,7 @@ app.post('/api/auth/claude/start', async (req, res) => {
       code_challenge_method: 'S256',
       state,
     });
-    const session = { id: randomUUID(), profile: await requestedModelProfile(req), verifier, state, status: 'pending', createdAt: Date.now(), error: '' };
+    const session = { id: randomUUID(), profile: await requestedModelProfile(req), accountId: String(req.body?.accountId || '').trim(), accountLabel: String(req.body?.accountLabel || '').trim().slice(0, 80), verifier, state, status: 'pending', createdAt: Date.now(), error: '' };
     claudeAuthSessions.set(session.id, session);
     res.json({ session_id: session.id, authorization_url: `${claudeAuthorizeUrl}?${params.toString()}`, expires_in: 900 });
   } catch (error) {
@@ -11164,9 +12231,9 @@ app.post('/api/auth/claude/:sessionId/submit', async (req, res) => {
       const text = await response.text().catch(() => '');
       throw new Error(`Claude token 交换失败：HTTP ${response.status}${text ? ` ${text.slice(0, 160)}` : ''}`);
     }
-    await saveClaudeOAuthTokens(session.profile, await response.json());
+    await saveClaudeOAuthTokens(session.profile, await response.json(), session.accountId || '', session.accountLabel || '');
     session.status = 'approved';
-    const providerState = oauthProviderPayload(session.profile, 'claude-oauth');
+    const providerState = oauthProviderPayload(session.profile, 'claude-oauth', session.accountId || '');
     res.json({ status: session.status, error: null, ...providerState });
   } catch (error) {
     session.status = 'error';
@@ -11209,7 +12276,7 @@ async function exchangeGeminiCode(session, code) {
     throw new Error(`Google token 交换失败：HTTP ${response.status}${text ? ` ${text.slice(0, 160)}` : ''}`);
   }
   const tokenData = await response.json();
-  await saveGeminiOAuthTokens(session.profile, tokenData, await fetchGoogleEmail(tokenData.access_token));
+  await saveGeminiOAuthTokens(session.profile, tokenData, await fetchGoogleEmail(tokenData.access_token), session.accountId || '', session.accountLabel || '');
 }
 
 function startGeminiCallbackServer(sessionId, preferredPort = geminiRedirectPort) {
@@ -11257,7 +12324,7 @@ app.post('/api/auth/gemini/start', async (req, res) => {
     cleanupAuthSessions(geminiAuthSessions);
     const { verifier, challenge } = makePkcePair(64);
     const state = randomBytes(32).toString('base64url');
-    const session = { id: randomUUID(), profile: await requestedModelProfile(req), verifier, state, status: 'pending', createdAt: Date.now(), error: '', server: null, redirectUri: '' };
+    const session = { id: randomUUID(), profile: await requestedModelProfile(req), accountId: String(req.body?.accountId || '').trim(), accountLabel: String(req.body?.accountLabel || '').trim().slice(0, 80), verifier, state, status: 'pending', createdAt: Date.now(), error: '', server: null, redirectUri: '' };
     geminiAuthSessions.set(session.id, session);
     const callback = await startGeminiCallbackServer(session.id);
     session.server = callback.server;
@@ -11286,7 +12353,7 @@ app.get('/api/auth/gemini/:sessionId', (req, res) => {
     session.status = 'expired';
     try { session.server?.close(); } catch {}
   }
-  const providerState = session.status === 'approved' ? oauthProviderPayload(session.profile, geminiProviderKey) : null;
+  const providerState = session.status === 'approved' ? oauthProviderPayload(session.profile, geminiProviderKey, session.accountId || '') : null;
   res.json({ status: session.status, error: session.error || null, ...(providerState || {}) });
 });
 
@@ -11299,7 +12366,9 @@ app.post('/api/models', async (req, res) => {
   const apiModePreference = normalizeApiModePreference(req.body?.apiModePreference, apiMode);
   if (providerKey.startsWith('custom:') && !apiMode) return res.status(400).json({ error: '自定义 Provider 必须选择 API 协议。' });
   const profileName = await requestedModelProfile(req);
-  const oauthAuthenticated = oauthProviderKeys.has(providerKey) && oauthProviderAuthenticated(profileName, providerKey);
+  const oauthAccountId = String(req.body?.oauthAccountId || '').trim().slice(0, 160);
+  const oauthAuthenticated = oauthProviderKeys.has(providerKey) && oauthProviderAuthenticated(profileName, providerKey, oauthAccountId);
+  if (oauthProviderKeys.has(providerKey) && !oauthAccountId) return res.status(400).json({ error: '请选择一个 Frakio Work 授权账户。' });
   if (oauthProviderKeys.has(providerKey) && !oauthAuthenticated) return res.status(400).json({ error: '请先完成 Provider 授权。' });
   const hasCredential = String(req.body?.apiKey || '').trim() || oauthAuthenticated;
   const modelNames = normalizeModelNames(req.body?.models, req.body?.model);
@@ -11317,8 +12386,9 @@ app.post('/api/models', async (req, res) => {
     apiKey: '',
     apiKeyState: hasCredential ? (oauthProviderKeys.has(providerKey) ? 'authorized' : 'provided') : '',
     source: 'manual',
-    profileName: oauthProviderKeys.has(providerKey) ? profileName : '',
+    profileName: '',
     providerKey,
+    oauthAccountId,
     apiMode,
     apiModePreference,
     modelsUrl: String(req.body?.modelsUrl || '').trim().slice(0, 300),
@@ -11375,6 +12445,7 @@ app.patch('/api/models/:id', async (req, res) => {
   }
   if ('baseUrl' in req.body) model.baseUrl = String(req.body.baseUrl || '').trim().slice(0, 240);
   if ('providerKey' in req.body) model.providerKey = String(req.body.providerKey || '').trim().slice(0, 120);
+  if ('oauthAccountId' in req.body) model.oauthAccountId = String(req.body.oauthAccountId || '').trim().slice(0, 160);
   if ('apiMode' in req.body) {
     model.apiMode = runtimeApiMode(req.body.apiMode);
     if (!('protocol' in req.body)) model.protocol = modelProtocolFromApiMode(model.apiMode);
@@ -11388,7 +12459,10 @@ app.patch('/api/models/:id', async (req, res) => {
   if ('capabilityMode' in req.body) model.capabilityMode = req.body.capabilityMode === 'manual' ? 'manual' : 'auto';
   if ('capabilityOverrides' in req.body) model.capabilityOverrides = normalizeCapabilityOverrides(req.body.capabilityOverrides);
   if ('pricing' in req.body) model.pricing = normalizeModelPricing(req.body.pricing);
-  if (oauthProviderKeys.has(model.providerKey)) model.apiKeyState = 'authorized';
+  if (oauthProviderKeys.has(model.providerKey)) {
+    if (!model.oauthAccountId || !oauthProviderAuthenticated(model.profileName || await requestedModelProfile(req), model.providerKey, model.oauthAccountId)) return res.status(400).json({ error: '请选择一个有效的 Frakio Work 授权账户。' });
+    model.apiKeyState = 'authorized';
+  }
   if (String(req.body?.apiKey || '').trim()) {
     model.apiKeyState = 'provided';
     await setModelSecret(model.id, req.body.apiKey);
@@ -11423,19 +12497,32 @@ app.post('/api/agents', async (req, res) => {
     }
     const name = String(req.body?.name || '').trim();
     if (!name) return res.status(400).json({ error: 'Agent 名称不能为空。' });
-    const profileName = await uniqueProfileName(name);
-    await createHermesProfileFiles(profileName, req.body || {});
-    await ensureManagedGlobalModulesForProfile(profileName);
-    const profile = (await readHermesProfiles()).find((item) => item.name === profileName);
+    const agentId = await uniqueProfileName(name, state.agents.map((item) => item.id));
+    const requestedPolicy = normalizeRuntimePolicy(req.body?.runtimePolicy, { hasHermesProfile: true });
+    const requestedModelValue = String(req.body?.model || '').trim();
+    const requestedModelSelection = requestedModelValue ? resolveModelSelection(requestedModelValue, state.models) : null;
+    if (requestedModelValue && !requestedModelSelection?.selectedModel) {
+      return res.status(400).json({ error: 'Agent 默认模型不在 Frakio Model Center 中。' });
+    }
+    const needsHermesProfile = requestedPolicy.allowedRuntimeIds.includes('hermes');
+    const profileName = needsHermesProfile ? agentId : '';
+    if (profileName) {
+      await createHermesProfileFiles(profileName, { ...(req.body || {}), model: '' });
+      await ensureManagedGlobalModulesForProfile(profileName);
+      if (requestedModelSelection?.selectedModel) {
+        await ensureModelProviderForProfile(profileName, requestedModelSelection.selectedModel, requestedModelSelection.selectedName, state.models, { setDefault: true });
+      }
+    }
+    const profile = profileName ? (await readHermesProfiles()).find((item) => item.name === profileName) : null;
     const agent = {
-      id: profileName,
+      id: agentId,
       name: name.slice(0, 32),
       role: String(req.body?.role || '新 Agent').trim().slice(0, 60),
-      model: String(req.body?.model || '').trim().slice(0, 60),
-      color: String(req.body?.color || profileColor(profileName)).trim().slice(0, 20),
+      model: String(requestedModelSelection?.selectionValue || '').slice(0, 240),
+      color: String(req.body?.color || profileColor(agentId)).trim().slice(0, 20),
       soul: profile?.soul || String(req.body?.soul || req.body?.scope || '待定义 Soul。').trim(),
       scope: String(req.body?.scope || req.body?.role || '待定义职责范围。').trim().slice(0, 300),
-      source: 'hermes-profile',
+      source: 'frakio-agent',
       profileName,
       gatewayStatus: '',
       soulExcerpt: profile?.soulExcerpt || '',
@@ -11447,7 +12534,9 @@ app.post('/api/agents', async (req, res) => {
       skills: profile?.skills || [],
       plugins: profile?.plugins || [],
       avatarUrl: profile?.avatarUrl || '',
+      runtimePolicy: requestedPolicy,
     };
+    agent.profileRevision = agentProfileRevision(agent);
     const firstAgent = state.agents.length === 0;
     state.agents.push(agent);
     if (firstAgent || !state.agents.some((item) => item.id === state.ui?.defaultAgentId)) {
@@ -11462,17 +12551,21 @@ app.post('/api/agents', async (req, res) => {
     }
     await writeState(state);
     const warnings = [];
-    try {
-      await registerProfileGatewayAutoStart(profileName);
-    } catch (error) {
-      warnings.push(`自动启动配置保存失败：${error?.message || error}`);
+    if (profileName) {
+      try {
+        await registerProfileGatewayAutoStart(profileName);
+      } catch (error) {
+        warnings.push(`自动启动配置保存失败：${error?.message || error}`);
+      }
     }
     let gateway = null;
-    try {
-      gateway = await startProfileGateway(profileName);
-      if (!gateway?.running) warnings.push(gateway?.error || gateway?.status || '网关未能启动。');
-    } catch (error) {
-      warnings.push(`网关启动失败：${error?.message || error}`);
+    if (profileName) {
+      try {
+        gateway = await startProfileGateway(profileName);
+        if (!gateway?.running) warnings.push(gateway?.error || gateway?.status || '网关未能启动。');
+      } catch (error) {
+        warnings.push(`网关启动失败：${error?.message || error}`);
+      }
     }
     const runtime = await hermesRuntimeStatus().catch(() => null);
     res.json({ agent, agents: state.agents, profile, gateway, runtime, ...(warnings.length ? { gatewayWarning: warnings.join('\n') } : {}) });
@@ -11512,25 +12605,43 @@ app.patch('/api/agents/:id', async (req, res) => {
   if ('name' in req.body) agent.name = String(req.body.name || agent.name).trim().slice(0, 32);
   if ('role' in req.body) agent.role = String(req.body.role || agent.role).trim().slice(0, 60);
   if ('model' in req.body) {
-    const requestedModel = String(req.body.model || agent.model).trim();
-    const { selectedName } = resolveModelSelection(requestedModel, state.models);
+    const requestedModel = String(req.body.model || '').trim();
+    const { selectedModel, selectedName, selectionValue } = resolveModelSelection(requestedModel, state.models);
+    if (!selectedModel) return res.status(400).json({ error: 'Agent 默认模型不在 Frakio Model Center 中。' });
     if (agent.profileName) {
-      const updated = await updateHermesProfileDefaultModel(agent.profileName, requestedModel, state.models);
-      agent.model = String(updated?.model || selectedName || requestedModel).trim().slice(0, 120);
-    } else {
-      agent.model = String(selectedName || requestedModel).trim().slice(0, 120);
+      await updateHermesProfileDefaultModel(agent.profileName, selectionValue, state.models);
     }
+    agent.model = String(selectionValue || modelSelectionValue(selectedModel, selectedName)).trim().slice(0, 240);
   }
   if ('color' in req.body) agent.color = String(req.body.color || agent.color).trim().slice(0, 20);
   if ('soul' in req.body) agent.soul = String(req.body.soul || agent.soul || agent.scope || '').trim().slice(0, 500);
   if ('scope' in req.body) agent.scope = String(req.body.scope || agent.scope).trim().slice(0, 300);
+  if ('runtimePolicy' in req.body) {
+    const nextPolicy = normalizeRuntimePolicy(req.body.runtimePolicy, { hasHermesProfile: Boolean(agent.profileName) });
+    if (nextPolicy.allowedRuntimeIds.includes('hermes') && !agent.profileName) {
+      const profileName = await uniqueProfileName(agent.name || agent.id, state.agents.map((item) => item.profileName).filter(Boolean));
+      await createHermesProfileFiles(profileName, agent);
+      await ensureManagedGlobalModulesForProfile(profileName);
+      agent.profileName = profileName;
+    }
+    agent.runtimePolicy = nextPolicy;
+  }
+  agent.profileRevision = agentProfileRevision(agent);
   await writeState(state);
   res.json({ agent, agents: state.agents });
 });
 
 app.get('/api/state', async (_req, res) => {
   const state = await readState();
-  res.json({ ui: state.ui, defaultVaultId: state.defaultVaultId, spaces: state.spaces.map(publicSpace), workspaces: state.workspaces, integrations: state.integrations });
+  res.json({
+    version: state.version,
+    features: state.features,
+    ui: state.ui,
+    defaultVaultId: state.defaultVaultId,
+    spaces: state.spaces.map(publicSpace),
+    workspaces: state.workspaces,
+    integrations: state.integrations,
+  });
 });
 
 app.patch('/api/state/ui', async (req, res) => {
@@ -11806,12 +12917,16 @@ app.post('/api/workspaces', async (req, res) => {
     if (existingWorkspace) return res.status(409).json({ error: '这个文件夹已经绑定到一个项目。', workspace: publicWorkspace(existingWorkspace, state) });
     const workspaceName = name || vaultNameFromPath(rootPath);
     const vault = await ensureVaultForRoot(state, rootPath, workspaceName);
+    await knowledgeGateway.initializeVault(vault);
     const workspace = {
       id: id('workspace'),
       spaceId: requestedSpaceId,
       name: workspaceName,
       rootPath,
       vaultId: vault.id,
+      primaryVaultId: vault.id,
+      sharedVaultIds: [],
+      writableVaultIds: [vault.id],
       environment: 'local',
       activeThreadId: null,
       archivedAt: null,
@@ -11908,6 +13023,7 @@ app.post('/api/conversations', async (req, res) => {
         vaultId: null,
         selectedAgents,
         agentModelOverrides: normalizeAgentModelOverrides(req.body?.agentModelOverrides, state.agents, state.models),
+        agentRuntimeOverrides: normalizeAgentRuntimeOverrides(req.body?.agentRuntimeOverrides, state.agents),
         agentRunOverrides: normalizeAgentRunOverrides(req.body?.agentRunOverrides, state.agents),
         mode: 'direct',
         executionMode,
@@ -12044,6 +13160,7 @@ app.post('/api/workspaces/:id/threads', async (req, res) => {
         vaultId: workspace.vaultId || null,
         selectedAgents: Array.from(new Set([defaultAgentId, coordinatorAgentId, 'max'].filter(Boolean))),
         agentModelOverrides: normalizeAgentModelOverrides(req.body?.agentModelOverrides, state.agents, state.models),
+        agentRuntimeOverrides: normalizeAgentRuntimeOverrides(req.body?.agentRuntimeOverrides, state.agents),
         agentRunOverrides: normalizeAgentRunOverrides(req.body?.agentRunOverrides, state.agents),
         mode: 'workspace',
         executionMode,
@@ -12631,6 +13748,7 @@ app.patch('/api/threads/:id', async (req, res) => {
     if (Array.isArray(req.body.selectedAgents)) thread.selectedAgents = req.body.selectedAgents;
     if ('agentModelOverrides' in req.body) thread.agentModelOverrides = normalizeAgentModelOverrides(req.body.agentModelOverrides, state.agents, state.models);
     if ('agentRunOverrides' in req.body) thread.agentRunOverrides = normalizeAgentRunOverrides(req.body.agentRunOverrides, state.agents);
+    if ('agentRuntimeOverrides' in req.body) thread.agentRuntimeOverrides = normalizeAgentRuntimeOverrides(req.body.agentRuntimeOverrides, state.agents);
     if ('mode' in req.body && ['workspace', 'direct'].includes(req.body.mode)) thread.mode = req.body.mode;
     if ('primaryAgentId' in req.body && state.agents.some((agent) => agent.id === req.body.primaryAgentId)) thread.primaryAgentId = req.body.primaryAgentId;
     if ('defaultAgentId' in req.body && state.agents.some((agent) => agent.id === req.body.defaultAgentId)) thread.defaultAgentId = req.body.defaultAgentId;
@@ -12725,12 +13843,16 @@ app.post('/api/threads/:id/convert-to-workspace', async (req, res) => {
     }
     const workspaceName = name || vaultNameFromPath(rootPath);
     const vault = await ensureVaultForRoot(state, rootPath, workspaceName);
+    await knowledgeGateway.initializeVault(vault);
     const workspace = {
       id: id('workspace'),
       spaceId: requestedSpaceId,
       name: workspaceName,
       rootPath,
       vaultId: vault.id,
+      primaryVaultId: vault.id,
+      sharedVaultIds: [],
+      writableVaultIds: [vault.id],
       environment: 'local',
       activeThreadId: thread.id,
       archivedAt: null,
@@ -12754,7 +13876,7 @@ app.post('/api/threads/:id/convert-to-workspace', async (req, res) => {
   }
 });
 
-function createThreadRecord({ spaceId, workspaceId, title, vaultId, selectedAgents, agentModelOverrides = {}, agentRunOverrides = {}, mode, executionMode = 'chat', primaryAgentId, defaultAgentId, followMode = 'default' }) {
+function createThreadRecord({ spaceId, workspaceId, title, vaultId, selectedAgents, agentModelOverrides = {}, agentRunOverrides = {}, agentRuntimeOverrides = {}, mode, executionMode = 'chat', primaryAgentId, defaultAgentId, followMode = 'default' }) {
   const threadDefaultAgentId = defaultAgentId || primaryAgentId || selectedAgents?.[0] || 'iris';
   return {
     id: id('thread'),
@@ -12775,6 +13897,7 @@ function createThreadRecord({ spaceId, workspaceId, title, vaultId, selectedAgen
     selectedAgents,
     agentModelOverrides,
     agentRunOverrides,
+    agentRuntimeOverrides,
     permissionMode: 'smart',
     archivedAt: null,
     pinnedAt: null,
@@ -12901,6 +14024,8 @@ function summarizeThread(thread, state) {
     permissionMode: thread.permissionMode || 'smart',
     agentModelOverrides: thread.agentModelOverrides || {},
     agentRunOverrides: thread.agentRunOverrides || {},
+    agentRuntimeOverrides: thread.agentRuntimeOverrides || {},
+    runtimeId: thread.runtimeId || 'hermes',
     vaultId: thread.vaultId,
     vaultName: vault?.name || '未连接资料库',
     updatedAt: thread.updatedAt,
@@ -13013,37 +14138,15 @@ function resolveRunTargetAgent(state, thread, targetAgentId, selectedAgents = []
 }
 
 async function resolveThreadRunModelConfig(state, thread, agent, profileName) {
-  const overrides = normalizeAgentModelOverrides(thread?.agentModelOverrides || {}, state.agents, state.models);
-  const override = agent?.id ? overrides[agent.id] : '';
-  if (override) {
-    const { selectedModel, selectedName } = resolveModelSelection(override, state.models || []);
-    if (selectedModel) {
-      const materialized = await ensureModelProviderForProfile(profileName, selectedModel, selectedName, state.models || [], { setDefault: false });
-      return { model: materialized.model, provider: materialized.provider, source: 'thread', modelProfile: selectedModel };
-    }
-  }
-  const config = await readYamlFile(profileConfigPath(profileName));
-  const provider = String(config?.model?.provider || config?.provider || '').trim();
-  const model = String(config?.model?.default || (typeof config?.model === 'string' ? config.model : '') || '').trim();
-  if (model) {
-    const profileModels = normalizeModels(state.models || []).filter((item) => item.providerKey === provider && normalizeModelNames(item.models, item.model).includes(model));
-    if (profileModels.length === 1) {
-      const materialized = await ensureModelProviderForProfile(profileName, profileModels[0], model, state.models || [], { setDefault: false });
-      return { model: materialized.model, provider: materialized.provider, source: 'profile', modelProfile: profileModels[0] };
-    }
-    if (providerPresetByKey(provider)) {
-      throw configValidationError(`${providerPresetByKey(provider)?.label || providerLabel(provider)} 尚未配置 API Key。`);
-    }
-    return { model, provider, source: 'profile', modelProfile: null };
-  }
-  const fallbackValue = agent?.model || state.ui?.defaultModel || state.models?.[0]?.id || state.models?.[0]?.model || '';
-  const fallback = resolveModelSelection(fallbackValue, state.models || []);
-  if (fallback.selectedModel) {
-    const materialized = await ensureModelProviderForProfile(profileName, fallback.selectedModel, fallback.selectedName, state.models || [], { setDefault: true });
-    if (agent && !agent.model) agent.model = fallback.selectedName;
-    return { model: materialized.model, provider: materialized.provider, source: 'agent', modelProfile: fallback.selectedModel };
-  }
-  return { model: '', provider: '', source: 'profile', modelProfile: null };
+  const selection = await runtimeModelSelection(state, thread, agent, 'hermes');
+  const materialized = await ensureModelProviderForProfile(profileName, selection.selectedModel, selection.selectedName, state.models || [], { setDefault: false });
+  if (agent && !agent.model) agent.model = selection.selectionValue;
+  return {
+    model: materialized.model,
+    provider: materialized.provider,
+    source: selection.source,
+    modelProfile: selection.selectedModel,
+  };
 }
 
 async function resolveHermesProfileNameForAgent(agent) {
@@ -13647,6 +14750,7 @@ function clearHermesRunState(thread) {
   thread.activeRunParentMessageId = '';
   thread.activeRunSourceAgentId = '';
   thread.activeRunTurnId = '';
+  thread.activeRuntimeId = '';
 }
 
 function finishActiveRunGroupChild(thread, runId, status = 'completed') {
@@ -13860,14 +14964,15 @@ async function processHermesBridgeChunk({ threadId, runId, chunk, res, outputSta
   return { completed: false };
 }
 
-async function appendHermesRunResult(threadId, output, runId, usage = {}, contentOffsetShift = 0) {
+async function appendHermesRunResult(threadId, output, runId, usage = {}, contentOffsetShift = 0, runtimeId = 'hermes', modelId = '', profileRevision = '') {
   return updateState(async (state) => {
     const thread = state.threads.find((item) => item.id === threadId);
     if (!thread) return null;
     const agent = state.agents.find((item) => item.id === thread.activeRunAgentId)
     || resolveThreadDefaultAgent(state, thread)
     || state.agents[0]
-    || { id: 'iris', name: 'Iris', role: 'Hermes Agent' };
+    || { id: 'iris', name: 'Iris', role: 'Agent' };
+  const runtimeLabel = runtimeId === 'pi' ? 'Pi' : runtimeId === 'hermes' ? 'Hermes Agent' : runtimeId;
   const defaultAgent = resolveThreadDefaultAgent(state, thread) || agent;
   const explicitlyMentionedAgent = state.agents.find((item) => item.id === thread.activeRunMentionedAgentId) || null;
   const collaboration = normalizeCollaboration(thread.collaboration, { defaultAgentId: thread.defaultAgentId, activeAgentId: thread.activeAgentId });
@@ -13883,7 +14988,11 @@ async function appendHermesRunResult(threadId, output, runId, usage = {}, conten
     thread.messages = [
       ...(thread.messages || []),
       agentEvent(agent, finalOutput, {
-        role: `${agent.role || 'Agent'} / Hermes Agent`,
+        role: `${agent.role || 'Agent'} / ${runtimeLabel}`,
+        runtimeId,
+        runtimeName: runtimeLabel,
+        modelId: modelId || agent.model || '',
+        profileRevision: profileRevision || agentProfileRevision(agent),
         externalRunId: runId,
         turnId: runTurnId,
         mentionDepth: Number(thread.activeRunMentionDepth || 0),
@@ -13922,15 +15031,19 @@ async function appendHermesRunResult(threadId, output, runId, usage = {}, conten
     lastRoutedAt: now(),
     lastRouteReason: explicitlyMentionedAgent ? 'user_mention' : thread.followMode === 'conversation' ? 'conversation_follow' : 'default_agent',
   }, { defaultAgentId: thread.defaultAgentId, activeAgentId: nextActiveAgent?.id });
-  thread.engine = 'hermes-agent';
+  thread.engine = runtimeId === 'hermes' ? 'hermes-agent' : 'model-provider';
+  thread.runtimeId = runtimeId;
   if (executingPlan) {
     executingPlan.status = 'completed';
     executingPlan.error = '';
     executingPlan.updatedAt = now();
     captureTelemetry('plan_execution_completed', { target_mode: executingPlan.targetExecutionMode });
   }
-  thread.agentSessionIds = { ...(thread.agentSessionIds || {}), [agent.id]: runSessionId };
-  thread.externalSessionId = thread.externalSessionId || hermesAgentSessionId(thread, defaultAgent.id);
+  if (runtimeId === 'hermes') {
+    thread.agentSessionIds = { ...(thread.agentSessionIds || {}), [agent.id]: runSessionId };
+    thread.externalSessionId = thread.externalSessionId || hermesAgentSessionId(thread, defaultAgent.id);
+  }
+  thread.runtimeSessionIds = { ...(thread.runtimeSessionIds || {}), [`${agent.id}:${runtimeId}`]: runSessionId };
   if (thread.activeRunGroup?.turnId === runTurnId) {
     finishActiveRunGroupChild(thread, runId, 'completed');
   }
@@ -13971,9 +15084,9 @@ async function appendHermesRunResult(threadId, output, runId, usage = {}, conten
     state.observability.modelUsage.push({
       id: id('usage'),
       createdAt: now(),
-      provider: 'Hermes Agent',
-      modelId: 'hermes-agent',
-      modelName: 'Hermes Agent',
+      provider: runtimeLabel,
+      modelId: runtimeId,
+      modelName: runtimeLabel,
       threadId: thread.id,
       threadTitle: thread.title,
       workspaceId: thread.workspaceId,
@@ -14091,6 +15204,20 @@ function hermesTurnEventSink(threadId, turnId, runMeta = {}) {
         if (!line.startsWith('data:')) continue;
         try {
           const event = JSON.parse(line.slice(5).trim());
+          const runtimeRunId = event.runId || runMeta.runId || '';
+          const storedRun = runtimeRunId ? runtimeStore.getRun(runtimeRunId) : null;
+          if (storedRun) {
+            const canonicalType = event.event === 'tool.running' ? 'tool.started'
+              : event.event === 'approval.request' ? 'approval.requested'
+                : event.event === 'approval.responded' ? 'approval.resolved'
+                  : event.event;
+            if (['run.started', 'message.delta', 'reasoning.summary', 'tool.started', 'tool.updated', 'tool.completed', 'approval.requested', 'approval.resolved', 'artifact.published', 'run.completed', 'run.failed', 'run.cancelled'].includes(canonicalType)) {
+              runtimeStore.appendEvent({ runId: runtimeRunId, type: canonicalType, payload: event });
+            }
+            if (event.event === 'run.completed') runtimeStore.updateRun(runtimeRunId, { status: 'completed' });
+            if (event.event === 'run.failed') runtimeStore.updateRun(runtimeRunId, { status: 'failed', error: event.error || '' });
+            if (event.event === 'run.cancelled') runtimeStore.updateRun(runtimeRunId, { status: 'cancelled' });
+          }
           emitHermesTurnEvent(threadId, turnId, {
             ...event,
             runId: event.runId || runMeta.runId || '',
@@ -14399,6 +15526,882 @@ async function healStaleRunningThreads(state) {
   return changed;
 }
 
+async function runtimeModelSelection(state, thread, agent, runtimeId) {
+  const overrides = normalizeAgentModelOverrides(thread?.agentModelOverrides || {}, state.agents, state.models);
+  const selection = resolveModelSelectionByPrecedence({
+    threadModel: agent?.id ? overrides[agent.id] : '',
+    agentModel: agent?.model || '',
+    globalModel: state.ui?.defaultModel || '',
+    models: state.models || [],
+  });
+  if (selection.requestedValue) {
+    if (!selection.selectedModel) {
+      const error = new Error(`模型「${selection.requestedValue}」不存在，请在模型中心重新选择。`);
+      error.status = 409;
+      error.code = 'RUNTIME_MODEL_NOT_FOUND';
+      throw error;
+    }
+    const compatibility = await runtimeModelCompatibility(runtimeId, selection.selectedModel, state.models || [], state.features);
+    if (compatibility.status === 'unsupported') {
+      const error = new Error(compatibility.reason);
+      error.status = 409;
+      error.code = 'RUNTIME_MODEL_UNSUPPORTED';
+      throw error;
+    }
+    if (!runtimeSupportsModel(runtimeId, selection.selectedModel, selection.selectedName)) {
+      const error = new Error(`模型「${selection.selectedName}」使用的 API 协议不受 ${runtimeId === 'pi' ? 'Pi' : 'Hermes'} 支持。`);
+      error.status = 409;
+      error.code = 'RUNTIME_MODEL_UNSUPPORTED';
+      throw error;
+    }
+    if (compatibility.credentialStatus === 'missing') {
+      const error = new Error(compatibility.reason);
+      error.status = 409;
+      error.code = runtimeId === 'pi' ? 'PI_MODEL_CREDENTIAL_MISSING' : 'HERMES_MODEL_CREDENTIAL_MISSING';
+      throw error;
+    }
+    return { ...selection, compatibility };
+  }
+  for (const model of state.models || []) {
+    const selectedName = model.model || runtimeModelNames(model)[0] || '';
+    const compatibility = await runtimeModelCompatibility(runtimeId, model, state.models || [], state.features);
+    if (selectedName && compatibility.usableModelIds.includes(selectedName)) {
+      return {
+        selectedModel: model,
+        selectedName,
+        selectionValue: modelSelectionValue(model, selectedName),
+        requestedValue: '',
+        source: 'fallback',
+        compatibility,
+      };
+    }
+  }
+  const error = new Error(`${runtimeId === 'pi' ? 'Pi' : 'Hermes'} 没有兼容且已配置凭据的模型，请前往模型中心检查。`);
+  error.status = 409;
+  error.code = 'RUNTIME_MODEL_MISSING';
+  throw error;
+}
+
+function piApiMode(model) {
+  return runtimeApiMode(model?.modelApiModes?.[model?.model] || model?.apiMode || 'chat_completions');
+}
+
+function assertSupportedRuntimeReasoning({ runtimeLabel, modelName, capability, requested = {} }) {
+  const level = String(requested.reasoningEffort || '').trim();
+  if (!level) return;
+  if (typeof capability?.reasoningMap?.[level] === 'string') return;
+  const error = new Error(`模型「${modelName}」不支持「${level}」推理档位，请在模型中心重新选择。`);
+  error.status = 409;
+  error.code = 'RUNTIME_REASONING_UNSUPPORTED';
+  error.runtimeLabel = runtimeLabel;
+  throw error;
+}
+
+function piThinkingFormat(value) {
+  const format = String(value || 'openai').trim();
+  if (format === 'chat_template') return 'chat-template';
+  if (format === 'string_thinking') return 'string-thinking';
+  return ['openai', 'openrouter', 'deepseek', 'together', 'zai', 'qwen', 'chat-template', 'string-thinking', 'ant-ling'].includes(format)
+    ? format
+    : 'openai';
+}
+
+function piModelRuntimeSettings(selectedModel, selectedName, capability, requestedRunSettings, mapping) {
+  assertSupportedRuntimeReasoning({
+    runtimeLabel: 'Pi',
+    modelName: selectedName,
+    capability,
+    requested: requestedRunSettings,
+  });
+  const modelCompat = {
+    ...(selectedModel?.compat || {}),
+    ...(selectedModel?.modelCompat?.[selectedName] || {}),
+  };
+  const thinkingFormat = piThinkingFormat(capability?.thinkingFormat || modelCompat.thinkingFormat);
+  const supportsExplicitOff = ['deepseek', 'together', 'zai', 'qwen', 'chat-template', 'string-thinking'].includes(thinkingFormat);
+  const thinkingLevelMap = Object.fromEntries(Object.entries(capability?.reasoningMap || {})
+    .filter(([level, mapped]) => typeof mapped === 'string' && mapped.trim())
+    .filter(([level]) => level !== 'off' || supportsExplicitOff));
+  const requestedLevel = String(requestedRunSettings?.reasoningEffort || '').trim();
+  return {
+    thinkingLevel: requestedLevel && requestedLevel !== 'off' ? requestedLevel : 'off',
+    requestedReasoning: mapping.requestedReasoning,
+    effectiveReasoning: requestedLevel === 'off' && !supportsExplicitOff ? 'provider_default' : mapping.effectiveReasoning,
+    compat: {
+      thinkingFormat,
+      supportsReasoningEffort: Object.entries(thinkingLevelMap).some(([level]) => level !== 'off'),
+      thinkingLevelMap,
+      requestOverrides: modelCompat.requestOverrides || {},
+    },
+  };
+}
+
+async function piModelConfiguration(state, thread, agent) {
+  const { selectedModel, selectedName } = await runtimeModelSelection(state, thread, agent, 'pi');
+  const apiKey = await getReusableModelSecret(selectedModel, state.models || []);
+  const oauthProviderKey = oauthCredentialProviderKey(selectedModel);
+  const oauth = oauthProviderKey ? await getOAuthCredential(oauthProviderKey, selectedModel.oauthAccountId || '') : null;
+  if (!apiKey && !oauth?.access && !modelCredentialNotRequired(selectedModel)) {
+    const error = new Error(`模型「${selectedModel.name}」没有可供 Pi 使用的凭据。请在 Frakio Model Center 完成授权。`);
+    error.status = 409;
+    error.code = 'PI_MODEL_CREDENTIAL_MISSING';
+    throw error;
+  }
+  const providerCatalog = flattenProviderCatalog(modelCatalogCache);
+  const capability = resolveModelCapability(selectedModel, selectedName, { providerCatalog });
+  const requestedRunSettings = normalizeAgentRunOverrides(thread.agentRunOverrides, state.agents)[agent.id] || {};
+  const mapping = capability
+    ? mapRunSettings(selectedModel, capability, requestedRunSettings)
+    : { effectiveReasoning: 'off', requestedReasoning: 'default', effectiveServiceTier: 'standard', requestedServiceTier: 'standard' };
+  const piSettings = piModelRuntimeSettings(selectedModel, selectedName, capability, requestedRunSettings, mapping);
+  const mode = piApiMode({ ...selectedModel, model: selectedName });
+  const providerId = oauthProviderKey ? piOAuthProviderId(oauthProviderKey) : (selectedModel.providerKey || selectedModel.id);
+  let geminiProjectId = '';
+  if (oauthProviderKey === geminiProviderKey) {
+    if (!state.features?.piGeminiCodeAssistAdapter) {
+      const error = new Error('Gemini Code Assist 的 Pi 适配器尚未开放。');
+      error.status = 409;
+      error.code = 'PI_GEMINI_CODE_ASSIST_DISABLED';
+      throw error;
+    }
+    const account = await resolveGeminiCodeAssistAccount(agent.profileName || 'default', oauth.access, selectedModel.oauthAccountId || '');
+    geminiProjectId = account.projectId;
+    await setOAuthCredential(geminiProviderKey, {
+      ...oauth,
+      codeAssist: { ...(oauth.codeAssist || {}), ...account, checkedAt: now() },
+    }, selectedModel.oauthAccountId || '');
+  }
+  return {
+    providerId,
+    providerName: selectedModel.provider || selectedModel.name,
+    modelId: selectedName,
+    modelName: selectedName,
+    apiMode: mode,
+    baseUrl: selectedModel.baseUrl,
+    apiKey,
+    authMode: oauthProviderKey ? 'oauth' : 'api_key',
+    oauthProviderKey,
+    oauthAccountId: selectedModel.oauthAccountId || '',
+    geminiProjectId,
+    reasoning: Boolean(capability?.reasoning),
+    thinkingLevelMap: piSettings.compat.thinkingLevelMap,
+    contextWindow: Number(selectedModel.contextLimit || 128000),
+    maxTokens: Math.min(32768, Math.max(1024, Number(selectedModel.maxTokens || 8192))),
+    cost: {
+      input: Number(selectedModel.pricing?.input || 0),
+      output: Number(selectedModel.pricing?.output || 0),
+      cacheRead: Number(selectedModel.pricing?.cacheRead || 0),
+      cacheWrite: Number(selectedModel.pricing?.cacheCreation || 0),
+    },
+    compat: piSettings.compat,
+    thinkingLevel: piSettings.thinkingLevel,
+    requestedReasoning: piSettings.requestedReasoning,
+    effectiveReasoning: piSettings.effectiveReasoning,
+    requestedServiceTier: mapping.requestedServiceTier,
+    effectiveServiceTier: mapping.effectiveServiceTier,
+    modelProfileId: selectedModel.id,
+  };
+}
+
+function runtimeForRequest(state, thread, body = {}) {
+  const selected = Array.isArray(body.selectedAgents) ? body.selectedAgents : thread.selectedAgents || [resolveDefaultAgentId(state)];
+  const selectedAgents = state.agents.filter((agent) => selected.includes(agent.id));
+  const agent = resolveRunTargetAgent(state, thread, body.targetAgentId, selectedAgents);
+  if (!agent) return { agent: null, runtimeId: '' };
+  const threadOverride = thread.agentRuntimeOverrides?.[agent.id] || '';
+  const runtimeId = runtimeForAgent(agent, String(body.runtimeId || threadOverride || '').trim());
+  return { agent, runtimeId };
+}
+
+function runtimeHandoffPacket(thread, agent, runtimeId) {
+  const previousRuntimeId = String(thread.runtimeId || thread.activeRuntimeId || '');
+  const messages = (thread.messages || []).slice(-12).map((message) => ({
+    agentName: message.agentName,
+    role: message.role,
+    content: String(message.content || '').slice(0, 1200),
+  }));
+  return {
+    fromRuntimeId: previousRuntimeId && previousRuntimeId !== runtimeId ? previousRuntimeId : '',
+    toRuntimeId: runtimeId,
+    agentId: agent.id,
+    acceptedDecisions: messages.filter((message) => /确认|决定|采用|approved|decision/i.test(message.content)).slice(-6),
+    recentConversation: messages,
+    createdAt: now(),
+  };
+}
+
+async function runtimeContextPacket(state, thread, agent, runtimeId, message) {
+  const workspace = state.workspaces.find((item) => item.id === thread.workspaceId) || null;
+  const vaultId = thread.vaultId || workspace?.primaryVaultId || workspace?.vaultId || '';
+  const vault = state.vaults.find((item) => item.id === vaultId) || null;
+  const memory = memoryLedger.packet({
+    userId: 'default',
+    agentId: agent.id,
+    workspaceId: workspace?.id || '',
+    query: message.slice(0, 160),
+  });
+  const knowledge = vault
+    ? await knowledgeGateway.search(vault, message.split(/\s+/).slice(0, 8).join(' ').slice(0, 100), { limit: 8 }).catch(() => [])
+    : [];
+  return {
+    memory,
+    knowledge,
+    handoff: runtimeHandoffPacket(thread, agent, runtimeId),
+    workspace: workspace ? { id: workspace.id, name: workspace.name, rootPath: workspace.rootPath } : null,
+    vault: vault ? { id: vault.id, name: vault.name, path: vault.path } : null,
+  };
+}
+
+async function handlePiToolRequest(name, params, context) {
+  const state = await readState();
+  const thread = state.threads.find((item) => item.id === context.threadId);
+  const workspace = state.workspaces.find((item) => item.id === (context.workspaceId || thread?.workspaceId));
+  const vault = state.vaults.find((item) => item.id === (context.vaultId || thread?.vaultId || workspace?.primaryVaultId || workspace?.vaultId));
+  if (name === 'frakio_memory_search') {
+    return memoryLedger.packet({
+      userId: 'default',
+      agentId: context.agentId,
+      workspaceId: workspace?.id || '',
+      query: String(params.query || ''),
+      limit: Number(params.limit || 24),
+    });
+  }
+  if (name === 'frakio_memory_propose') {
+    const scope = ['user', 'agent', 'workspace'].includes(params.scope) ? params.scope : 'workspace';
+    const subjectId = scope === 'user' ? 'default' : scope === 'agent' ? context.agentId : workspace?.id;
+    if (!subjectId) throw new Error('The requested memory scope is not available in this conversation.');
+    return memoryLedger.propose({
+      scope,
+      subjectId,
+      fact: params.fact,
+      confidence: Number(params.confidence ?? 0.5),
+      provenance: [{ runtimeId: 'pi', runId: context.runId, threadId: context.threadId, source: 'pi-tool' }],
+    });
+  }
+  if (name.startsWith('frakio_knowledge_') || name === 'frakio_artifact_publish') {
+    if (!workspace || !vault) throw new Error('This conversation has no writable Workspace Vault.');
+    if (name === 'frakio_knowledge_search') return knowledgeGateway.search(vault, params.query, { limit: params.limit });
+    if (name === 'frakio_knowledge_read') return knowledgeGateway.read(vault, params.path);
+    if (name === 'frakio_knowledge_draft_write') {
+      return knowledgeGateway.draftWrite({ workspace, vault, runId: context.runId, relativePath: params.path, content: params.content });
+    }
+    if (name === 'frakio_artifact_publish') {
+      const target = params.title
+        ? `artifacts/${String(params.title).replace(/[^a-zA-Z0-9\u4e00-\u9fff._-]/g, '-')}.md`
+        : '';
+      return knowledgeGateway.publish({ workspace, vault, runId: context.runId, draftPath: params.path, targetPath: target });
+    }
+  }
+  if (name.startsWith('frakio_task_')) {
+    const taskId = String(params.taskId || context.taskId || '');
+    const task = taskId ? runtimeStore.getWorkTask(taskId) : null;
+    if (name === 'frakio_task_get') return task || { taskId, status: 'not_found' };
+    if (!task) throw new Error(`Frakio Work task does not exist: ${taskId}`);
+    const status = name === 'frakio_task_complete' ? 'completed'
+      : name === 'frakio_task_request_input' ? 'needs_input'
+        : String(params.status || task.status);
+    return runtimeStore.upsertWorkTask({
+      ...task,
+      status,
+      description: params.detail || params.question || params.summary || task.description,
+      attempt: task.attempt,
+      idempotencyKey: task.idempotencyKey,
+      metadata: {
+        ...task.metadata,
+        lastRuntimeUpdate: { name, params, runId: context.runId, updatedAt: now() },
+      },
+    });
+  }
+  throw new Error(`Unsupported Frakio Pi tool: ${name}`);
+}
+
+function canonicalRuntimeEventType(type) {
+  return [
+    'run.started', 'message.delta', 'reasoning.summary', 'tool.started', 'tool.updated',
+    'tool.completed', 'approval.requested', 'approval.resolved', 'artifact.published',
+    'run.completed', 'run.failed', 'run.cancelled',
+  ].includes(type) ? type : 'tool.updated';
+}
+
+async function processCanonicalRuntimeEvent(runId, event) {
+  const run = runtimeStore.getRun(runId);
+  if (!run) return;
+  const runtimeId = run.runtimeId;
+  const runtimeLabel = runtimeId === 'pi' ? 'Pi'
+    : runtimeId === 'codex' ? 'Codex'
+      : runtimeId === 'claude' ? 'Claude Code'
+        : runtimeId === 'gemini' ? 'Gemini CLI'
+          : runtimeId;
+  const type = canonicalRuntimeEventType(event.type);
+  const payload = event.payload || {};
+  runtimeStore.appendEvent({ runId, type, payload });
+  if (run.metadata?.taskId && !['run.completed', 'run.failed', 'run.cancelled'].includes(type)) {
+    workScheduler.heartbeat(run.metadata.taskId);
+  }
+  if (type === 'message.delta') {
+    emitHermesTurnEvent(run.threadId, run.turnId, {
+      event: 'message.delta',
+      runId,
+      sessionId: run.sessionId,
+      agentId: run.agentId,
+      delta: String(payload.delta || ''),
+      runtimeId,
+    });
+    return;
+  }
+  if (type === 'tool.started' || type === 'tool.updated' || type === 'tool.completed') {
+    const mapped = type === 'tool.completed' ? 'tool.completed' : 'tool.running';
+    const outputState = piRunOutputStates.get(runId) || { text: '', activityGroupOpen: false };
+    const outgoing = await recordRunActivity(run.threadId, runId, outputState, {
+      event: mapped,
+      tool: payload.toolName,
+      tool_call_id: payload.toolCallId,
+      args: payload.args || {},
+      resultPreview: payload.resultPreview || '',
+      is_error: payload.isError,
+      timestamp: Date.now() / 1000,
+    });
+    piRunOutputStates.set(runId, outputState);
+    emitHermesTurnEvent(run.threadId, run.turnId, {
+      ...outgoing,
+      runId,
+      sessionId: run.sessionId,
+      agentId: run.agentId,
+      runtimeId,
+    });
+    return;
+  }
+  if (type === 'reasoning.summary') {
+    emitHermesTurnEvent(run.threadId, run.turnId, {
+      event: 'reasoning.summary',
+      runId,
+      sessionId: run.sessionId,
+      agentId: run.agentId,
+      delta: String(payload.delta || ''),
+      runtimeId,
+    });
+    return;
+  }
+  if (type === 'approval.requested') {
+    runtimeStore.updateRun(runId, { status: 'waiting_approval' });
+    emitHermesTurnEvent(run.threadId, run.turnId, {
+      event: 'approval.request',
+      runId,
+      sessionId: run.sessionId,
+      agentId: run.agentId,
+      runtimeId,
+      approvalId: payload.approvalId || '',
+      title: payload.title || payload.description || `${runtimeLabel} 需要确认`,
+      command: payload.command || payload.commandPreview || '',
+      cwd: payload.cwd || '',
+      tool: payload.toolName || payload.tool || '',
+      choices: ['once', 'session', 'always', 'deny'],
+      raw: payload,
+      timestamp: Date.now() / 1000,
+    });
+    return;
+  }
+  if (type === 'approval.resolved') {
+    runtimeStore.updateRun(runId, { status: 'running' });
+    emitHermesTurnEvent(run.threadId, run.turnId, {
+      event: 'approval.responded',
+      runId,
+      sessionId: run.sessionId,
+      agentId: run.agentId,
+      runtimeId,
+      approvalId: payload.approvalId || '',
+      choice: payload.decision || payload.choice || '',
+      resolved: true,
+      timestamp: Date.now() / 1000,
+    });
+    return;
+  }
+  if (type === 'run.completed') {
+    runtimeStore.updateRun(runId, { status: 'completed' });
+    const completedTask = run.metadata?.taskId ? runtimeStore.getWorkTask(run.metadata.taskId) : null;
+    if (completedTask) {
+      runtimeStore.upsertWorkTask({
+        ...completedTask,
+        status: 'completed',
+        leaseExpiresAt: null,
+        idempotencyKey: completedTask.idempotencyKey,
+        metadata: { ...completedTask.metadata, summary: String(payload.output || '').slice(0, 4000) },
+      });
+      for (const candidate of runtimeStore.listWorkTasks(completedTask.workflowId, ['blocked'])) {
+        const dependencies = candidate.dependencies || [];
+        if (dependencies.length && dependencies.every((dependencyId) => runtimeStore.getWorkTask(dependencyId)?.status === 'completed')) {
+          runtimeStore.upsertWorkTask({ ...candidate, status: 'ready', idempotencyKey: candidate.idempotencyKey });
+        }
+      }
+    }
+    const thread = run.metadata?.taskDispatch
+      ? await updateState(async (state) => {
+        const current = state.threads.find((item) => item.id === run.threadId);
+        if (!current) return null;
+        current.activeWorkRuns = Object.fromEntries(Object.entries(current.activeWorkRuns || {}).filter(([activeRunId]) => activeRunId !== runId));
+        appendThreadCollaborationEvent(current, {
+          type: 'task.completed',
+          workflowId: completedTask?.workflowId || '',
+          taskId: completedTask?.id || '',
+          actorAgentId: run.agentId,
+          title: completedTask?.title || '运行时任务已完成',
+          detail: String(payload.output || '').slice(0, 4000),
+          payload: { runtimeId, runtimeRunId: runId, runtimeSessionId: run.sessionId },
+        });
+        current.updatedAt = now();
+        return current;
+      })
+      : await appendHermesRunResult(
+        run.threadId,
+        String(payload.output || ''),
+        runId,
+        {},
+        0,
+        runtimeId,
+        run.modelId,
+        run.profileRevision,
+      );
+    piRunOutputStates.delete(runId);
+    emitHermesTurnEvent(run.threadId, run.turnId, { event: 'run.completed', runId, sessionId: run.sessionId, agentId: run.agentId, output: payload.output || '', runtimeId, thread });
+    emitHermesTurnEvent(run.threadId, run.turnId, { event: 'turn.completed', runId, sessionId: run.sessionId, agentId: run.agentId, runtimeId, thread });
+    return;
+  }
+  if (type === 'run.failed' || type === 'run.cancelled') {
+    runtimeStore.updateRun(runId, { status: type === 'run.failed' ? 'failed' : 'cancelled', error: payload.error || '' });
+    const failedTask = run.metadata?.taskId ? runtimeStore.getWorkTask(run.metadata.taskId) : null;
+    if (failedTask) {
+      runtimeStore.upsertWorkTask({
+        ...failedTask,
+        status: type === 'run.failed' ? 'failed' : 'cancelled',
+        leaseExpiresAt: null,
+        idempotencyKey: failedTask.idempotencyKey,
+      });
+    }
+    const thread = run.metadata?.taskDispatch
+      ? await updateState(async (state) => {
+        const current = state.threads.find((item) => item.id === run.threadId);
+        if (!current) return null;
+        current.activeWorkRuns = Object.fromEntries(Object.entries(current.activeWorkRuns || {}).filter(([activeRunId]) => activeRunId !== runId));
+        appendThreadCollaborationEvent(current, {
+          type: type === 'run.failed' ? 'task.failed' : 'task.cancelled',
+          workflowId: failedTask?.workflowId || '',
+          taskId: failedTask?.id || '',
+          actorAgentId: run.agentId,
+          title: failedTask?.title || (type === 'run.failed' ? '运行时任务失败' : '运行时任务已取消'),
+          detail: String(payload.error || '').slice(0, 2000),
+          payload: { runtimeId, runtimeRunId: runId, runtimeSessionId: run.sessionId },
+        });
+        current.updatedAt = now();
+        return current;
+      })
+      : type === 'run.failed'
+        ? await failHermesRun(run.threadId, runId, String(payload.error || `${runtimeLabel} 运行失败。`), `${runtimeLabel} 运行失败`)
+      : await updateState(async (state) => {
+        const current = state.threads.find((item) => item.id === run.threadId);
+        if (!current) return null;
+        current.runStatus = 'idle';
+        finishActiveRunGroupChild(current, runId, 'cancelled');
+        clearHermesRunState(current);
+        current.workflowState = closeOpenWorkflowSteps(current.workflowState || [], 'completed');
+        current.workflow = current.workflowState.map((step) => step.title);
+        current.updatedAt = now();
+        return current;
+      });
+    piRunOutputStates.delete(runId);
+    emitHermesTurnEvent(run.threadId, run.turnId, { event: type, runId, sessionId: run.sessionId, agentId: run.agentId, runtimeId, error: payload.error || '', thread });
+    emitHermesTurnEvent(run.threadId, run.turnId, { event: type === 'run.failed' ? 'turn.failed' : 'turn.cancelled', runId, sessionId: run.sessionId, agentId: run.agentId, runtimeId, error: payload.error || '', thread });
+  }
+}
+
+const piRunOutputStates = new Map();
+piBridge.on('event', ({ runId, event }) => {
+  void processCanonicalRuntimeEvent(runId, event).catch((error) => console.warn('Pi event processing failed:', error?.message || error));
+});
+codexBridge.on('event', ({ runId, event }) => {
+  void processCanonicalRuntimeEvent(runId, event).catch((error) => console.warn('Codex event processing failed:', error?.message || error));
+});
+claudeBridge.on('event', ({ runId, event }) => {
+  void processCanonicalRuntimeEvent(runId, event).catch((error) => console.warn('Claude event processing failed:', error?.message || error));
+});
+geminiBridge.on('event', ({ runId, event }) => {
+  void processCanonicalRuntimeEvent(runId, event).catch((error) => console.warn('Gemini event processing failed:', error?.message || error));
+});
+
+async function startPiRunRequest(req, res) {
+  let createdRun = null;
+  const taskDispatch = Boolean(req.body?.taskDispatch && req.body?.taskId);
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    if (!thread) return res.status(404).json({ error: '会话不存在。' });
+    if (!taskDispatch && thread.runStatus === 'running') return res.status(409).json({ error: '当前会话已有运行中的任务。' });
+    const message = String(req.body?.message || '').trim();
+    const turnId = String(req.body?.turnId || id('turn'));
+    if (!message) return res.status(400).json({ error: '消息不能为空。' });
+    const { agent, runtimeId } = runtimeForRequest(state, thread, { ...req.body, runtimeId: 'pi' });
+    if (!agent || runtimeId !== 'pi') return res.status(409).json({ error: '目标 Agent 没有启用 Pi 运行时。', code: 'RUNTIME_NOT_ALLOWED' });
+    const workspace = state.workspaces.find((item) => item.id === thread.workspaceId) || null;
+    const vault = state.vaults.find((item) => item.id === (thread.vaultId || workspace?.primaryVaultId || workspace?.vaultId)) || null;
+    const profileSnapshot = agentProfileSnapshot(agent);
+    const model = await piModelConfiguration(state, thread, agent);
+    const contextPacket = await runtimeContextPacket(state, thread, agent, 'pi', message);
+    const session = runtimeStore.upsertSession({
+      runtimeId: 'pi',
+      threadId: thread.id,
+      agentId: agent.id,
+      workspaceId: workspace?.id || '',
+      profileRevision: profileSnapshot.revision,
+      status: 'active',
+      metadata: { handoff: contextPacket.handoff },
+    });
+    createdRun = runtimeStore.createRun({
+      sessionId: session.id,
+      runtimeId: 'pi',
+      threadId: thread.id,
+      agentId: agent.id,
+      turnId,
+      profileRevision: profileSnapshot.revision,
+      modelId: model.modelId,
+      status: 'starting',
+      metadata: { modelProfileId: model.modelProfileId, taskId: String(req.body?.taskId || ''), taskDispatch },
+    });
+    let taskId = '';
+    let workTask = null;
+    if (thread.executionMode === 'work') {
+      const workflow = workflowById(thread);
+      const existingTask = req.body?.taskId ? runtimeStore.getWorkTask(String(req.body.taskId)) : null;
+      const task = runtimeStore.upsertWorkTask(existingTask ? {
+        ...existingTask,
+        runtimeSessionId: session.id,
+        status: 'running',
+        attempt: taskDispatch ? existingTask.attempt : existingTask.attempt + 1,
+        leaseExpiresAt: existingTask.leaseExpiresAt || new Date(Date.now() + 120000).toISOString(),
+        idempotencyKey: existingTask.idempotencyKey,
+      } : {
+        workflowId: workflow?.id || `workflow_${thread.id}`,
+        title: message.slice(0, 120),
+        description: message,
+        assigneeAgentId: agent.id,
+        runtimeId: 'pi',
+        runtimeSessionId: session.id,
+        dependencies: [],
+        status: 'running',
+        attempt: 1,
+        leaseExpiresAt: new Date(Date.now() + 120000).toISOString(),
+        idempotencyKey: `turn:${turnId}`,
+      });
+      taskId = task.id;
+      workTask = task;
+      runtimeStore.updateRun(createdRun.id, { metadata: { taskId, taskDispatch } });
+    }
+    if (!taskDispatch) {
+      const userMessage = { id: id('msg'), agentId: 'user', agentName: '你', role: 'Workspace Owner', content: message, createdAt: now() };
+      thread.messages = [...(thread.messages || []), userMessage];
+      thread.runStatus = 'running';
+      thread.activeRunId = createdRun.id;
+      thread.activeSessionId = session.id;
+      thread.activeRuntimeId = 'pi';
+      thread.activeRunAgentId = agent.id;
+      thread.activeRunTurnId = turnId;
+      thread.activeRunStartedAt = now();
+      thread.activeRunGroup = {
+        turnId,
+        maxMentionDepth: normalizeAgentMentionMaxDepth(state.ui?.agentMentionMaxDepth, 2),
+        depth: 0,
+        routedEdges: [],
+        routes: [],
+        activeRuns: { [createdRun.id]: { runId: createdRun.id, sessionId: session.id, agentId: agent.id, agentName: agent.name, mentionDepth: 0, parentMessageId: '', status: 'running' } },
+        totalRoutedRuns: 1,
+        status: 'running',
+        startedAt: now(),
+        updatedAt: now(),
+      };
+      thread.workflowState = [{ title: 'Pi 开始执行', status: 'running', source: 'run', detail: message.slice(0, 80), updatedAt: now() }];
+      thread.workflow = thread.workflowState.map((step) => step.title);
+    } else {
+      thread.activeWorkRuns = {
+        ...(thread.activeWorkRuns || {}),
+        [createdRun.id]: {
+          runId: createdRun.id,
+          taskId,
+          agentId: agent.id,
+          runtimeId: 'pi',
+          sessionId: session.id,
+          status: 'running',
+          startedAt: now(),
+        },
+      };
+      appendThreadCollaborationEvent(thread, {
+        type: 'task.started',
+        workflowId: workTask?.workflowId || '',
+        taskId,
+        actorAgentId: agent.id,
+        title: workTask?.title || message.slice(0, 120),
+        detail: 'Pi Runtime Session 已启动',
+        payload: { runtimeId: 'pi', runtimeRunId: createdRun.id, runtimeSessionId: session.id, worktreePath: workTask?.worktreePath || '' },
+      });
+    }
+    thread.runtimeId = 'pi';
+    thread.runtimeSessionIds = { ...(thread.runtimeSessionIds || {}), [`${agent.id}:pi`]: session.id };
+    thread.updatedAt = now();
+    await writeState(state);
+    runtimeStore.appendEvent({ runId: createdRun.id, type: 'run.started', payload: { turnId, agentId: agent.id, profileRevision: profileSnapshot.revision } });
+    emitHermesTurnEvent(thread.id, turnId, { event: 'run.started', runId: createdRun.id, sessionId: session.id, agentId: agent.id, agentName: agent.name, runtimeId: 'pi' });
+    const accepted = await piBridge.startRun({
+      runId: createdRun.id,
+      sessionId: session.id,
+      sessionFile: session.metadata?.sessionFile || '',
+      threadId: thread.id,
+      agentId: agent.id,
+      workspaceId: workspace?.id || '',
+      vaultId: vault?.id || '',
+      taskId,
+      cwd: workTask?.worktreePath || workspace?.rootPath || projectRoot,
+      agentDir: path.join(frakioWorkHome, 'runtimes', 'pi', 'agents', agent.id),
+      sessionRoot: path.join(frakioWorkHome, 'runtimes', 'pi', 'sessions'),
+      profileSnapshot,
+      contextPacket,
+      model,
+      thinkingLevel: model.thinkingLevel,
+      permissionMode: thread.permissionMode || 'smart',
+      prompt: message,
+    });
+    runtimeStore.upsertSession({
+      ...session,
+      nativeSessionId: accepted.nativeSessionId,
+      status: 'active',
+      metadata: { ...session.metadata, sessionFile: accepted.sessionFile || '', handoff: contextPacket.handoff },
+    });
+    runtimeStore.updateRun(createdRun.id, { status: 'running' });
+    captureTelemetry('agent_run_started', { agent_count: 1, attachment_count: 0, permission_mode: thread.permissionMode || 'smart', runtime: 'pi' });
+    return res.status(202).json({
+      runId: createdRun.id,
+      sessionId: session.id,
+      status: 'started',
+      runtime: 'pi',
+      runtimeId: 'pi',
+      profileRevision: profileSnapshot.revision,
+      model: model.modelId,
+      provider: model.providerName,
+      requestedReasoning: model.requestedReasoning,
+      effectiveReasoning: model.effectiveReasoning,
+      turnId,
+      agentId: agent.id,
+      agentName: agent.name,
+      kind: thread.executionMode === 'work' ? 'work-root' : 'chat',
+      taskId,
+    });
+  } catch (error) {
+    if (createdRun) runtimeStore.updateRun(createdRun.id, { status: 'failed', error: error.message || String(error) });
+    if (createdRun && !taskDispatch) {
+      await updateState(async (state) => {
+        const thread = state.threads.find((item) => item.id === req.params.id);
+        if (!thread || thread.activeRunId !== createdRun.id) return;
+        thread.runStatus = 'failed';
+        finishActiveRunGroupChild(thread, createdRun.id, 'failed');
+        clearHermesRunState(thread);
+        thread.workflowState = [{ title: 'Pi 启动失败', status: 'failed', source: 'run', detail: String(error.message || error).slice(0, 200), updatedAt: now() }];
+        thread.workflow = thread.workflowState.map((step) => step.title);
+        thread.updatedAt = now();
+      }).catch(() => {});
+    }
+    if (createdRun && taskDispatch) {
+      const run = runtimeStore.getRun(createdRun.id);
+      const task = run?.metadata?.taskId ? runtimeStore.getWorkTask(run.metadata.taskId) : null;
+      if (task) runtimeStore.upsertWorkTask({ ...task, status: 'failed', leaseExpiresAt: null, idempotencyKey: task.idempotencyKey });
+      await updateState(async (state) => {
+        const thread = state.threads.find((item) => item.id === req.params.id);
+        if (!thread) return;
+        thread.activeWorkRuns = Object.fromEntries(Object.entries(thread.activeWorkRuns || {}).filter(([runId]) => runId !== createdRun.id));
+        thread.updatedAt = now();
+      }).catch(() => {});
+    }
+    return res.status(error.status || 500).json({ error: error.message || 'Pi 运行创建失败。', code: error.code || 'PI_RUN_FAILED' });
+  }
+}
+
+async function startExternalChannelRunRequest(req, res, { runtimeId: requestedRuntimeId, runtimeLabel, bridge }) {
+  let createdRun = null;
+  const taskDispatch = Boolean(req.body?.taskDispatch && req.body?.taskId);
+  try {
+    const state = await readState();
+    const thread = state.threads.find((item) => item.id === req.params.id);
+    if (!thread) return res.status(404).json({ error: '会话不存在。' });
+    if (!taskDispatch && thread.runStatus === 'running') return res.status(409).json({ error: '当前会话已有运行中的任务。' });
+    const installation = await runtimeRegistry.detect(requestedRuntimeId);
+    if (!installation?.installed) return res.status(409).json({ error: `未检测到 ${runtimeLabel} CLI。`, code: 'RUNTIME_NOT_INSTALLED' });
+    const message = String(req.body?.message || '').trim();
+    const turnId = String(req.body?.turnId || id('turn'));
+    if (!message) return res.status(400).json({ error: '消息不能为空。' });
+    const { agent, runtimeId } = runtimeForRequest(state, thread, { ...req.body, runtimeId: requestedRuntimeId });
+    if (!agent || runtimeId !== requestedRuntimeId) return res.status(409).json({ error: `目标 Agent 没有启用 ${runtimeLabel} 运行时。`, code: 'RUNTIME_NOT_ALLOWED' });
+    const workspace = state.workspaces.find((item) => item.id === thread.workspaceId) || null;
+    const profileSnapshot = agentProfileSnapshot(agent);
+    const contextPacket = await runtimeContextPacket(state, thread, agent, requestedRuntimeId, message);
+    const model = '';
+    const session = runtimeStore.upsertSession({
+      runtimeId: requestedRuntimeId,
+      threadId: thread.id,
+      agentId: agent.id,
+      workspaceId: workspace?.id || '',
+      profileRevision: profileSnapshot.revision,
+      status: 'active',
+      metadata: { handoff: contextPacket.handoff, authMode: 'native' },
+    });
+    createdRun = runtimeStore.createRun({
+      sessionId: session.id,
+      runtimeId: requestedRuntimeId,
+      threadId: thread.id,
+      agentId: agent.id,
+      turnId,
+      profileRevision: profileSnapshot.revision,
+      modelId: model,
+      status: 'starting',
+      metadata: { taskId: String(req.body?.taskId || ''), taskDispatch, authMode: 'native' },
+    });
+    let workTask = req.body?.taskId ? runtimeStore.getWorkTask(String(req.body.taskId)) : null;
+    if (workTask) {
+      workTask = runtimeStore.upsertWorkTask({
+        ...workTask,
+        runtimeSessionId: session.id,
+        status: 'running',
+        attempt: taskDispatch ? workTask.attempt : workTask.attempt + 1,
+        leaseExpiresAt: workTask.leaseExpiresAt || new Date(Date.now() + 120000).toISOString(),
+        idempotencyKey: workTask.idempotencyKey,
+      });
+    }
+    if (!taskDispatch) {
+      thread.messages = [...(thread.messages || []), {
+        id: id('msg'),
+        agentId: 'user',
+        agentName: '你',
+        role: 'Workspace Owner',
+        content: message,
+        createdAt: now(),
+      }];
+      thread.runStatus = 'running';
+      thread.activeRunId = createdRun.id;
+      thread.activeSessionId = session.id;
+      thread.activeRuntimeId = requestedRuntimeId;
+      thread.activeRunAgentId = agent.id;
+      thread.activeRunTurnId = turnId;
+      thread.activeRunStartedAt = now();
+      thread.activeRunGroup = {
+        turnId,
+        maxMentionDepth: normalizeAgentMentionMaxDepth(state.ui?.agentMentionMaxDepth, 2),
+        depth: 0,
+        routedEdges: [],
+        routes: [],
+        activeRuns: { [createdRun.id]: { runId: createdRun.id, sessionId: session.id, agentId: agent.id, agentName: agent.name, mentionDepth: 0, parentMessageId: '', status: 'running' } },
+        totalRoutedRuns: 1,
+        status: 'running',
+        startedAt: now(),
+        updatedAt: now(),
+      };
+    } else {
+      thread.activeWorkRuns = {
+        ...(thread.activeWorkRuns || {}),
+        [createdRun.id]: {
+          runId: createdRun.id,
+          taskId: workTask?.id || '',
+          agentId: agent.id,
+          runtimeId: requestedRuntimeId,
+          sessionId: session.id,
+          status: 'running',
+          startedAt: now(),
+        },
+      };
+      appendThreadCollaborationEvent(thread, {
+        type: 'task.started',
+        workflowId: workTask?.workflowId || '',
+        taskId: workTask?.id || '',
+        actorAgentId: agent.id,
+        title: workTask?.title || message.slice(0, 120),
+        detail: `${runtimeLabel} Runtime Session 已启动`,
+        payload: { runtimeId: requestedRuntimeId, runtimeRunId: createdRun.id, runtimeSessionId: session.id, worktreePath: workTask?.worktreePath || '' },
+      });
+    }
+    thread.runtimeId = requestedRuntimeId;
+    thread.runtimeSessionIds = { ...(thread.runtimeSessionIds || {}), [`${agent.id}:${requestedRuntimeId}`]: session.id };
+    thread.updatedAt = now();
+    await writeState(state);
+    const runOverrides = normalizeAgentRunOverrides(thread.agentRunOverrides, state.agents)[agent.id] || {};
+    const accepted = await bridge.startRun({
+      runId: createdRun.id,
+      sessionId: session.id,
+      nativeSessionId: session.nativeSessionId,
+      cwd: workTask?.worktreePath || workspace?.rootPath || projectRoot,
+      model,
+      effort: runOverrides.reasoningEffort || 'default',
+      permissionMode: thread.permissionMode || 'smart',
+      profileSnapshot,
+      contextPacket,
+      prompt: message,
+    });
+    runtimeStore.upsertSession({
+      ...session,
+      nativeSessionId: accepted.nativeSessionId,
+      status: 'active',
+      metadata: { ...session.metadata, handoff: contextPacket.handoff, nativeTurnId: accepted.nativeTurnId },
+    });
+    runtimeStore.updateRun(createdRun.id, { status: 'running', metadata: { nativeTurnId: accepted.nativeTurnId } });
+    captureTelemetry('agent_run_started', { agent_count: 1, attachment_count: 0, permission_mode: thread.permissionMode || 'smart', runtime: requestedRuntimeId });
+    return res.status(202).json({
+      runId: createdRun.id,
+      sessionId: session.id,
+      status: 'started',
+      runtime: requestedRuntimeId,
+      runtimeId: requestedRuntimeId,
+      profileRevision: profileSnapshot.revision,
+      model: model || `${runtimeLabel} CLI default`,
+      turnId,
+      agentId: agent.id,
+      agentName: agent.name,
+      kind: taskDispatch ? 'work-task' : 'chat',
+      taskId: workTask?.id || '',
+    });
+  } catch (error) {
+    if (createdRun) runtimeStore.updateRun(createdRun.id, { status: 'failed', error: error.message || String(error) });
+    if (createdRun) {
+      const run = runtimeStore.getRun(createdRun.id);
+      const task = run?.metadata?.taskId ? runtimeStore.getWorkTask(run.metadata.taskId) : null;
+      if (task) runtimeStore.upsertWorkTask({ ...task, status: 'failed', leaseExpiresAt: null, idempotencyKey: task.idempotencyKey });
+      await updateState(async (state) => {
+        const thread = state.threads.find((item) => item.id === req.params.id);
+        if (!thread) return;
+        thread.activeWorkRuns = Object.fromEntries(Object.entries(thread.activeWorkRuns || {}).filter(([runId]) => runId !== createdRun.id));
+        if (!taskDispatch && thread.activeRunId === createdRun.id) {
+          thread.runStatus = 'failed';
+          finishActiveRunGroupChild(thread, createdRun.id, 'failed');
+          clearHermesRunState(thread);
+        }
+        thread.updatedAt = now();
+      }).catch(() => {});
+    }
+    return res.status(error.status || 500).json({ error: error.message || `${runtimeLabel} 运行创建失败。`, code: error.code || `${requestedRuntimeId.toUpperCase()}_RUN_FAILED` });
+  }
+}
+
+async function startRuntimeRunRequest(req, res) {
+  const state = await readState();
+  const thread = state.threads.find((item) => item.id === req.params.id);
+  if (!thread) return res.status(404).json({ error: '会话不存在。' });
+  const { agent, runtimeId } = runtimeForRequest(state, thread, req.body || {});
+  if (!agent) return res.status(400).json({ error: '没有可用的 Agent。' });
+  if (runtimeId === 'pi') return startPiRunRequest(req, res);
+  if (runtimeId === 'codex') return startExternalChannelRunRequest(req, res, { runtimeId, runtimeLabel: 'Codex', bridge: codexBridge });
+  if (runtimeId === 'claude') return startExternalChannelRunRequest(req, res, { runtimeId, runtimeLabel: 'Claude Code', bridge: claudeBridge });
+  if (runtimeId === 'gemini') return startExternalChannelRunRequest(req, res, { runtimeId, runtimeLabel: 'Gemini CLI', bridge: geminiBridge });
+  if (runtimeId !== 'hermes') {
+    return res.status(409).json({
+      error: `${runtimeId} 通道已被检测，但执行适配器尚未启用。请在 Runtime Center 查看状态。`,
+      code: 'RUNTIME_CHANNEL_NOT_ENABLED',
+      runtimeId,
+    });
+  }
+  return startHermesRunRequest(req, res);
+}
+
 async function startHermesRunRequest(req, res) {
   let runProfileName = 'default';
   let runDiagnosticId = '';
@@ -14470,6 +16473,12 @@ async function startHermesRunRequest(req, res) {
     const runModel = await resolveThreadRunModelConfig(state, thread, primaryAgent, profileName);
     const requestedRunSettings = normalizeAgentRunOverrides(thread.agentRunOverrides, state.agents)[primaryAgent.id] || {};
     const runCapability = runModel.modelProfile ? resolveModelCapability(runModel.modelProfile, runModel.model, { providerCatalog: flattenProviderCatalog(modelCatalogCache) }) : null;
+    assertSupportedRuntimeReasoning({
+      runtimeLabel: 'Hermes',
+      modelName: runModel.model,
+      capability: runCapability,
+      requested: requestedRunSettings,
+    });
     const runMapping = runModel.modelProfile && runCapability
       ? mapRunSettings(runModel.modelProfile, runCapability, requestedRunSettings)
       : { requestedReasoning: 'default', effectiveReasoning: 'default', requestedServiceTier: 'standard', effectiveServiceTier: 'standard', runtimeOverrides: {} };
@@ -14677,6 +16686,32 @@ async function startHermesRunRequest(req, res) {
       retryMs: 5000,
     });
     const sentAt = now();
+    const hermesProfileSnapshot = agentProfileSnapshot(primaryAgent);
+    const hermesRuntimeSession = runtimeStore.upsertSession({
+      runtimeId: 'hermes',
+      threadId: thread.id,
+      agentId: primaryAgent.id,
+      workspaceId: thread.workspaceId || '',
+      nativeSessionId: started.session_id || sessionId,
+      profileRevision: hermesProfileSnapshot.revision,
+      status: 'active',
+      metadata: { profileName },
+    });
+    if (!runtimeStore.getRun(started.run_id)) {
+      runtimeStore.createRun({
+        id: started.run_id,
+        sessionId: hermesRuntimeSession.id,
+        runtimeId: 'hermes',
+        threadId: thread.id,
+        agentId: primaryAgent.id,
+        turnId,
+        profileRevision: hermesProfileSnapshot.revision,
+        modelId: runModel.model || '',
+        status: 'running',
+        metadata: { profileName },
+      });
+      runtimeStore.appendEvent({ runId: started.run_id, type: 'run.started', payload: { turnId, agentId: primaryAgent.id, profileName } });
+    }
     await updateState(async (stateAfterStart) => {
       const threadAfterStart = stateAfterStart.threads.find((item) => item.id === req.params.id);
       updateModelRunDiagnostic(stateAfterStart, { diagnosticId: runDiagnosticId }, (record) => markModelRunSent(record, started.run_id, sentAt));
@@ -14689,7 +16724,10 @@ async function startHermesRunRequest(req, res) {
       threadAfterStart.activeRunMentionDepth = Number(req.body?.mentionDepth || 0);
       threadAfterStart.activeRunParentMessageId = String(req.body?.parentMessageId || '');
       threadAfterStart.activeRunTurnId = turnId;
+      threadAfterStart.activeRuntimeId = 'hermes';
+      threadAfterStart.runtimeId = 'hermes';
       threadAfterStart.agentSessionIds = { ...(threadAfterStart.agentSessionIds || {}), [primaryAgent.id]: started.session_id || sessionId };
+      threadAfterStart.runtimeSessionIds = { ...(threadAfterStart.runtimeSessionIds || {}), [`${primaryAgent.id}:hermes`]: hermesRuntimeSession.id };
       const startedPlan = draftingPlan
         ? (threadAfterStart.planSessions || []).find((item) => item.id === draftingPlan.id)
         : planExecution
@@ -14806,7 +16844,7 @@ async function startHermesRunRequest(req, res) {
   }
 }
 
-app.post('/api/threads/:id/runs', startHermesRunRequest);
+app.post('/api/threads/:id/runs', startRuntimeRunRequest);
 
 function streamHermesTurnEvents(req, res, { turnId, runId = '' }) {
   res.writeHead(200, {
@@ -14922,6 +16960,18 @@ function formatClarifyError(message) {
 
 app.post('/api/threads/:id/runs/:runId/stop', async (req, res) => {
   try {
+    const storedRuntimeRun = runtimeStore.getRun(req.params.runId);
+    if (storedRuntimeRun && ['pi', 'codex', 'claude', 'gemini'].includes(storedRuntimeRun.runtimeId)) {
+      const runtimeSession = runtimeStore.getSession(storedRuntimeRun.sessionId);
+      if (!runtimeSession || !['starting', 'running', 'waiting_approval'].includes(storedRuntimeRun.status)) {
+        return res.status(409).json({ error: '这次运行已经结束或无法停止', resolved: false });
+      }
+      if (storedRuntimeRun.runtimeId === 'pi') await piBridge.cancel(runtimeSession.id);
+      else if (storedRuntimeRun.runtimeId === 'codex') await codexBridge.cancel(runtimeSession.id);
+      else if (storedRuntimeRun.runtimeId === 'claude') await claudeBridge.cancel(runtimeSession.id);
+      else await geminiBridge.cancel(runtimeSession.id);
+      return res.json({ ok: true, resolved: true, stoppedRuns: 1, turnId: storedRuntimeRun.turnId });
+    }
     const state = await readState();
     const thread = state.threads.find((item) => item.id === req.params.id);
     if (!thread) return res.status(404).json({ error: '对话不存在。', resolved: false });
@@ -15045,6 +17095,7 @@ export async function createApp() {
     console.warn('Legacy demo data cleanup skipped:', error?.message || error);
   });
   const startupState = await readState();
+  runtimeStore.migrateHermesSessions(startupState.threads || []);
   await recoverWorkflowControls(startupState).catch((error) => {
     console.warn('Workflow control recovery skipped:', error?.message || error);
   });
@@ -15115,6 +17166,10 @@ export async function startServer() {
   return httpServer;
 }
 
+export async function closeRuntimeServices() {
+  await Promise.all([piBridge.close(), codexBridge.close(), claudeBridge.close(), geminiBridge.close()]);
+}
+
 let telemetryShutdownStarted = false;
 async function stopOwnedChild(child, label) {
   if (!child || child.exitCode !== null) return;
@@ -15148,7 +17203,14 @@ async function stopOwnedRuntimeProcesses() {
 async function shutdownApi() {
   if (telemetryShutdownStarted) return;
   telemetryShutdownStarted = true;
-  await stopOwnedRuntimeProcesses().catch((error) => console.warn('Runtime shutdown warning:', error?.message || error));
+  await Promise.all([
+    stopOwnedRuntimeProcesses(),
+    piBridge.close(),
+    codexBridge.close(),
+    claudeBridge.close(),
+    geminiBridge.close(),
+  ]).catch((error) => console.warn('Runtime shutdown warning:', error?.message || error));
+  try { runtimeStore.close(); } catch {}
   await Promise.race([telemetry.shutdown(), new Promise((resolve) => setTimeout(resolve, 900))]);
   if (isManagedWebMode) {
     await removeServiceDescriptor(frakioWorkHome).catch(() => {});
