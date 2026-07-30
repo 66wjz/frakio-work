@@ -22,7 +22,9 @@
 
 </div>
 
-Frakio Work 是一个以 Hermes Agent 为核心的多 Agent 工作台，我个人使用过网络上的各种 Hermes Web Ui 以及第三方客户端，但都无法满足我的协作需求，当然还有界面说实话挺丑的，并不满足我的审美，所以这也是 Frakio Work 诞生的起因。
+Frakio Work 升级为多平台的多Agent协作工作台，内置 Hermes Agent 和 Pi 双重内核，可在各个 Agent 中自由切换内核，如果要用一句话来形容 Frakio，那就是在一个对话房间中，享受丝滑无缝的多 Agent 协作
+
+关于 Frakio Work 的起因是：我个人使用过网络上的各种 Hermes Web Ui 以及第三方客户端，但都无法满足我的协作需求，当然还有界面说实话挺丑的，并不满足我的审美，所以这也是 Frakio Work 诞生的起因。
 
 # 沟通群
 
