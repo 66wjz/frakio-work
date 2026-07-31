@@ -104,6 +104,13 @@ body:has(.mac-desktop-shell) #root { background: transparent; }
   font-size: 13px;
 }
 
+.managed-web-default-password {
+  padding: 10px 12px;
+  border-radius: 8px;
+  background: #e6f3ee;
+  color: #215f4c !important;
+}
+
 .server-directory-picker {
   width: min(620px, calc(100vw - 32px));
 }
@@ -6912,25 +6919,23 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .profile-edit-modal .profile-edit-card {
   position: relative;
   display: grid;
-  width: min(560px, calc(100vw - 44px));
-  max-height: min(760px, calc(100dvh - 44px));
+  width: min(640px, calc(100vw - 40px));
+  max-height: min(820px, calc(100dvh - 40px));
   overflow: hidden;
-  border: 1px solid rgb(217 224 221 / 88%);
-  border-radius: 16px;
-  background: #fff;
-  box-shadow: 0 28px 70px rgb(15 23 42 / 18%);
+  border-radius: 14px;
 }
 .profile-edit-close {
   position: absolute;
-  top: 14px;
-  right: 14px;
+  top: 16px;
+  right: 18px;
   z-index: 2;
 }
 .user-profile-form { display: grid; gap: 14px; }
 .user-profile-form.compact {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto auto;
+  grid-template-rows: auto minmax(0, 1fr) auto;
   max-height: inherit;
+  min-height: 0;
   overflow: hidden;
 }
 .user-profile-edit-hero {
@@ -6938,15 +6943,15 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   grid-template-columns: 72px minmax(0, 1fr);
   align-items: center;
   gap: 16px;
-  padding: 22px 56px 18px 22px;
+  padding: 16px 62px 14px 20px;
   border-bottom: 1px solid #edf1ef;
   background: linear-gradient(180deg, #fbfdfc, #fff);
 }
 .user-profile-avatar {
   position: relative;
   display: grid;
-  width: 72px;
-  height: 72px;
+  width: 58px;
+  height: 58px;
   aspect-ratio: 1 / 1;
   place-items: center;
   overflow: hidden;
@@ -6956,7 +6961,7 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   appearance: none;
   color: #fff;
   background: #7c3aed;
-  font-size: 22px;
+  font-size: 18px;
   font-weight: 720;
   line-height: 1;
   cursor: pointer;
@@ -6976,7 +6981,7 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   margin-top: 3px;
   overflow: hidden;
   color: #202423;
-  font-size: 22px;
+  font-size: 19px;
   font-weight: 720;
   line-height: 1.15;
   text-overflow: ellipsis;
@@ -6999,12 +7004,17 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   font-weight: 680;
 }
 .profile-avatar-upload-link:disabled { color: #98a29e; cursor: wait; }
+.user-profile-edit-body {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 16px 20px 20px;
+}
 .user-profile-form.compact .user-profile-grid {
   grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 13px;
-  overflow: auto;
-  padding: 16px 22px 4px;
-  scrollbar-width: thin;
+  padding: 0;
 }
 .user-profile-form.compact .user-profile-grid label {
   gap: 7px;
@@ -7020,21 +7030,38 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   min-height: 78px;
   max-height: 130px;
 }
+.managed-profile-password {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+  margin: 18px 0 0;
+  padding: 16px;
+  border: 1px solid #dce6e1;
+  border-radius: 8px;
+  background: #f8fbfa;
+}
+.managed-profile-password > div,
+.managed-profile-password > .settings-inline-message,
+.managed-profile-password > .form-error { grid-column: 1 / -1; }
+.managed-profile-password strong,
+.managed-profile-password small { display: block; }
+.managed-profile-password small { margin-top: 4px; color: #687773; }
+.managed-profile-password label { display: grid; gap: 6px; color: #52605b; font-size: 12px; }
+.managed-profile-password label:last-of-type { grid-column: 1 / -1; }
+.managed-profile-password input { min-height: 36px; padding: 0 10px; border: 1px solid #dce6e1; border-radius: 8px; background: #fff; }
+.managed-profile-password button { justify-self: start; }
 .user-profile-grid label.wide {
   grid-column: 1 / -1;
   max-width: none;
 }
 .user-profile-form.compact .form-error {
-  margin: 0 22px;
+  margin: 14px 0 0;
 }
 .user-profile-form.compact .modal-actions {
-  position: sticky;
-  bottom: 0;
   margin-top: 0;
   border-top: 1px solid #edf1ef;
-  padding: 14px 22px 18px;
-  background: rgb(255 255 255 / 94%);
-  backdrop-filter: blur(8px);
+  padding: 14px 20px 16px;
+  background: #fff;
 }
 .settings-link-card {
   display: grid;
@@ -7408,10 +7435,10 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   display: grid;
   gap: 10px;
   margin: 12px 0;
-  border: 1px solid #e2e9e5;
+  border: 1px solid var(--mac-structure-border, #e2e9e5);
   border-radius: 8px;
   padding: 12px;
-  background: #fbfcfb;
+  background: var(--mac-structure-base, #fbfcfb);
 }
 .agent-runtime-policy-head,
 .agent-runtime-policy-head > div,
@@ -7422,11 +7449,11 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .agent-runtime-policy-head > div,
 .agent-runtime-policy-item label > span { flex-direction: column; gap: 2px; }
 .agent-runtime-policy-head small,
-.agent-runtime-policy-item small { color: #7a8782; font-size: 12px; line-height: 1.35; }
-.agent-runtime-default { display: grid; gap: 5px; color: #596965; font-size: 12px; }
-.agent-runtime-default select { height: 34px; border: 1px solid #d4dbd8; border-radius: 7px; padding: 0 8px; color: #1f312b; background: #fff; }
+.agent-runtime-policy-item small { color: var(--mac-text-secondary, #7a8782); font-size: 12px; line-height: 1.35; }
+.agent-runtime-default { display: grid; gap: 5px; color: var(--mac-text-secondary, #596965); font-size: 12px; }
+.agent-runtime-default select { height: 34px; border: 1px solid var(--mac-structure-border, #d4dbd8); border-radius: 7px; padding: 0 8px; color: var(--mac-text, #1f312b); background: var(--mac-field-surface, #fff); }
 .agent-runtime-policy-list { display: grid; gap: 6px; }
-.agent-runtime-policy-item { align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid #edf1ef; padding-top: 8px; }
+.agent-runtime-policy-item { align-items: center; justify-content: space-between; gap: 12px; border-top: 1px solid var(--mac-structure-border, #edf1ef); padding-top: 8px; }
 .agent-runtime-policy-item label { min-width: 0; flex: 1; align-items: center; gap: 8px; }
 .agent-runtime-policy-item label input { width: auto; height: auto; }
 .agent-runtime-policy-item label > span { min-width: 0; }
@@ -9260,7 +9287,10 @@ body:has(.mac-desktop-shell) .permission-menu-option.permission-off small {
   }
   .user-profile-form.compact .user-profile-grid {
     grid-template-columns: 1fr;
-    padding: 16px 18px 4px;
+    padding: 0;
+  }
+  .user-profile-edit-body {
+    padding: 16px 18px 18px;
   }
   .user-profile-form.compact .modal-actions {
     padding: 12px 18px 16px;
@@ -14764,90 +14794,6 @@ body:has(.mac-desktop-shell) :is(.provider-model-menu, .mention-menu, .provider-
   margin-left: auto;
 }
 
-.provider-model-menu-v2 {
-  width: 232px;
-  overflow: visible;
-}
-
-.provider-model-root-option {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto 14px;
-  width: 100%;
-  min-height: 32px;
-  gap: 8px;
-  padding: 4px 8px;
-}
-
-.provider-model-root-option > span {
-  color: var(--overlay-text);
-  font-size: 13px;
-  font-weight: 540;
-}
-
-.provider-model-root-option > em {
-  max-width: 112px;
-  overflow: hidden;
-  color: var(--overlay-muted);
-  font-size: 13px;
-  font-style: normal;
-  font-weight: 430;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.provider-model-root-option > svg:last-child {
-  color: var(--overlay-muted);
-}
-
-.provider-model-submenu-v2 {
-  width: 232px;
-  max-height: min(420px, var(--radix-dropdown-menu-content-available-height, calc(100vh - 16px)));
-  overflow-y: auto;
-}
-
-.provider-model-list-menu-v2 {
-  width: 276px;
-}
-
-.provider-model-menu-group {
-  display: grid;
-  gap: 1px;
-}
-
-.provider-model-menu-group + .provider-model-menu-group {
-  margin-top: 4px;
-  border-top: 1px solid var(--overlay-outline);
-  padding-top: 4px;
-}
-
-.provider-model-menu-group-label {
-  overflow: hidden;
-  padding: 5px 8px 3px;
-  color: var(--overlay-muted);
-  font-size: 11px;
-  font-weight: 560;
-  line-height: 16px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.provider-model-option {
-  width: 100%;
-  min-height: 32px;
-  padding: 4px 8px;
-  font-size: 13px;
-  font-weight: 440;
-}
-
-.provider-model-option > span {
-  flex: 1;
-}
-
-.provider-model-option > svg:last-child {
-  margin-left: auto;
-  color: var(--overlay-text);
-}
-
 .app-popover-surface {
   z-index: var(--overlay-z-floating, 400);
   width: min(286px, calc(100vw - 16px));
@@ -15157,6 +15103,19 @@ body:has(.mac-desktop-shell) :is(.provider-model-menu, .mention-menu, .provider-
   box-shadow: var(--overlay-dialog-shadow);
   backdrop-filter: none;
   -webkit-backdrop-filter: none;
+}
+
+.mac-desktop-shell .profile-edit-modal .profile-edit-card {
+  color: var(--overlay-text);
+  background: var(--overlay-surface-solid);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.mac-desktop-shell .profile-edit-modal .user-profile-edit-hero,
+.mac-desktop-shell .profile-edit-modal .user-profile-edit-body,
+.mac-desktop-shell .profile-edit-modal .user-profile-form.compact .modal-actions {
+  background: var(--overlay-surface-solid);
 }
 
 .agent-editor > .modal-head {

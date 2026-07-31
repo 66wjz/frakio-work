@@ -16,7 +16,6 @@ const api = spawn(process.execPath, ['apps/api/server.mjs'], {
     FRAKIO_WORK_DEPLOYMENT_MODE: 'managed-web',
     FRAKIO_WORK_PACKAGED: '1',
     FRAKIO_WORK_DISABLE_AUTOSTART: '1',
-    FRAKIO_WORK_ADMIN_PASSWORD: password,
     FRAKIO_WORK_HOME: home,
     FRAKIO_WORK_APP_ROOT: root,
     FRAKIO_WORK_WEB_DIST: path.join(root, 'dist'),
@@ -51,8 +50,13 @@ try {
   try {
     const page = await browser.newPage();
     await page.goto(`http://127.0.0.1:${port}`);
-    await page.getByLabel('管理员密码').fill(password);
+    await page.getByText('首次登录密码：').waitFor();
+    await page.getByLabel('管理员密码').fill('Admin');
     await page.getByRole('button', { name: '进入工作台' }).click();
+    await page.getByRole('heading', { name: '设置管理员密码' }).waitFor();
+    await page.getByLabel('新密码', { exact: true }).fill(password);
+    await page.getByLabel('确认新密码', { exact: true }).fill(password);
+    await page.getByRole('button', { name: '保存并进入工作台' }).click();
     const shell = page.locator('.workbench-shell');
     await shell.waitFor();
     assert.equal(await shell.evaluate((element) => element.classList.contains('managed-web-shell')), true);

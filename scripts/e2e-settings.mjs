@@ -67,7 +67,7 @@ function moduleFixture(kind) {
 }
 
 page.on('console', (message) => {
-  if (message.type() === 'error' && !message.text().includes('favicon')) errors.push(message.text());
+  if (message.type() === 'error' && !message.text().includes('favicon')) errors.push(`${message.text()} ${message.location().url}`.trim());
 });
 page.on('pageerror', (error) => errors.push(error.message));
 page.on('request', (request) => {
@@ -273,6 +273,18 @@ try {
     const kind = new URL(route.request().url()).searchParams.get('kind') === 'plugin' ? 'plugin' : 'skill';
     await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(moduleFixture(kind)) });
   });
+  await page.route('**/api/workspaces/e2e-rail-project/knowledge', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        workspace: { id: 'e2e-rail-project', name: railFixtureTitles.project, primaryVaultId: 'e2e-rail-vault', sharedVaultIds: [], writableVaultIds: [] },
+        vault: { id: 'e2e-rail-vault', name: `${railFixtureTitles.project} Vault`, rootPath: '/tmp/frakio-e2e-rail-project', index: {} },
+        index: { documentCount: 0, files: [] },
+        commits: [],
+      }),
+    });
+  });
   await page.route('**/api/workspaces', async (route) => {
     if (route.request().method() !== 'GET') return route.continue();
     const response = await route.fetch();
@@ -418,8 +430,8 @@ try {
   assert.equal(await page.getByPlaceholder('搜索设置...').evaluate((element) => Boolean(element.closest('.settings-nav'))), false, '设置搜索框被放进导航渐隐容器');
   const expectedNavigation = [
     '个人资料', '工作台', '外观', '隐私', '归档对话',
-    '本地连接', 'Hermes Agent', 'Agent 配置', '技能', '插件', '模型', '仓库',
-    'MCP', '频道', '任务', '监控', '版本更新',
+    'Agent 配置', 'Memory', 'Knowledge', '仓库', '技能', '插件', '工具能力',
+    'Runtime Center', '模型', 'Hermes 集成', 'MCP', '频道', '任务', '监控', '系统状态', '版本更新',
   ];
   const navigationLabels = await page.locator('.settings-nav-group button strong').allTextContents();
   assert.deepEqual(navigationLabels, expectedNavigation, '设置导航顺序不正确');
@@ -429,17 +441,21 @@ try {
     ['外观', '外观'],
     ['隐私', '隐私'],
     ['归档对话', '归档对话'],
-    ['本地连接', '本地连接'],
-    ['Hermes Agent', 'Hermes Agent'],
     ['Agent 配置', 'Agent Profile'],
+    ['Memory', 'Memory Ledger'],
+    ['Knowledge', 'Knowledge'],
+    ['仓库', 'Obsidian 仓库'],
     ['技能', '技能'],
     ['插件', '插件'],
-    ['模型', '模型'],
-    ['仓库', 'Obsidian 仓库'],
+    ['工具能力', '工具能力'],
+    ['Runtime Center', 'Runtime Center'],
+    ['模型', 'Frakio Work 模型中心'],
+    ['Hermes 集成', 'Hermes 集成'],
     ['MCP', 'MCP 服务器'],
     ['频道', '频道'],
     ['任务', '定时任务'],
     ['监控', '监控'],
+    ['系统状态', '系统状态'],
     ['版本更新', '版本更新'],
   ];
 
@@ -487,6 +503,50 @@ try {
   assert.equal(profileSurfaces.statsBackground, 'rgba(0, 0, 0, 0)', '统计条仍有填充底色');
   assert.equal(profileSurfaces.statsBorder, '1px', '统计条没有保留克制细框');
 
+  await page.setViewportSize({ width: 1440, height: 620 });
+  const settingsScrollTop = await page.locator('.settings-content').evaluate((element) => {
+    element.scrollTop = Math.min(180, Math.max(0, element.scrollHeight - element.clientHeight));
+    return element.scrollTop;
+  });
+  const profileEditButton = page.getByRole('button', { name: '编辑', exact: true });
+  // Keep the programmed background position; Playwright's pointer click would
+  // scroll an off-screen trigger into view before the modal opens.
+  await profileEditButton.evaluate((element) => element.click());
+  const profileEditor = page.locator('.profile-edit-card');
+  const profileEditorBody = page.locator('.user-profile-edit-body');
+  await profileEditor.waitFor({ state: 'visible' });
+  assert.equal(await page.locator('.settings-content').evaluate((element) => getComputedStyle(element).overflow), 'hidden', '打开个人资料弹窗后背景仍可滚动');
+  assert.equal(await page.locator('.settings-content').evaluate((element) => element.scrollTop), settingsScrollTop, '打开个人资料弹窗时背景滚动位置发生变化');
+  const profileEditorLayout = await profileEditor.evaluate((card) => {
+    const body = card.querySelector('.user-profile-edit-body');
+    const header = card.querySelector('.user-profile-edit-hero');
+    const footer = card.querySelector('.modal-actions');
+    return {
+      rows: getComputedStyle(card.querySelector('.user-profile-form')).gridTemplateRows,
+      bodyOverflow: body ? getComputedStyle(body).overflowY : '',
+      overscroll: body ? getComputedStyle(body).overscrollBehavior : '',
+      headerTop: header?.getBoundingClientRect().top,
+      footerBottom: footer?.getBoundingClientRect().bottom,
+      cardTop: card.getBoundingClientRect().top,
+      cardBottom: card.getBoundingClientRect().bottom,
+    };
+  });
+  assert.equal(profileEditorLayout.bodyOverflow, 'auto', '个人资料字段没有独立滚动容器');
+  assert.equal(profileEditorLayout.overscroll, 'contain', '个人资料滚动会传递给背景页面');
+  assert.ok(Math.abs(profileEditorLayout.headerTop - profileEditorLayout.cardTop) <= 1, '个人资料弹窗顶部没有固定');
+  assert.ok(Math.abs(profileEditorLayout.footerBottom - profileEditorLayout.cardBottom) <= 1, '个人资料弹窗底部操作栏没有固定');
+  assert.equal(await profileEditorBody.evaluate((element) => document.activeElement === element.querySelector('[data-profile-autofocus]')), true, '个人资料弹窗打开后没有聚焦首个字段');
+  await profileEditor.getByLabel('用户名/昵称').fill('临时未保存资料');
+  await page.keyboard.press('Escape');
+  await page.getByText('放弃未保存的修改？', { exact: true }).waitFor({ state: 'visible' });
+  await page.getByRole('button', { name: '继续编辑', exact: true }).click();
+  await profileEditor.getByRole('button', { name: '取消', exact: true }).click();
+  await page.getByRole('button', { name: '放弃修改', exact: true }).click();
+  await profileEditor.waitFor({ state: 'hidden' });
+  await page.waitForFunction(() => document.activeElement?.textContent?.trim() === '编辑');
+  assert.equal(await profileEditButton.evaluate((element) => document.activeElement === element), true, '关闭个人资料弹窗后焦点没有返回编辑按钮');
+  await page.setViewportSize({ width: 1440, height: 900 });
+
   const latestActivityCell = page.locator('.token-activity-cell:not(.is-future)').last();
   await latestActivityCell.hover();
   assert.equal(await page.getByRole('tooltip').isVisible(), true, 'Token 单元悬停没有显示提示');
@@ -521,17 +581,21 @@ try {
   const darkEntryHeadings = [
     ['个人资料', '个人资料'],
     ['归档对话', '归档对话'],
-    ['本地连接', '本地连接'],
-    ['Hermes Agent', 'Hermes Agent'],
     ['Agent 配置', 'Agent Profile'],
+    ['Memory', 'Memory Ledger'],
+    ['Knowledge', 'Knowledge'],
+    ['工具能力', '工具能力'],
+    ['Runtime Center', 'Runtime Center'],
+    ['Hermes 集成', 'Hermes 集成'],
     ['技能', '技能'],
     ['插件', '插件'],
-    ['模型', '模型'],
+    ['模型', 'Frakio Work 模型中心'],
     ['仓库', 'Obsidian 仓库'],
     ['MCP', 'MCP 服务器'],
     ['频道', '频道'],
     ['任务', '定时任务'],
     ['监控', '监控'],
+    ['系统状态', '系统状态'],
     ['版本更新', '版本更新'],
   ];
   for (const [label, heading] of darkEntryHeadings) {
@@ -539,10 +603,10 @@ try {
     await assertDarkSettingsPage(label);
   }
 
-  await selectSettingsEntry('模型', '模型');
+  await selectSettingsEntry('模型', 'Frakio Work 模型中心');
   assert.deepEqual(
     await page.locator('.model-center-tabs button').allTextContents(),
-    ['通用模型', '辅助模型'],
+    ['模型配置', '授权账户', '辅助模型'],
     '模型页仍显示组合模型入口',
   );
   assert.equal(await page.getByText('组合模型', { exact: true }).count(), 0, '模型页仍存在组合模型内容');
@@ -681,8 +745,8 @@ try {
 
   const search = page.getByPlaceholder('搜索设置...');
   for (const [keyword, expected] of [
-    ['本地 Hermes', '本地连接'],
-    ['Hermes Runtime', 'Hermes Agent'],
+    ['本地连接', '系统状态'],
+    ['Hermes Runtime', 'Hermes 集成'],
     ['主题', '外观'],
   ]) {
     await search.fill(keyword);
@@ -735,7 +799,7 @@ try {
   const mobileToggle = page.getByRole('button', { name: '展开设置导航' });
   assert.equal(await mobileToggle.isVisible(), true, '760px 设置导航没有收起');
   await mobileToggle.click();
-  assert.equal(await page.getByRole('button', { name: '本地连接', exact: true }).isVisible(), true, '移动设置导航无法展开');
+  assert.equal(await page.getByRole('button', { name: '系统状态', exact: true }).isVisible(), true, '移动设置导航无法展开');
   const mobileSettingsScrollOwnership = await page.locator('.settings-rail-body').evaluate((body) => {
     const nav = body.querySelector('.settings-nav');
     return {
@@ -749,10 +813,10 @@ try {
   assert.equal(mobileSettingsScrollOwnership.searchInsideNav, false, '760px 设置搜索框进入了渐隐导航');
   await assertBoundaryFade(page.locator('.settings-nav'), 20, '760px 设置导航');
   await assertBoundaryFade(page.locator('.settings-content'), 32, '760px 设置中央主卡');
-  await page.getByRole('button', { name: '本地连接', exact: true }).click();
-  await page.getByRole('heading', { name: '本地连接', exact: true }).waitFor({ state: 'visible' });
+  await page.getByRole('button', { name: '系统状态', exact: true }).click();
+  await page.getByRole('heading', { name: '系统状态', exact: true }).waitFor({ state: 'visible' });
   assert.equal(await page.getByRole('button', { name: '展开设置导航' }).isVisible(), true, '选择入口后移动导航没有收起');
-  await assertNoHorizontalOverflow(page.locator('.settings-content'), '760px 本地连接页横向溢出');
+  await assertNoHorizontalOverflow(page.locator('.settings-content'), '760px 系统状态页横向溢出');
 
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.getByRole('button', { name: '返回对话', exact: true }).click();

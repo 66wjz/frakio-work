@@ -20,6 +20,19 @@ async function attachLocalApiProxy(page, modePatchState) {
         body: JSON.stringify({ error: 'Test collaboration runtime is unavailable.', code: 'COLLABORATION_RUNTIME_DEPENDENCY_MISSING' }),
       });
     }
+    if (request.method() === 'GET' && url.pathname === '/api/model-capabilities') {
+      const response = await fetch(`${apiUrl}${url.pathname}${url.search}`, { headers: { ...request.headers(), host: new URL(apiUrl).host } });
+      const payload = await response.json();
+      const capabilities = Object.fromEntries(Object.entries(payload.capabilities || {}).map(([key, capability]) => [key, {
+        ...capability,
+        reasoning: true,
+        reasoningEfforts: ['low', 'medium', 'high'],
+        reasoningStatus: 'confirmed',
+        serviceTiers: [{ id: 'priority', name: '快速', requestValue: 'priority' }],
+        serviceTierStatus: 'confirmed',
+      }]));
+      return route.fulfill({ status: response.status, contentType: 'application/json', body: JSON.stringify({ ...payload, capabilities }) });
+    }
     if (modeMatch) {
       if (modePatchState.behavior === 'slow') await new Promise((resolve) => setTimeout(resolve, 1000));
       const threadResponse = await fetch(`${apiUrl}/api/threads/${modeMatch[1]}`);
@@ -196,18 +209,49 @@ try {
   await reduced.context.close();
 
   const narrow = await createWorkbenchPage(browser, { viewport: { width: 640, height: 820 }, reducedMotion: 'reduce' });
-  await narrow.page.getByRole('button', { name: /Hermes Profile 模型/ }).click();
+  const narrowThreadButtons = narrow.page.locator('.rail-thread-main');
+  assert.ok(await narrowThreadButtons.count() > 0, 'Provider model picker regression needs an existing thread.');
+  await narrowThreadButtons.first().click();
+  const providerPatchRequests = [];
+  narrow.page.on('request', (request) => {
+    if (request.method() === 'PATCH' && /\/api\/threads\/[^/]+$/.test(new URL(request.url()).pathname)) providerPatchRequests.push(request);
+  });
+  const narrowModelTrigger = narrow.page.locator('.provider-model-trigger').first();
+  await narrowModelTrigger.waitFor({ state: 'visible', timeout: 60000 });
+  await narrowModelTrigger.click();
   const narrowModelMenu = narrow.page.locator('.provider-model-menu.advanced');
   await narrowModelMenu.waitFor({ state: 'visible' });
   assert.equal(await narrowModelMenu.locator('.provider-model-root-panel').isVisible(), true);
   assert.equal(await narrow.page.locator('.provider-model-submenu-v2').count(), 0);
+
+  async function chooseProviderOption(sectionLabel, optionPattern) {
+    await narrowModelMenu.locator('.provider-model-root-panel > button', { hasText: sectionLabel }).click();
+    const panel = narrowModelMenu.locator('.provider-model-subpanel').filter({ hasText: sectionLabel }).last();
+    await panel.waitFor({ state: 'visible' });
+    const options = panel.locator('.provider-setting-options > button');
+    const option = options.filter({ hasText: optionPattern }).first();
+    assert.equal(await option.count(), 1, `${sectionLabel} option is missing.`);
+    const before = providerPatchRequests.length;
+    const responsePromise = narrow.page.waitForResponse((response) => response.request().method() === 'PATCH' && /\/api\/threads\/[^/]+$/.test(new URL(response.url()).pathname));
+    await option.click();
+    const response = await responsePromise;
+    assert.equal(response.status(), 200, `${sectionLabel} update failed: ${response.status()}`);
+    assert.equal(providerPatchRequests.length > before, true, `${sectionLabel} did not send a thread PATCH.`);
+    await narrowModelMenu.getByRole('button', { name: '返回' }).click();
+  }
+
+  await chooseProviderOption('推理强度', '中');
+  await chooseProviderOption('速度', /标准|快速/);
   await narrowModelMenu.locator('.provider-model-root-panel > button', { hasText: '模型' }).click();
   assert.equal(await narrowModelMenu.locator('.provider-model-list-panel').isVisible(), true);
+  const modelOptions = narrowModelMenu.locator('.provider-model-list-panel .provider-model-group button');
+  assert.ok(await modelOptions.count() > 0, 'Model options are missing.');
+  const modelResponsePromise = narrow.page.waitForResponse((response) => response.request().method() === 'PATCH' && /\/api\/threads\/[^/]+$/.test(new URL(response.url()).pathname));
+  await modelOptions.first().click();
+  assert.equal((await modelResponsePromise).status(), 200, 'Model update failed.');
   assert.equal(await narrowModelMenu.locator('.provider-model-root-panel').isVisible(), false);
-  await narrowModelMenu.getByRole('button', { name: '返回' }).click();
-  assert.equal(await narrowModelMenu.locator('.provider-model-root-panel').isVisible(), true);
   await narrow.page.keyboard.press('Escape');
-  assert.equal(await narrow.page.getByRole('button', { name: /Hermes Profile 模型/ }).getAttribute('aria-expanded'), 'false');
+  assert.equal(await narrowModelTrigger.getAttribute('aria-expanded'), 'false');
   await narrow.context.close();
 
   console.log('Restrained composer and Chat / Work menu checks passed.');

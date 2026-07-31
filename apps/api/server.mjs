@@ -179,6 +179,7 @@ void attachmentStore.cleanupOrphans().catch(() => {});
 let hermesApiProcess = null;
 let hermesBridgeProcess = null;
 const profileGatewayProcesses = new Set();
+const agentDeletionPromises = new Map();
 let hermesBridgeLastError = '';
 const apiStartedAtMs = Date.now();
 let hermesAutoStartPromise = null;
@@ -3947,6 +3948,46 @@ async function registerProfileGatewayAutoStart(profileName) {
   return writeGatewayAutoStartConfig({ include, exclude });
 }
 
+function unregisterProfileGatewayAutoStart(profileName, state) {
+  const current = normalizeGatewayAutoStartConfig(state.integrations?.hermesAgent?.gatewayAutoStart);
+  const rawProfileName = String(profileName || '').trim();
+  if (!rawProfileName) return current;
+  const clean = slug(rawProfileName);
+  const next = {
+    ...current,
+    include: current.include.filter((name) => name !== clean),
+    exclude: current.exclude.filter((name) => name !== clean),
+  };
+  state.integrations.hermesAgent = {
+    ...(state.integrations.hermesAgent || {}),
+    gatewayAutoStart: next,
+    lastCheckedAt: now(),
+  };
+  return next;
+}
+
+async function pruneMissingGatewayAutoStartProfiles(profiles) {
+  const existing = new Set(profiles.map((profile) => profile.name));
+  let removed = [];
+  await updateState((state) => {
+    const current = normalizeGatewayAutoStartConfig(state.integrations?.hermesAgent?.gatewayAutoStart);
+    const stale = [...current.include, ...current.exclude]
+      .filter((name) => name !== 'default' && !existing.has(name));
+    removed = Array.from(new Set(stale));
+    if (!removed.length) return;
+    state.integrations.hermesAgent = {
+      ...(state.integrations.hermesAgent || {}),
+      gatewayAutoStart: {
+        ...current,
+        include: current.include.filter((name) => name === 'default' || existing.has(name)),
+        exclude: current.exclude.filter((name) => name === 'default' || existing.has(name)),
+      },
+      lastCheckedAt: now(),
+    };
+  });
+  return removed;
+}
+
 function normalizeJob(job) {
   const idValue = String(job?.job_id || job?.id || '').trim();
   const skills = Array.isArray(job?.skills) ? job.skills.map(String).filter(Boolean) : job?.skill ? [String(job.skill)] : [];
@@ -5237,17 +5278,18 @@ async function startHermesBridge() {
 async function profileGatewayStatus(profileName) {
   const profileArg = profileName && profileName !== 'default' ? ['--profile', profileName] : [];
   const python = await findHermesBridgePython();
-  if (!python) return { profileName, running: false, status: 'unknown', error: '未找到 Hermes runtime。' };
+  if (!python) return { profileName, running: false, known: false, status: 'unknown', error: '未找到 Hermes runtime。' };
   try {
     const { stdout } = await execFileAsync(python, ['-m', 'hermes_cli.main', ...profileArg, 'gateway', 'status'], {
       timeout: 4000,
       env: runtimeEnv({ HERMES_HOME: hermesHome }),
     });
     const text = String(stdout || '').trim();
-    const running = /running|运行中|"PID"\s*=|PID\s*[:=]|\bPID\s+\d+|✓\s+\S+/i.test(text);
-    return { profileName, running, status: text || 'unknown', error: '' };
+    const stopped = /\bnot\s+running\b|\bstopped\b|未运行|已停止/i.test(text);
+    const running = !stopped && /running|运行中|"PID"\s*=|PID\s*[:=]|\bPID\s+\d+|✓\s+\S+/i.test(text);
+    return { profileName, running, known: true, status: text || 'unknown', error: '' };
   } catch (error) {
-    return { profileName, running: false, status: 'unknown', error: String(error?.stderr || error?.message || error).slice(0, 500) };
+    return { profileName, running: false, known: false, status: 'unknown', error: String(error?.stderr || error?.message || error).slice(0, 500) };
   }
 }
 
@@ -5271,6 +5313,68 @@ async function startProfileGateway(profileName) {
   await new Promise((resolve) => setTimeout(resolve, 800));
   if (spawnError) return { profileName: profileName || 'default', running: false, status: 'unknown', error: spawnError };
   return profileGatewayStatus(profileName || 'default');
+}
+
+async function stopProfileGateway(profileName) {
+  const clean = slug(profileName || 'default');
+  const before = await profileGatewayStatus(clean);
+  if (!before.known) throw new Error(`无法确认 Profile Gateway 状态：${before.error || before.status}`);
+  if (!before.running) return { profileName: clean, stopped: true, wasRunning: false };
+  const python = await findHermesBridgePython();
+  if (!python) throw new Error('未找到 Hermes runtime，无法停止 Profile Gateway。');
+  const profileArg = clean === 'default' ? [] : ['--profile', clean];
+  try {
+    await execFileAsync(python, ['-m', 'hermes_cli.main', ...profileArg, 'gateway', 'stop'], {
+      timeout: 15_000,
+      env: runtimeEnv({ HERMES_HOME: hermesHome }),
+    });
+  } catch (error) {
+    throw new Error(`无法停止 Profile Gateway：${String(error?.stderr || error?.message || error).trim().slice(0, 500)}`);
+  }
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    const status = await profileGatewayStatus(clean);
+    if (status.known && !status.running) return { profileName: clean, stopped: true, wasRunning: true };
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error('Profile Gateway 未能在停止后退出；Agent 未删除。');
+}
+
+async function legacyProfileGatewayStatus(profileName) {
+  const profileDir = resolveDeletableHermesProfileDir(hermesHome, profileName);
+  if (!profileDir || !(await exists(profileDir))) return { profileName, running: false, known: true, status: 'not running', error: '' };
+  const pid = readRuntimePidFile(path.join(profileDir, 'gateway.pid'));
+  if (!pid || !isProcessAlive(pid)) return { profileName, running: false, known: true, status: 'not running', error: '' };
+  try {
+    const { stdout } = await execFileAsync('ps', ['-o', 'command=', '-p', String(pid)], { timeout: 1500 });
+    const command = String(stdout || '').trim();
+    const escaped = profileName.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const belongsToProfile = new RegExp(`(?:--profile[ =]+${escaped}\\b|HERMES_PROFILE[ =]+${escaped}\\b|profiles[\\/]+${escaped}\\b)`, 'i').test(command);
+    if (/hermes/i.test(command) && belongsToProfile) return { profileName, running: true, known: true, status: command, error: '', pid };
+    return { profileName, running: true, known: false, status: 'unknown', error: `无法确认 PID ${pid} 属于 Profile「${profileName}」，未执行终止。` };
+  } catch {
+    return { profileName, running: true, known: false, status: 'unknown', error: `无法读取 Profile「${profileName}」的 Gateway PID。` };
+  }
+}
+
+async function stopLegacyProfileGateway(profileName) {
+  const status = await legacyProfileGatewayStatus(profileName);
+  if (!status.known) throw new Error(status.error || '无法确认历史 Profile Gateway 状态。');
+  if (!status.running) return { profileName, stopped: true, wasRunning: false };
+  try {
+    process.kill(status.pid, 'SIGTERM');
+  } catch (error) {
+    if (error?.code !== 'ESRCH') throw new Error(`无法停止历史 Profile Gateway：${error.message || error}`);
+  }
+  for (let attempt = 0; attempt < 12; attempt += 1) {
+    if (!isProcessAlive(status.pid)) return { profileName, stopped: true, wasRunning: true };
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  throw new Error('历史 Profile Gateway 未能在停止后退出；未继续执行操作。');
+}
+
+async function stopOrVerifyProfileGateway(profileName) {
+  if (hermesReservedProfileNames.has(slug(profileName))) return stopLegacyProfileGateway(profileName);
+  return stopProfileGateway(profileName);
 }
 
 function resetHermesAutoStartState(status = 'starting') {
@@ -5315,6 +5419,8 @@ async function ensureHermesRuntimeReady({ force = false } = {}) {
       addHermesAutoStartStep('profiles', '读取本地 Hermes Profiles', 'running');
       const profiles = await readHermesProfiles();
       addHermesAutoStartStep('profiles', '读取本地 Hermes Profiles', profiles.length ? 'ready' : 'skipped', profiles.length ? `${profiles.length} profiles` : '未发现 profile');
+      const removedAutoStartProfiles = await pruneMissingGatewayAutoStartProfiles(profiles);
+      if (removedAutoStartProfiles.length) hermesAutoStartState.logs.push(`已清理不存在 Profile 的 Gateway 自动启动项：${removedAutoStartProfiles.join(', ')}`);
 
       addHermesAutoStartStep('bridge', '启动 Frakio Work Bridge', 'running', '', 'core');
       try {
@@ -7386,6 +7492,48 @@ async function uniqueProfileName(name, reservedIds = []) {
     index += 1;
   }
   return candidate;
+}
+
+const hermesReservedProfileNames = new Set(['hermes', 'default', 'test', 'tmp', 'root', 'sudo']);
+
+function profileNameFromAgentName(name) {
+  const clean = slug(name);
+  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(clean) || hermesReservedProfileNames.has(clean)) {
+    const error = new Error(`「${String(name || '').trim() || clean}」不能作为 Hermes Profile 名称。请使用不与 Hermes 或系统命令冲突的英文字母、数字、连字符或下划线名称。`);
+    error.status = 400;
+    throw error;
+  }
+  return clean;
+}
+
+async function assertProfileNameAvailable(profileName, agentId = '') {
+  const state = await readState();
+  const occupiedByAgent = (state.agents || []).some((agent) => agent.id !== agentId && agent.profileName === profileName);
+  if (occupiedByAgent || await profileDirForName(profileName)) {
+    const error = new Error(`目标 Hermes Profile「${profileName}」已存在，请换一个名称。`);
+    error.status = 409;
+    throw error;
+  }
+}
+
+function replaceProfileNameInState(state, oldName, nextName) {
+  for (const agent of state.agents || []) {
+    if (agent.profileName === oldName) agent.profileName = nextName;
+  }
+  for (const model of state.models || []) {
+    if (model.profileName === oldName) model.profileName = nextName;
+  }
+  const autoStart = normalizeGatewayAutoStartConfig(state.integrations?.hermesAgent?.gatewayAutoStart);
+  const replace = (items) => Array.from(new Set(items.map((item) => item === oldName ? nextName : item)));
+  state.integrations.hermesAgent = {
+    ...(state.integrations.hermesAgent || {}),
+    gatewayAutoStart: { ...autoStart, include: replace(autoStart.include), exclude: replace(autoStart.exclude) },
+    ...(state.integrations?.hermesAgent?.selectedProfile === oldName ? { selectedProfile: nextName } : {}),
+    lastCheckedAt: now(),
+  };
+  if (state.integrations?.hermesStudio?.selectedProfile === oldName) {
+    state.integrations.hermesStudio = { ...(state.integrations.hermesStudio || {}), selectedProfile: nextName };
+  }
 }
 
 async function createHermesProfileFiles(profileName, payload) {
@@ -9662,6 +9810,15 @@ app.post('/api/hermes-runtime/profiles/:name/gateway/start', async (req, res) =>
     res.json({ ok: true, gateway, runtime: await hermesRuntimeStatus() });
   } catch (error) {
     res.status(500).json({ error: error.message || 'Hermes profile gateway start failed.' });
+  }
+});
+
+app.post('/api/hermes-runtime/profiles/:name/gateway/stop', async (req, res) => {
+  try {
+    const gateway = await stopOrVerifyProfileGateway(req.params.name || 'default');
+    res.json({ ok: true, gateway, runtime: await hermesRuntimeStatus() });
+  } catch (error) {
+    res.status(error.status || 500).json({ error: error.message || 'Hermes profile gateway stop failed.' });
   }
 });
 
@@ -12497,7 +12654,6 @@ app.post('/api/agents', async (req, res) => {
     }
     const name = String(req.body?.name || '').trim();
     if (!name) return res.status(400).json({ error: 'Agent 名称不能为空。' });
-    const agentId = await uniqueProfileName(name, state.agents.map((item) => item.id));
     const requestedPolicy = normalizeRuntimePolicy(req.body?.runtimePolicy, { hasHermesProfile: true });
     const requestedModelValue = String(req.body?.model || '').trim();
     const requestedModelSelection = requestedModelValue ? resolveModelSelection(requestedModelValue, state.models) : null;
@@ -12505,7 +12661,9 @@ app.post('/api/agents', async (req, res) => {
       return res.status(400).json({ error: 'Agent 默认模型不在 Frakio Model Center 中。' });
     }
     const needsHermesProfile = requestedPolicy.allowedRuntimeIds.includes('hermes');
-    const profileName = needsHermesProfile ? agentId : '';
+    const profileName = needsHermesProfile ? profileNameFromAgentName(name) : '';
+    if (profileName) await assertProfileNameAvailable(profileName);
+    const agentId = profileName || await uniqueProfileName(name, state.agents.map((item) => item.id));
     if (profileName) {
       await createHermesProfileFiles(profileName, { ...(req.body || {}), model: '' });
       await ensureManagedGlobalModulesForProfile(profileName);
@@ -12574,25 +12732,159 @@ app.post('/api/agents', async (req, res) => {
   }
 });
 
-app.delete('/api/agents/:id', async (req, res) => {
+async function deleteAgentLifecycle(agentId) {
+  if (isSystemHermesProfile('', agentId)) {
+    throw Object.assign(new Error('Hermes Default 是受保护的系统 Profile。'), { status: 409, code: 'system_profile_protected' });
+  }
+  const initialState = await readState();
+  const agent = initialState.agents.find((item) => item.id === agentId);
+  if (!agent) throw Object.assign(new Error('Agent 不存在。'), { status: 404 });
+  const profileName = agent.profileName || '';
+  if (isSystemHermesProfile(profileName, agent.id)) {
+    throw Object.assign(new Error('Hermes Default 是受保护的系统 Profile。'), { status: 409, code: 'system_profile_protected' });
+  }
+
+  const originalHermesAgent = structuredClone(initialState.integrations?.hermesAgent || {});
+  const originalHermesStudio = structuredClone(initialState.integrations?.hermesStudio || {});
+  const originalUi = {
+    defaultAgentId: initialState.ui?.defaultAgentId || '',
+    fallbackDecisionAgentId: initialState.ui?.fallbackDecisionAgentId || '',
+  };
+  const profileDir = profileName ? resolveDeletableHermesProfileDir(hermesHome, profileName) : null;
+  const stagingDir = profileDir ? path.join(path.dirname(profileDir), `.${path.basename(profileDir)}.deleting-${randomUUID()}`) : null;
+  let staged = false;
+  let stateCommitted = false;
+  let gateway = null;
+
   try {
-    if (isSystemHermesProfile('', req.params.id)) {
-      return res.status(409).json({ error: 'Hermes Default 是受保护的系统 Profile。', code: 'system_profile_protected' });
+    gateway = profileName ? await stopOrVerifyProfileGateway(profileName) : { stopped: true, wasRunning: false };
+    if (profileDir && await exists(profileDir)) {
+      await rename(profileDir, stagingDir);
+      staged = true;
     }
-    const state = await readState();
-    const agent = state.agents.find((item) => item.id === req.params.id);
-    if (!agent) return res.status(404).json({ error: 'Agent 不存在。' });
-    const profileName = agent.profileName || '';
-    if (isSystemHermesProfile(profileName, agent.id)) {
-      return res.status(409).json({ error: 'Hermes Default 是受保护的系统 Profile。', code: 'system_profile_protected' });
+    const agents = await updateState((state) => {
+      const currentAgent = state.agents.find((item) => item.id === agent.id);
+      if (!currentAgent) throw Object.assign(new Error('Agent 已被删除。'), { status: 404 });
+      state.agents = state.agents.filter((item) => item.id !== agent.id);
+      unregisterProfileGatewayAutoStart(profileName, state);
+      const requests = state.integrations?.hermesAgent?.agentCreationRequests || {};
+      state.integrations.hermesAgent = {
+        ...(state.integrations.hermesAgent || {}),
+        agentCreationRequests: Object.fromEntries(Object.entries(requests).filter(([, value]) => value?.agentId !== agent.id)),
+        ...(state.integrations?.hermesAgent?.selectedProfile === profileName ? { selectedProfile: 'default' } : {}),
+      };
+      if (state.integrations?.hermesStudio?.selectedProfile === profileName) {
+        state.integrations.hermesStudio = { ...(state.integrations.hermesStudio || {}), selectedProfile: 'default' };
+      }
+      if (state.ui?.defaultAgentId === agent.id || state.ui?.fallbackDecisionAgentId === agent.id) {
+        const nextDefaultAgentId = resolveDefaultAgentId(state);
+        state.ui = {
+          ...(state.ui || {}),
+          ...(state.ui?.defaultAgentId === agent.id ? { defaultAgentId: nextDefaultAgentId } : {}),
+          ...(state.ui?.fallbackDecisionAgentId === agent.id ? { fallbackDecisionAgentId: nextDefaultAgentId } : {}),
+        };
+      }
+      return state.agents;
+    });
+    stateCommitted = true;
+    if (staged) await rm(stagingDir, { recursive: true, force: false });
+    return {
+      ok: true,
+      deletedAgentId: agent.id,
+      deletedProfileName: profileName,
+      gateway: { stopped: true, wasRunning: gateway.wasRunning },
+      autoStart: { removed: Boolean(profileName) },
+      agents,
+    };
+  } catch (error) {
+    if (staged && stagingDir && profileDir && await exists(stagingDir) && !(await exists(profileDir))) {
+      await rename(stagingDir, profileDir).catch(() => null);
     }
-    const profileDir = profileName ? resolveDeletableHermesProfileDir(hermesHome, profileName) : null;
-    if (profileDir) {
-      await rm(profileDir, { recursive: true, force: true });
+    if (stateCommitted) {
+      await updateState((state) => {
+        if (!state.agents.some((item) => item.id === agent.id)) state.agents.push(agent);
+        state.integrations.hermesAgent = {
+          ...(state.integrations.hermesAgent || {}),
+          ...originalHermesAgent,
+        };
+        state.integrations.hermesStudio = { ...(state.integrations.hermesStudio || {}), ...originalHermesStudio };
+        state.ui = { ...(state.ui || {}), ...originalUi };
+      }).catch(() => null);
     }
-    state.agents = state.agents.filter((item) => item.id !== agent.id);
-    await writeState(state);
-    res.json({ ok: true, deletedAgentId: agent.id, deletedProfileName: profileName, agents: state.agents });
+    if (gateway?.wasRunning && profileName) await startProfileGateway(profileName).catch(() => null);
+    throw error;
+  }
+}
+
+async function renameAgentHermesProfile(agentId, nextDisplayName) {
+  const initialState = await readState();
+  const agent = initialState.agents.find((item) => item.id === agentId);
+  if (!agent) throw Object.assign(new Error('Agent 不存在。'), { status: 404 });
+  const oldName = agent.profileName;
+  if (!oldName) return { agent: { ...agent, name: nextDisplayName }, gatewayWarning: '' };
+  const nextName = profileNameFromAgentName(nextDisplayName);
+  if (nextName === oldName) return { agent: { ...agent, name: nextDisplayName }, gatewayWarning: '' };
+  await assertProfileNameAvailable(nextName, agentId);
+
+  const oldDir = resolveDeletableHermesProfileDir(hermesHome, oldName);
+  const nextDir = resolveDeletableHermesProfileDir(hermesHome, nextName);
+  if (!oldDir || !(await exists(oldDir)) || !nextDir) throw Object.assign(new Error(`找不到 Hermes Profile「${oldName}」的目录。`), { status: 404 });
+  if (await exists(nextDir)) throw Object.assign(new Error(`目标 Hermes Profile「${nextName}」已存在，请换一个名称。`), { status: 409 });
+
+  const gateway = await stopOrVerifyProfileGateway(oldName);
+  const legacyProfile = hermesReservedProfileNames.has(slug(oldName));
+  let renamed = false;
+  let stateCommitted = false;
+  let gatewayWarning = '';
+  try {
+    if (legacyProfile) {
+      await rename(oldDir, nextDir);
+    } else {
+      const python = await findHermesBridgePython();
+      if (!python) throw new Error('未找到 Hermes runtime，无法重命名 Profile。');
+      await execFileAsync(python, ['-m', 'hermes_cli.main', 'profile', 'rename', oldName, nextName], {
+        timeout: 20_000,
+        env: runtimeEnv({ HERMES_HOME: hermesHome }),
+      });
+    }
+    renamed = true;
+    const updated = await updateState((state) => {
+      const current = state.agents.find((item) => item.id === agentId);
+      if (!current) throw Object.assign(new Error('Agent 已被删除。'), { status: 404 });
+      current.name = nextDisplayName;
+      replaceProfileNameInState(state, oldName, nextName);
+      current.profileRevision = agentProfileRevision(current);
+      return structuredClone(current);
+    });
+    stateCommitted = true;
+    if (gateway.wasRunning) {
+      const restarted = await startProfileGateway(nextName);
+      if (!restarted?.running) gatewayWarning = restarted?.error || restarted?.status || 'Profile 已改名，但新名称下的 Gateway 未能重新启动。';
+    }
+    return { agent: updated, gatewayWarning };
+  } catch (error) {
+    if (renamed && !stateCommitted) {
+      if (legacyProfile) await rename(nextDir, oldDir).catch(() => null);
+      else {
+        const python = await findHermesBridgePython();
+        if (python) await execFileAsync(python, ['-m', 'hermes_cli.main', 'profile', 'rename', nextName, oldName], { timeout: 20_000, env: runtimeEnv({ HERMES_HOME: hermesHome }) }).catch(() => null);
+      }
+    }
+    if (gateway.wasRunning) await startProfileGateway(oldName).catch(() => null);
+    throw error;
+  }
+}
+
+app.delete('/api/agents/:id', async (req, res) => {
+  const agentId = req.params.id;
+  let deletion = agentDeletionPromises.get(agentId);
+  if (!deletion) {
+    deletion = deleteAgentLifecycle(agentId);
+    agentDeletionPromises.set(agentId, deletion);
+    void deletion.finally(() => agentDeletionPromises.delete(agentId)).catch(() => {});
+  }
+  try {
+    res.json(await deletion);
   } catch (error) {
     res.status(error.status || 500).json({ error: error.message || 'Agent 删除失败。', ...(error.code ? { code: error.code } : {}) });
   }
@@ -12602,7 +12894,19 @@ app.patch('/api/agents/:id', async (req, res) => {
   const state = await readState();
   const agent = state.agents.find((item) => item.id === req.params.id);
   if (!agent) return res.status(404).json({ error: 'Agent 不存在。' });
-  if ('name' in req.body) agent.name = String(req.body.name || agent.name).trim().slice(0, 32);
+  if ('name' in req.body) {
+    const nextName = String(req.body.name || agent.name).trim().slice(0, 32);
+    if (!nextName) return res.status(400).json({ error: 'Agent 名称不能为空。' });
+    if (agent.profileName && nextName !== agent.name) {
+      try {
+        const result = await renameAgentHermesProfile(agent.id, nextName);
+        return res.json({ agent: result.agent, agents: (await readState()).agents, ...(result.gatewayWarning ? { gatewayWarning: result.gatewayWarning } : {}) });
+      } catch (error) {
+        return res.status(error.status || 500).json({ error: error.message || 'Hermes Profile 重命名失败。' });
+      }
+    }
+    agent.name = nextName;
+  }
   if ('role' in req.body) agent.role = String(req.body.role || agent.role).trim().slice(0, 60);
   if ('model' in req.body) {
     const requestedModel = String(req.body.model || '').trim();

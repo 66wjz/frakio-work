@@ -32,7 +32,7 @@ test('rail menus and confirmations use the unified semantic surfaces', () => {
   assert.doesNotMatch(stylesSource, /\.rail-confirm-popover\s*\{/);
 });
 
-test('high-frequency menus share Radix keyboard and focus behavior', () => {
+test('high-frequency menus use stable interaction primitives', () => {
   for (const component of ['PermissionModeControl', 'ExecutionModeControl']) {
     const source = mainSource.match(new RegExp(`function ${component}[\\s\\S]*?(?=\\nfunction )`))?.[0] || '';
     assert.match(source, /<AppMenu/);
@@ -44,14 +44,30 @@ test('high-frequency menus share Radix keyboard and focus behavior', () => {
   assert.match(mainSource, /className="project-picker-menu-v2"/);
   assert.match(mainSource, /className="board-popover-v2"/);
   const modelPicker = mainSource.match(/function ProviderModelPicker[\s\S]*?(?=\nfunction )/)?.[0] || '';
-  assert.match(modelPicker, /<AppMenuSub>/);
-  assert.match(modelPicker, /<AppMenuSubTrigger className="provider-model-root-option">/);
-  assert.match(modelPicker, /<AppMenuSubContent className="provider-model-submenu-v2/);
-  assert.equal((modelPicker.match(/<AppMenuSubContent[^>]*sideOffset=\{8\}[^>]*alignOffset=\{-5\}/g) || []).length, 3);
-  const narrowRoot = modelPicker.match(/const rootPanel = advanced \? \([\s\S]*?\n  \) : null;/)?.[0] || '';
-  assert.doesNotMatch(narrowRoot, /<(?:Bot|Brain|Gauge)|<small>/);
-  assert.match(narrowRoot, /<span>模型<\/span><em>\{selectedLabel\}<\/em>/);
-  assert.match(stylesSource, /@media \(max-width: 719px\)[\s\S]*?provider-model-subpanel \{ width: 100%; \}/);
+  assert.doesNotMatch(modelPicker, /<AppMenu(?:Sub|Content|Trigger)/);
+  assert.match(modelPicker, /const rootPanel = advanced \? \(/);
+  assert.match(modelPicker, /section === 'model' && modelPanel/);
+  assert.match(modelPicker, /section === 'reasoning' && reasoningPanel/);
+  assert.match(modelPicker, /section === 'speed' && speedPanel/);
+  assert.match(modelPicker, /async function commitChoice/);
+  assert.match(modelPicker, /disabled=\{saving\}/);
+  assert.match(stylesSource, /\.provider-model-menu\.advanced \.provider-model-subpanel \{[\s\S]*?position: absolute;/);
+  assert.match(stylesSource, /\.provider-model-menu\.advanced\.submenu-left \.provider-model-subpanel/);
+});
+
+test('profile editor owns its scroll, focus, and unsaved-change boundary', () => {
+  const profilePanel = mainSource.match(/function UserProfilePanel[\s\S]*?(?=\nfunction ProfileInsightPanel)/)?.[0] || '';
+  const profileForm = mainSource.match(/function UserProfileForm[\s\S]*?(?=\nfunction AvatarCropModal)/)?.[0] || '';
+  assert.match(profilePanel, /settingsContent\.style\.overflow = 'hidden'/);
+  assert.match(profilePanel, /settingsContent\.scrollTop = scrollTop/);
+  assert.match(profilePanel, /editTriggerRef\.current\?\.focus\(\)/);
+  assert.match(profileForm, /data-profile-autofocus/);
+  assert.match(profileForm, /event\.key === 'Escape'/);
+  assert.match(profileForm, /放弃未保存的修改？/);
+  assert.match(profileForm, /role=\{compact \? 'dialog'/);
+  assert.match(stylesSource, /\.user-profile-form\.compact\s*\{[\s\S]*?grid-template-rows:\s*auto minmax\(0, 1fr\) auto;/);
+  assert.match(stylesSource, /\.user-profile-edit-body\s*\{[\s\S]*?overflow-y:\s*auto;[\s\S]*?overscroll-behavior:\s*contain;/);
+  assert.match(stylesSource, /\.user-profile-form\.compact \.modal-actions\s*\{[\s\S]*?border-top:/);
 });
 
 test('macOS overlay tokens remain neutral and motion-aware', () => {

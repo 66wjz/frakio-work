@@ -7,6 +7,7 @@ const AUTH_COOKIE = 'frakio_auth';
 const SESSION_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const LOGIN_LIMIT = 5;
+const DEFAULT_ADMIN_PASSWORD = 'Admin';
 
 function cookies(header = '') {
   return Object.fromEntries(String(header)
@@ -30,10 +31,6 @@ function passwordMatches(password, record) {
   } catch {
     return false;
   }
-}
-
-function generatedPassword() {
-  return randomBytes(18).toString('base64url');
 }
 
 function remoteAddress(req) {
@@ -80,8 +77,15 @@ export function createManagedWebAuth({
     try {
       password = JSON.parse(await readFile(authPath, 'utf8'));
     } catch {
-      generatedAdminPassword = String(process.env.FRAKIO_WORK_ADMIN_PASSWORD || '').trim() || generatedPassword();
-      password = { schema: 1, ...passwordRecord(generatedAdminPassword), updatedAt: new Date(now()).toISOString() };
+      const configuredPassword = String(process.env.FRAKIO_WORK_ADMIN_PASSWORD || '').trim();
+      const firstInstall = !configuredPassword;
+      generatedAdminPassword = firstInstall ? DEFAULT_ADMIN_PASSWORD : '';
+      password = {
+        schema: 2,
+        ...passwordRecord(configuredPassword || DEFAULT_ADMIN_PASSWORD),
+        mustChangePassword: firstInstall,
+        updatedAt: new Date(now()).toISOString(),
+      };
       await writeFile(authPath, `${JSON.stringify(password, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     }
     try {
@@ -104,6 +108,10 @@ export function createManagedWebAuth({
     return true;
   }
 
+  function passwordChangeRequired(req) {
+    return Boolean(enabled && password?.mustChangePassword === true && authenticated(req));
+  }
+
   function issueSession(res) {
     const token = randomBytes(32).toString('base64url');
     sessions.set(token, now() + SESSION_MAX_AGE_SECONDS * 1000);
@@ -115,6 +123,8 @@ export function createManagedWebAuth({
       managed: enabled,
       authenticated: authenticated(req),
       transport: secureCookies ? 'https' : 'trusted-lan-http',
+      passwordChangeRequired: passwordChangeRequired(req),
+      ...(enabled && password?.mustChangePassword === true && !authenticated(req) ? { defaultPasswordHint: DEFAULT_ADMIN_PASSWORD } : {}),
     });
   }
 
@@ -130,7 +140,7 @@ export function createManagedWebAuth({
     }
     attempts.delete(address);
     issueSession(res);
-    return res.json({ ok: true });
+    return res.json({ ok: true, passwordChangeRequired: password?.mustChangePassword === true });
   }
 
   function desktopSessionRoute(req, res) {
@@ -143,8 +153,10 @@ export function createManagedWebAuth({
 
   function protect(req, res, next) {
     if (req.path === '/health') return next();
-    if (authenticated(req)) return next();
-    return res.status(401).json({ error: 'Authentication required.', code: 'managed_web_auth_required' });
+    if (!authenticated(req)) return res.status(401).json({ error: 'Authentication required.', code: 'managed_web_auth_required' });
+    if (!passwordChangeRequired(req)) return next();
+    if (['/auth/password', '/auth/logout', '/session'].includes(req.path)) return next();
+    return res.status(403).json({ error: '请先修改首次登录密码。', code: 'managed_web_password_change_required' });
   }
 
   function logoutRoute(req, res) {
@@ -157,7 +169,10 @@ export function createManagedWebAuth({
   async function passwordRoute(req, res) {
     const nextPassword = String(req.body?.password || '');
     if (nextPassword.length < 10) return res.status(400).json({ error: '密码至少需要 10 个字符。' });
-    password = { schema: 1, ...passwordRecord(nextPassword), updatedAt: new Date(now()).toISOString() };
+    if (!passwordChangeRequired(req) && !passwordMatches(req.body?.currentPassword, password)) {
+      return res.status(401).json({ error: '当前密码不正确。' });
+    }
+    password = { schema: 2, ...passwordRecord(nextPassword), mustChangePassword: false, updatedAt: new Date(now()).toISOString() };
     await writeFile(authPath, `${JSON.stringify(password, null, 2)}\n`, { encoding: 'utf8', mode: 0o600 });
     sessions.clear();
     issueSession(res);
@@ -181,5 +196,5 @@ export function createManagedWebAuth({
 export const managedWebAuthInternals = {
   passwordRecord,
   passwordMatches,
-  generatedPassword,
+  DEFAULT_ADMIN_PASSWORD,
 };

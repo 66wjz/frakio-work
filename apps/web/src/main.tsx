@@ -70,9 +70,6 @@ import {
   AppMenuContent,
   AppMenuItem,
   AppMenuSeparator,
-  AppMenuSub,
-  AppMenuSubContent,
-  AppMenuSubTrigger,
   AppMenuTrigger,
   AppPopover,
   AppPopoverContent,
@@ -1894,6 +1891,14 @@ function App() {
     const data = await fetch(`/api/hermes-runtime/profiles/${encodeURIComponent(profileName)}/gateway/start`, { method: 'POST' }).then((res) => res.json()).catch((error) => ({ error: String(error?.message || error) }));
     if (data?.runtime) setHermesRuntime(data.runtime);
     if (data?.error) setHermesError(data.error);
+  }
+
+  async function stopHermesProfileGateway(profileName: string) {
+    setHermesError('');
+    const data = await fetch(`/api/hermes-runtime/profiles/${encodeURIComponent(profileName)}/gateway/stop`, { method: 'POST' }).then((res) => res.json()).catch((error) => ({ error: String(error?.message || error) }));
+    if (data?.runtime) setHermesRuntime(data.runtime);
+    if (data?.error) setHermesError(data.error);
+    if (data?.error) throw new Error(data.error);
   }
 
   async function refreshUpdatesStatus() {
@@ -4281,11 +4286,13 @@ function App() {
     const nextRunOverrides = { ...(activeThread.agentRunOverrides || {}) };
     if (nextRunOverride.reasoningEffort || nextRunOverride.speedMode) nextRunOverrides[agentId] = nextRunOverride;
     else delete nextRunOverrides[agentId];
-    const data = await fetch(`/api/threads/${activeThread.id}`, {
+    const response = await fetch(`/api/threads/${activeThread.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agentModelOverrides: normalizedOverrides, agentRunOverrides: nextRunOverrides }),
-    }).then((res) => res.json());
+    });
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data?.thread) throw new Error(data?.error || '模型设置未保存');
     setActiveThread(data.thread);
     await refreshLeftRail();
   }
@@ -4300,8 +4307,10 @@ function App() {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ agentRunOverrides: next }),
     });
-    const data = await response.json();
-    if (response.ok) setActiveThread(data.thread);
+    const data = await response.json().catch(() => null);
+    if (!response.ok || !data?.thread) throw new Error(data?.error || '运行参数未保存');
+    setActiveThread(data.thread);
+    await refreshLeftRail();
   }
 
   async function updateThreadAgentRuntimeOverride(agentId: string, runtimeId: RuntimeId) {
@@ -5288,6 +5297,7 @@ function App() {
             onStartHermesRuntime={startHermesRuntime}
             onRefreshHermesRuntime={refreshHermesRuntime}
             onStartProfileGateway={startHermesProfileGateway}
+            onStopProfileGateway={stopHermesProfileGateway}
             onUpdateUi={(next) => void persistUi(next)}
             onUserProfileSaved={(profile, nextAgents) => {
               setUserProfile(profile);
@@ -5352,6 +5362,7 @@ function App() {
             }}
             onRefreshHermesRuntime={refreshHermesRuntime}
             onStartProfileGateway={startHermesProfileGateway}
+            onStopProfileGateway={stopHermesProfileGateway}
           />
         ) : (
           <>
@@ -5555,8 +5566,8 @@ function App() {
 	                        usingDefault={!activeThreadModelOverride}
 	                        capabilities={modelCapabilities}
 	                        runOverride={activeThreadRunOverride}
-	                        onRunOverrideChange={(override) => activeComposerAgent && void updateThreadAgentRunOverride(activeComposerAgent.id, override)}
-	                        onChange={(value) => activeComposerAgent && void updateThreadAgentModelOverride(activeComposerAgent.id, value)}
+	                        onRunOverrideChange={(override) => activeComposerAgent ? updateThreadAgentRunOverride(activeComposerAgent.id, override) : undefined}
+	                        onChange={(value) => activeComposerAgent ? updateThreadAgentModelOverride(activeComposerAgent.id, value) : undefined}
 	                      />}
 	                      <ComposerRunButton
 	                        isRunning={isRunning}
@@ -9376,6 +9387,7 @@ function UserProfilePanel({ userProfile, defaultAgent, onSaved }: { userProfile:
   const [summary, setSummary] = useState<UserProfileSummary | null>(null);
   const [loading, setLoading] = useState(false);
   const [editOpen, setEditOpen] = useState(false);
+  const editTriggerRef = useRef<HTMLButtonElement | null>(null);
   const [activityMode, setActivityMode] = useState<ProfileActivityMode>('daily');
   const [tokenTooltip, setTokenTooltip] = useState<{
     cell: ProfileActivityCell;
@@ -9423,9 +9435,45 @@ function UserProfilePanel({ userProfile, defaultAgent, onSaved }: { userProfile:
     setTokenTooltip(null);
   }, [activityMode]);
 
+  useEffect(() => {
+    if (!editOpen) return;
+    const settingsContent = document.querySelector<HTMLElement>('.settings-content');
+    if (!settingsContent) return;
+    const scrollTop = settingsContent.scrollTop;
+    const scrollLeft = settingsContent.scrollLeft;
+    const previousOverflow = settingsContent.style.overflow;
+    settingsContent.style.overflow = 'hidden';
+    // The fixed modal still lives under settings-content in the DOM. Restore
+    // the frozen position after its first-field autofocus has settled.
+    let settleFrame = 0;
+    const restoreFrame = window.requestAnimationFrame(() => {
+      settleFrame = window.requestAnimationFrame(() => {
+        settingsContent.scrollTop = scrollTop;
+        settingsContent.scrollLeft = scrollLeft;
+      });
+    });
+    return () => {
+      window.cancelAnimationFrame(restoreFrame);
+      window.cancelAnimationFrame(settleFrame);
+      settingsContent.style.overflow = previousOverflow;
+      settingsContent.scrollTop = scrollTop;
+      settingsContent.scrollLeft = scrollLeft;
+    };
+  }, [editOpen]);
+
+  function openEditor(trigger: HTMLButtonElement) {
+    editTriggerRef.current = trigger;
+    setEditOpen(true);
+  }
+
+  function closeEditor() {
+    setEditOpen(false);
+    window.requestAnimationFrame(() => editTriggerRef.current?.focus());
+  }
+
   function handleSaved(profile: UserProfile, agents?: Agent[]) {
     onSaved(profile, agents);
-    setEditOpen(false);
+    closeEditor();
     void loadSummary();
   }
 
@@ -9446,10 +9494,10 @@ function UserProfilePanel({ userProfile, defaultAgent, onSaved }: { userProfile:
   return (
     <section className="profile-dashboard">
       <div className="profile-dashboard-actions">
-        <button className="secondary-btn compact" onClick={() => setEditOpen(true)}><Pencil size={14} />编辑</button>
+        <button className="secondary-btn compact" onClick={(event) => openEditor(event.currentTarget)}><Pencil size={14} />编辑</button>
       </div>
       <section className="profile-hero">
-        <button className="profile-avatar-button" onClick={() => setEditOpen(true)} aria-label="编辑个人资料">
+        <button className="profile-avatar-button" onClick={(event) => openEditor(event.currentTarget)} aria-label="编辑个人资料">
           {userProfile.avatarUrl ? <img src={userProfile.avatarUrl} alt="" /> : initials}
         </button>
         <h2>{displayName}</h2>
@@ -9537,8 +9585,7 @@ function UserProfilePanel({ userProfile, defaultAgent, onSaved }: { userProfile:
       {editOpen && (
         <div className="modal-backdrop profile-edit-modal">
           <div className="modal-card profile-edit-card">
-            <button className="profile-edit-close icon-btn" onClick={() => setEditOpen(false)} aria-label="关闭"><X size={18} /></button>
-            <UserProfileForm userProfile={userProfile} defaultAgent={defaultAgent} onSaved={handleSaved} onCancel={() => setEditOpen(false)} compact />
+            <UserProfileForm userProfile={userProfile} defaultAgent={defaultAgent} onSaved={handleSaved} onCancel={closeEditor} compact />
           </div>
         </div>
       )}
@@ -9584,16 +9631,102 @@ function moduleUsageTotal(item: UserProfileModuleUsage) {
   return Number(item.useCount || 0) + Number(item.viewCount || 0) + Number(item.patchCount || 0);
 }
 
+function ManagedWebPasswordSettings() {
+  const [managed, setManaged] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState('');
+  const [nextPassword, setNextPassword] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [message, setMessage] = useState('');
+  useEffect(() => {
+    void fetch('/api/auth/status').then((response) => response.json()).then((status) => setManaged(status.managed === true)).catch(() => {});
+  }, []);
+  if (!managed) return null;
+  async function savePassword() {
+    setMessage('');
+    if (nextPassword.length < 10) return setMessage('新密码至少需要 10 个字符。');
+    if (nextPassword !== confirmation) return setMessage('两次输入的新密码不一致。');
+    setSaving(true);
+    try {
+      await fetch('/api/session');
+      const response = await fetch('/api/auth/password', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Frakio-Request': '1' },
+        body: JSON.stringify({ currentPassword, password: nextPassword }),
+      });
+      const payload = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(payload.error || '密码修改失败。');
+      setCurrentPassword('');
+      setNextPassword('');
+      setConfirmation('');
+      setMessage('管理员密码已更新，其他登录会话已退出。');
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : '密码修改失败。');
+    } finally {
+      setSaving(false);
+    }
+  }
+  return <section className="managed-profile-password" aria-label="管理员密码">
+    <div><strong>管理员密码</strong><small>修改后会退出其他设备的登录会话。</small></div>
+    <label>当前密码<input type="password" autoComplete="current-password" value={currentPassword} onChange={(event) => setCurrentPassword(event.target.value)} /></label>
+    <label>新密码<input type="password" autoComplete="new-password" value={nextPassword} onChange={(event) => setNextPassword(event.target.value)} /></label>
+    <label>确认新密码<input type="password" autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
+    <button type="button" className="secondary-btn" disabled={saving || !currentPassword || !nextPassword || !confirmation} onClick={() => void savePassword()}>{saving ? '保存中' : '更新密码'}</button>
+    {message && <div className={message.includes('已更新') ? 'settings-inline-message' : 'form-error'}>{message}</div>}
+  </section>;
+}
+
 function UserProfileForm({ userProfile, defaultAgent, onSaved, onCancel, compact = false }: { userProfile: UserProfile; defaultAgent: Agent | null; onSaved: (profile: UserProfile, agents?: Agent[]) => void; onCancel?: () => void; compact?: boolean }) {
   const [draft, setDraft] = useState<UserProfile>(userProfile);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   const [avatarSaving, setAvatarSaving] = useState(false);
   const [avatarCropFile, setAvatarCropFile] = useState<File | null>(null);
+  const [discardOpen, setDiscardOpen] = useState(false);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  const formRef = useRef<HTMLDivElement | null>(null);
   useEffect(() => setDraft(userProfile), [userProfile.updatedAt, userProfile.avatarUrl, userProfile.nickname]);
   const formName = String(draft.nickname || userProfile.nickname || 'Frakio User').trim();
   const formInitials = (formName || 'MG').slice(0, 2).toUpperCase();
+  const busy = saving || avatarSaving;
+  const isDirty = userProfileHasUnsavedChanges(draft, userProfile);
+
+  useEffect(() => {
+    if (!compact) return;
+    const firstField = formRef.current?.querySelector<HTMLElement>('[data-profile-autofocus]');
+    window.requestAnimationFrame(() => firstField?.focus({ preventScroll: true }));
+  }, [compact]);
+
+  function requestClose() {
+    if (busy || avatarCropFile) return;
+    if (isDirty) {
+      setDiscardOpen(true);
+      return;
+    }
+    onCancel?.();
+  }
+
+  function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      requestClose();
+      return;
+    }
+    if (event.key !== 'Tab' || !formRef.current) return;
+    const focusable = Array.from(formRef.current.querySelectorAll<HTMLElement>(
+      'button:not([disabled]), input:not([disabled]), textarea:not([disabled]), select:not([disabled]), [href], [tabindex]:not([tabindex="-1"])',
+    )).filter((element) => element.offsetParent !== null);
+    if (!focusable.length) return;
+    const first = focusable[0];
+    const last = focusable[focusable.length - 1];
+    if (event.shiftKey && document.activeElement === first) {
+      event.preventDefault();
+      last.focus();
+    } else if (!event.shiftKey && document.activeElement === last) {
+      event.preventDefault();
+      first.focus();
+    }
+  }
 
   function chooseAvatar(file: File | undefined) {
     if (!file) return;
@@ -9641,36 +9774,55 @@ function UserProfileForm({ userProfile, defaultAgent, onSaved, onCancel, compact
   }
 
   return (
-    <div className={compact ? 'user-profile-form compact' : 'user-profile-form'}>
+    <div className={compact ? 'user-profile-form compact' : 'user-profile-form'} ref={formRef} role={compact ? 'dialog' : undefined} aria-modal={compact || undefined} aria-labelledby={compact ? 'user-profile-editor-title' : undefined} onKeyDown={handleKeyDown}>
       <div className="user-profile-edit-hero">
         <button className="user-profile-avatar" type="button" onClick={() => avatarInputRef.current?.click()} disabled={avatarSaving} aria-label="上传用户头像">
           {draft.avatarUrl ? <img src={draft.avatarUrl} alt="" /> : formInitials}
         </button>
         <input ref={avatarInputRef} className="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => chooseAvatar(event.target.files?.[0])} />
         <div>
-          <span>编辑个人资料</span>
+          <span id="user-profile-editor-title">编辑个人资料</span>
           <strong>{formName}</strong>
           <small>默认 Agent：{defaultAgent?.name || '未设置'} · 资料会同步给 Agent 使用</small>
           <button className="profile-avatar-upload-link" type="button" onClick={() => avatarInputRef.current?.click()} disabled={avatarSaving}>{avatarSaving ? '上传中...' : draft.avatarUrl ? '更换头像' : '上传头像'}</button>
         </div>
+        {onCancel && <button className="profile-edit-close icon-btn" type="button" onClick={requestClose} disabled={busy} aria-label="关闭"><X size={18} /></button>}
       </div>
-      <div className="preference-grid user-profile-grid">
-        <label>用户名/昵称<input value={draft.nickname} onChange={(event) => setDraft({ ...draft, nickname: event.target.value })} placeholder="例如：Alex" /></label>
-        <label>年龄<input value={draft.age} onChange={(event) => setDraft({ ...draft, age: event.target.value })} placeholder="选填" /></label>
-        <label className="wide">个人简介<textarea value={draft.bio} onChange={(event) => setDraft({ ...draft, bio: event.target.value })} placeholder="简单介绍你自己" /></label>
-        <label className="wide">爱好<textarea value={draft.hobbies} onChange={(event) => setDraft({ ...draft, hobbies: event.target.value })} placeholder="选填" /></label>
-        <label className="wide">职业信息<textarea value={draft.occupation} onChange={(event) => setDraft({ ...draft, occupation: event.target.value })} placeholder="选填" /></label>
-        <label>默认 Agent 对你的称呼<input value={draft.defaultAgentAddress} onChange={(event) => setDraft({ ...draft, defaultAgentAddress: event.target.value })} placeholder="例如：老板" /></label>
-        <label>其他 Agent 对你的称呼<input value={draft.otherAgentAddress} onChange={(event) => setDraft({ ...draft, otherAgentAddress: event.target.value })} placeholder="例如：Alex" /></label>
+      <div className="user-profile-edit-body">
+        <div className="preference-grid user-profile-grid">
+          <label>用户名/昵称<input data-profile-autofocus value={draft.nickname} onChange={(event) => setDraft({ ...draft, nickname: event.target.value })} placeholder="例如：Alex" /></label>
+          <label>年龄<input value={draft.age} onChange={(event) => setDraft({ ...draft, age: event.target.value })} placeholder="选填" /></label>
+          <label className="wide">个人简介<textarea value={draft.bio} onChange={(event) => setDraft({ ...draft, bio: event.target.value })} placeholder="简单介绍你自己" /></label>
+          <label className="wide">爱好<textarea value={draft.hobbies} onChange={(event) => setDraft({ ...draft, hobbies: event.target.value })} placeholder="选填" /></label>
+          <label className="wide">职业信息<textarea value={draft.occupation} onChange={(event) => setDraft({ ...draft, occupation: event.target.value })} placeholder="选填" /></label>
+          <label>默认 Agent 对你的称呼<input value={draft.defaultAgentAddress} onChange={(event) => setDraft({ ...draft, defaultAgentAddress: event.target.value })} placeholder="例如：老板" /></label>
+          <label>其他 Agent 对你的称呼<input value={draft.otherAgentAddress} onChange={(event) => setDraft({ ...draft, otherAgentAddress: event.target.value })} placeholder="例如：Alex" /></label>
+        </div>
+        <ManagedWebPasswordSettings />
+        {error && <div className="form-error">{error}</div>}
       </div>
-      {error && <div className="form-error">{error}</div>}
       <div className="modal-actions">
-        {onCancel && <button className="secondary-btn" onClick={onCancel} disabled={saving || avatarSaving}>取消</button>}
-        <button className="send-btn" onClick={() => void saveProfile()} disabled={saving || avatarSaving}>{saving ? '保存中' : '保存并同步到 Agent'}</button>
+        {onCancel && <button className="secondary-btn" onClick={requestClose} disabled={busy}>取消</button>}
+        <button className="send-btn" onClick={() => void saveProfile()} disabled={busy}>{saving ? '保存中' : '保存并同步到 Agent'}</button>
       </div>
       {avatarCropFile && <AvatarCropModal file={avatarCropFile} title="裁剪个人头像" saving={avatarSaving} onCancel={() => setAvatarCropFile(null)} onSave={(data) => void uploadAvatar(data)} />}
+      <AppAlertDialog open={discardOpen} onOpenChange={setDiscardOpen}>
+        <AppAlertDialogContent>
+          <AppAlertDialogTitle className="app-alert-title">放弃未保存的修改？</AppAlertDialogTitle>
+          <AppAlertDialogDescription className="app-alert-description">关闭后，本次尚未保存的个人资料修改将丢失。</AppAlertDialogDescription>
+          <div className="app-alert-actions">
+            <AppAlertDialogCancel className="cancel">继续编辑</AppAlertDialogCancel>
+            <AppAlertDialogAction className="danger" onClick={() => onCancel?.()}>放弃修改</AppAlertDialogAction>
+          </div>
+        </AppAlertDialogContent>
+      </AppAlertDialog>
     </div>
   );
+}
+
+function userProfileHasUnsavedChanges(draft: UserProfile, saved: UserProfile) {
+  return ['avatarUrl', 'nickname', 'bio', 'age', 'hobbies', 'occupation', 'defaultAgentAddress', 'otherAgentAddress']
+    .some((key) => draft[key as keyof UserProfile] !== saved[key as keyof UserProfile]);
 }
 
 function AvatarCropModal({ file, title, saving, onCancel, onSave }: { file: File; title: string; saving: boolean; onCancel: () => void; onSave: (dataUrl: string) => void }) {
@@ -10445,27 +10597,6 @@ function SystemStatusPage({ hermesBootstrap, hermesRuntime, hermesDiagnostics, h
   hermesDiagnostics: HermesRuntimeDiagnostics | null;
   hermesApiAvailability: HermesApiAvailability;
 }) {
-  const [managedWebStatus, setManagedWebStatus] = useState<{ managed?: boolean; authenticated?: boolean; transport?: string } | null>(null);
-  const [nextManagedPassword, setNextManagedPassword] = useState('');
-  const [managedPasswordMessage, setManagedPasswordMessage] = useState('');
-  useEffect(() => {
-    void fetch('/api/auth/status').then((response) => response.json()).then(setManagedWebStatus).catch(() => {});
-  }, []);
-  const changeManagedPassword = async () => {
-    setManagedPasswordMessage('');
-    const response = await fetch('/api/auth/password', {
-      method: 'PUT',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ password: nextManagedPassword }),
-    });
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      setManagedPasswordMessage(payload.error || '密码修改失败。');
-      return;
-    }
-    setNextManagedPassword('');
-    setManagedPasswordMessage('管理员密码已更新，其他登录会话已退出。');
-  };
   const workbenchOnline = hermesApiAvailability !== 'offline';
   const bridgeReady = Boolean(hermesRuntime?.bridge?.ready);
   const externalApiOnline = Boolean(hermesBootstrap?.api?.online);
@@ -10500,26 +10631,6 @@ function SystemStatusPage({ hermesBootstrap, hermesRuntime, hermesDiagnostics, h
           <SettingsStatusValue state={frakioHome} />
         </SettingsRow>
       </SettingsPanel>
-      {managedWebStatus?.managed ? (
-        <>
-          <div className="settings-section-head"><h3>局域网访问</h3></div>
-          <SettingsPanel ariaLabel="局域网访问">
-            <SettingsRow title="当前访问地址" description="同一可信局域网中的设备可以通过运行主机的 IP 地址访问。">
-              <SettingsStatusValue state={window.location.origin} tone="ready" />
-            </SettingsRow>
-            <SettingsRow title="传输方式" description="当前使用可信局域网 HTTP。不要把此端口直接映射到公网；公网访问请配置 HTTPS 反向代理。">
-              <SettingsStatusValue state={managedWebStatus.transport === 'https' ? 'HTTPS' : '可信局域网 HTTP'} tone={managedWebStatus.transport === 'https' ? 'ready' : 'warning'} />
-            </SettingsRow>
-            <SettingsRow title="修改管理员密码" description="密码至少 10 个字符。保存后会撤销其他设备的登录状态。">
-              <span className="managed-password-control">
-                <input type="password" value={nextManagedPassword} onChange={(event) => setNextManagedPassword(event.target.value)} placeholder="输入新密码" />
-                <button className="secondary-btn" disabled={nextManagedPassword.length < 10} onClick={() => void changeManagedPassword()}>保存</button>
-              </span>
-            </SettingsRow>
-            {managedPasswordMessage ? <div className="settings-inline-message">{managedPasswordMessage}</div> : null}
-          </SettingsPanel>
-        </>
-      ) : null}
     </>
   );
 }
@@ -10606,7 +10717,7 @@ function HermesBackupPanel({ status, busy, onCreate, onRollback, onDelete, onCle
   );
 }
 
-function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, hermesRuntime, hermesDiagnostics, hermesApiAvailability, hermesError, updatesStatus, updatesBusy, updatesError, updatesResult, desktopUpdateState, onCheckDesktopUpdate, onDownloadDesktopUpdate, onCancelDesktopUpdate, onOpenDesktopUpdate, onCheckHermesRuntime, onInstallHermesRuntime, onActivateHermesRuntime, onUseBundledHermesRuntime, onDeleteHermesRuntime, onCreateHermesBackup, onRollbackHermesBackup, onDeleteHermesBackup, onCleanupHermesBackups, userProfile, uiSettings, telemetryStatus, isImportingHermes, vaultPathInput, setVaultPathInput, vaultError, vaultBusy, addVault, reindexVault, deleteVault, onImportHermes, onRunFirstUseGuide, firstUseGuideRunning, onStartHermesRuntime, onRefreshHermesRuntime, onStartProfileGateway, onUpdateUi, onUserProfileSaved, pinnedNav, onTogglePinned, modelError, saveModel, deleteModel, fetchAvailableModels, onCapabilityChanged, activeSection, onSectionChange, archivedThreads, onRefreshArchivedThreads, onRestoreThread, onDeleteThread, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreateAgent, profileEditor, onUpdateDefaultAgent }: {
+function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, hermesRuntime, hermesDiagnostics, hermesApiAvailability, hermesError, updatesStatus, updatesBusy, updatesError, updatesResult, desktopUpdateState, onCheckDesktopUpdate, onDownloadDesktopUpdate, onCancelDesktopUpdate, onOpenDesktopUpdate, onCheckHermesRuntime, onInstallHermesRuntime, onActivateHermesRuntime, onUseBundledHermesRuntime, onDeleteHermesRuntime, onCreateHermesBackup, onRollbackHermesBackup, onDeleteHermesBackup, onCleanupHermesBackups, userProfile, uiSettings, telemetryStatus, isImportingHermes, vaultPathInput, setVaultPathInput, vaultError, vaultBusy, addVault, reindexVault, deleteVault, onImportHermes, onRunFirstUseGuide, firstUseGuideRunning, onStartHermesRuntime, onRefreshHermesRuntime, onStartProfileGateway, onStopProfileGateway, onUpdateUi, onUserProfileSaved, pinnedNav, onTogglePinned, modelError, saveModel, deleteModel, fetchAvailableModels, onCapabilityChanged, activeSection, onSectionChange, archivedThreads, onRefreshArchivedThreads, onRestoreThread, onDeleteThread, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreateAgent, profileEditor, onUpdateDefaultAgent }: {
   vaults: Vault[];
   models: ModelProfile[];
   agents: Agent[];
@@ -10651,6 +10762,7 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
   onStartHermesRuntime: () => Promise<void>;
   onRefreshHermesRuntime: () => Promise<unknown>;
   onStartProfileGateway: (profileName: string) => Promise<void>;
+  onStopProfileGateway: (profileName: string) => Promise<void>;
   onUpdateUi: (next: Partial<WorkbenchUiSettings>) => void;
   onUserProfileSaved: (profile: UserProfile, agents?: Agent[]) => void;
   pinnedNav: PinnedNav;
@@ -10764,6 +10876,7 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
               onUpdateDefaultAgent={onUpdateDefaultAgent}
               onRefreshHermesRuntime={onRefreshHermesRuntime}
               onStartProfileGateway={onStartProfileGateway}
+              onStopProfileGateway={onStopProfileGateway}
             />
           )}
 
@@ -11441,10 +11554,10 @@ function calculateProviderModelMenuPlacement(trigger: DOMRect, viewportWidth: nu
   };
 }
 
-function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLabel = '未配置模型', className = '', ariaLabel = '切换模型', title = '切换模型', allowDefault = false, usingDefault = false, capabilities, runOverride, onRunOverrideChange }: { models: ModelProfile[]; value: string; onChange: (value: string) => void; agentName?: string; emptyLabel?: string; className?: string; ariaLabel?: string; title?: string; allowDefault?: boolean; usingDefault?: boolean; capabilities?: Record<string, ModelCapability>; runOverride?: AgentRunOverride; onRunOverrideChange?: (override: AgentRunOverride) => void }) {
+function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLabel = '未配置模型', className = '', ariaLabel = '切换模型', title = '切换模型', allowDefault = false, usingDefault = false, capabilities, runOverride, onRunOverrideChange }: { models: ModelProfile[]; value: string; onChange: (value: string) => void | Promise<void>; agentName?: string; emptyLabel?: string; className?: string; ariaLabel?: string; title?: string; allowDefault?: boolean; usingDefault?: boolean; capabilities?: Record<string, ModelCapability>; runOverride?: AgentRunOverride; onRunOverrideChange?: (override: AgentRunOverride) => void | Promise<void> }) {
   const [open, setOpen] = useState(false);
   const [section, setSection] = useState<'root' | 'model' | 'reasoning' | 'speed'>('model');
-  const [narrowMenu, setNarrowMenu] = useState(() => window.innerWidth < 720);
+  const [saving, setSaving] = useState(false);
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
   const [submenuSide, setSubmenuSide] = useState<'left' | 'right'>('right');
   const [openAbove, setOpenAbove] = useState(true);
@@ -11462,12 +11575,6 @@ function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLab
   const speedLabel = selectedCapability?.serviceTiers.length
     ? selectedTier?.name || (runOverride?.speedMode === 'standard' ? '标准' : '跟随 Agent')
     : selectedCapability?.serviceTierStatus === 'unsupported' ? '该模型不支持' : '能力未确认';
-
-  useEffect(() => {
-    const updateNarrowMenu = () => setNarrowMenu(window.innerWidth < 720);
-    window.addEventListener('resize', updateNarrowMenu);
-    return () => window.removeEventListener('resize', updateNarrowMenu);
-  }, []);
 
   const positionMenu = useCallback(() => {
     const trigger = rootRef.current?.getBoundingClientRect();
@@ -11519,17 +11626,34 @@ function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLab
     setOpen((current) => !current);
   }
 
+  async function commitChoice(action: () => void | Promise<void>, closeAfterSave = false) {
+    if (saving) return;
+    setSaving(true);
+    try {
+      await action();
+      if (closeAfterSave) setOpen(false);
+    } catch {
+      // The persisted state remains visible; users can select again after a transient failure.
+    } finally {
+      setSaving(false);
+    }
+  }
+
   function chooseModel(nextValue: string) {
-    onChange(nextValue);
-    if (!advanced) setOpen(false);
+    void commitChoice(() => onChange(nextValue), !advanced);
+  }
+
+  function chooseRunOverride(nextOverride: AgentRunOverride) {
+    if (!onRunOverrideChange) return;
+    void commitChoice(() => onRunOverrideChange(nextOverride));
   }
 
   const modelPanel = (
     <section className="provider-model-subpanel provider-model-list-panel">
-      <header><button type="button" onClick={() => setSection('root')} aria-label="返回"><ArrowLeft size={15} /></button><strong>模型</strong></header>
+      <header><button type="button" onClick={() => setSection('root')} disabled={saving} aria-label="返回"><ArrowLeft size={15} /></button><strong>模型</strong></header>
       <div className="provider-model-scroll">
         {allowDefault && (
-          <button type="button" className={`provider-model-follow-default ${usingDefault ? 'selected' : ''}`} onClick={() => chooseModel('')} title="默认模型变化时同步更新">
+          <button type="button" className={`provider-model-follow-default ${usingDefault ? 'selected' : ''}`} onClick={() => chooseModel('')} disabled={saving} title="默认模型变化时同步更新">
             <span>跟随 Agent 默认模型</span>{usingDefault && <Check size={14} aria-hidden="true" />}
           </button>
         )}
@@ -11539,7 +11663,7 @@ function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLab
             <div>{modelNamesForProvider(provider).map((modelName) => {
               const itemValue = modelChoiceValue(provider, modelName);
               const isSelected = selected.value === itemValue;
-              return <button type="button" className={isSelected ? 'selected' : ''} key={itemValue} onClick={() => chooseModel(itemValue)}><span>{modelName}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>;
+              return <button type="button" className={isSelected ? 'selected' : ''} key={itemValue} onClick={() => chooseModel(itemValue)} disabled={saving}><span>{modelName}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>;
             })}</div>
           </section>
         )) : <span className="provider-model-empty">{emptyLabel}</span>}
@@ -11549,162 +11673,32 @@ function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLab
 
   const reasoningPanel = (
     <section className="provider-model-subpanel">
-      <header><button type="button" onClick={() => setSection('root')} aria-label="返回"><ArrowLeft size={15} /></button><strong>推理强度</strong></header>
+      <header><button type="button" onClick={() => setSection('root')} disabled={saving} aria-label="返回"><ArrowLeft size={15} /></button><strong>推理强度</strong></header>
       <div className="provider-setting-options">
-        <button className={!runOverride?.reasoningEffort ? 'selected' : ''} onClick={() => onRunOverrideChange?.({ ...runOverride, reasoningEffort: undefined })} title="不发送推理强度覆盖参数"><span>跟随 Agent</span>{!runOverride?.reasoningEffort && <Check size={14} aria-hidden="true" />}</button>
-        {(selectedCapability?.reasoningEfforts || []).map((effort) => { const isSelected = runOverride?.reasoningEffort === effort; return <button className={isSelected ? 'selected' : ''} key={effort} onClick={() => onRunOverrideChange?.({ ...runOverride, reasoningEffort: effort })}><span>{reasoningLabels[effort] || effort}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>; })}
+        <button className={!runOverride?.reasoningEffort ? 'selected' : ''} onClick={() => chooseRunOverride({ ...runOverride, reasoningEffort: undefined })} disabled={saving} title="不发送推理强度覆盖参数"><span>跟随 Agent</span>{!runOverride?.reasoningEffort && <Check size={14} aria-hidden="true" />}</button>
+        {(selectedCapability?.reasoningEfforts || []).map((effort) => { const isSelected = runOverride?.reasoningEffort === effort; return <button className={isSelected ? 'selected' : ''} key={effort} onClick={() => chooseRunOverride({ ...runOverride, reasoningEffort: effort })} disabled={saving}><span>{reasoningLabels[effort] || effort}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>; })}
       </div>
     </section>
   );
 
   const speedPanel = (
     <section className="provider-model-subpanel">
-      <header><button type="button" onClick={() => setSection('root')} aria-label="返回"><ArrowLeft size={15} /></button><strong>速度</strong></header>
+      <header><button type="button" onClick={() => setSection('root')} disabled={saving} aria-label="返回"><ArrowLeft size={15} /></button><strong>速度</strong></header>
       <div className="provider-setting-options">
-        <button className={!runOverride?.speedMode ? 'selected' : ''} onClick={() => onRunOverrideChange?.({ ...runOverride, speedMode: undefined })} title="不发送速度覆盖参数"><span>跟随 Agent</span>{!runOverride?.speedMode && <Check size={14} aria-hidden="true" />}</button>
-        <button className={runOverride?.speedMode === 'standard' ? 'selected' : ''} onClick={() => onRunOverrideChange?.({ ...runOverride, speedMode: 'standard' })}><span>标准</span>{runOverride?.speedMode === 'standard' && <Check size={14} aria-hidden="true" />}</button>
-        {(selectedCapability?.serviceTiers || []).map((tier) => { const isSelected = runOverride?.speedMode === tier.id || runOverride?.speedMode === 'fast'; return <button className={isSelected ? 'selected' : ''} key={tier.id} onClick={() => onRunOverrideChange?.({ ...runOverride, speedMode: tier.id })} title={tier.billingNotice || tier.description || tier.name}><span>{tier.name}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>; })}
+        <button className={!runOverride?.speedMode ? 'selected' : ''} onClick={() => chooseRunOverride({ ...runOverride, speedMode: undefined })} disabled={saving} title="不发送速度覆盖参数"><span>跟随 Agent</span>{!runOverride?.speedMode && <Check size={14} aria-hidden="true" />}</button>
+        <button className={runOverride?.speedMode === 'standard' ? 'selected' : ''} onClick={() => chooseRunOverride({ ...runOverride, speedMode: 'standard' })} disabled={saving}><span>标准</span>{runOverride?.speedMode === 'standard' && <Check size={14} aria-hidden="true" />}</button>
+        {(selectedCapability?.serviceTiers || []).map((tier) => { const isSelected = runOverride?.speedMode === tier.id || runOverride?.speedMode === 'fast'; return <button className={isSelected ? 'selected' : ''} key={tier.id} onClick={() => chooseRunOverride({ ...runOverride, speedMode: tier.id })} disabled={saving} title={tier.billingNotice || tier.description || tier.name}><span>{tier.name}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>; })}
       </div>
     </section>
   );
 
   const rootPanel = advanced ? (
     <section className="provider-model-root-panel">
-      <button type="button" className={section === 'model' ? 'active' : ''} onClick={() => setSection('model')}><span>模型</span><em>{selectedLabel}</em><ChevronRight size={14} /></button>
-      <button type="button" className={section === 'reasoning' ? 'active' : ''} onClick={() => setSection('reasoning')} disabled={!selectedCapability?.reasoning} title={selectedCapability?.reasoning ? '调整当前运行的推理强度' : selectedCapability?.reasoningStatus === 'unsupported' ? '该模型不支持' : '能力未确认'}><span>推理强度</span><em>{selectedCapability?.reasoning ? reasoningLabel : selectedCapability?.reasoningStatus === 'unsupported' ? '不支持' : '未确认'}</em><ChevronRight size={14} /></button>
-      <button type="button" className={section === 'speed' ? 'active' : ''} onClick={() => setSection('speed')} disabled={!selectedCapability?.serviceTiers.length} title={speedLabel}><span>速度</span><em>{selectedCapability?.serviceTiers.length ? speedLabel : selectedCapability?.serviceTierStatus === 'unsupported' ? '不支持' : '未确认'}</em><ChevronRight size={14} /></button>
+      <button type="button" className={section === 'model' ? 'active' : ''} onClick={() => setSection('model')} disabled={saving}><span>模型</span><em>{selectedLabel}</em><ChevronRight size={14} /></button>
+      <button type="button" className={section === 'reasoning' ? 'active' : ''} onClick={() => setSection('reasoning')} disabled={saving || !selectedCapability?.reasoning} title={selectedCapability?.reasoning ? '调整当前运行的推理强度' : selectedCapability?.reasoningStatus === 'unsupported' ? '该模型不支持' : '能力未确认'}><span>推理强度</span><em>{selectedCapability?.reasoning ? reasoningLabel : selectedCapability?.reasoningStatus === 'unsupported' ? '不支持' : '未确认'}</em><ChevronRight size={14} /></button>
+      <button type="button" className={section === 'speed' ? 'active' : ''} onClick={() => setSection('speed')} disabled={saving || !selectedCapability?.serviceTiers.length} title={speedLabel}><span>速度</span><em>{selectedCapability?.serviceTiers.length ? speedLabel : selectedCapability?.serviceTierStatus === 'unsupported' ? '不支持' : '未确认'}</em><ChevronRight size={14} /></button>
     </section>
   ) : null;
-
-  if (advanced && !narrowMenu) {
-    const reasoningAvailable = Boolean(selectedCapability?.reasoning);
-    const speedAvailable = Boolean(selectedCapability?.serviceTiers.length);
-    const reasoningStatus = reasoningAvailable
-      ? reasoningLabel
-      : selectedCapability?.reasoningStatus === 'unsupported' ? '不支持' : '未确认';
-    const compactSpeedLabel = speedAvailable ? speedLabel : selectedCapability?.serviceTierStatus === 'unsupported' ? '不支持' : '未确认';
-
-    return (
-      <AppMenu open={open} onOpenChange={setOpen} modal={false}>
-        <div className={`provider-model-picker ${className}`} ref={rootRef}>
-          <AppMenuTrigger asChild>
-            <button type="button" className="provider-model-trigger" disabled={!providers.length} aria-label={ariaLabel} title={title}>
-              {agentName && <span>{agentName}</span>}
-              <strong>{selectedLabel}{runOverride?.reasoningEffort ? ` · ${reasoningLabel}` : ''}</strong>
-              <ChevronDown size={14} />
-            </button>
-          </AppMenuTrigger>
-        </div>
-        <AppMenuContent className="provider-model-menu-v2" side="top" align="end" aria-label={title}>
-          <AppMenuSub>
-            <AppMenuSubTrigger className="provider-model-root-option">
-              <span>模型</span>
-              <em>{selectedLabel}</em>
-            </AppMenuSubTrigger>
-            <AppMenuSubContent className="provider-model-submenu-v2 provider-model-list-menu-v2" sideOffset={8} alignOffset={-5} aria-label="选择模型">
-              {allowDefault && (
-                <AppMenuItem className={usingDefault ? 'provider-model-option selected' : 'provider-model-option'} onSelect={() => chooseModel('')}>
-                  <span>跟随 Agent 默认模型</span>
-                  {usingDefault && <Check size={14} aria-hidden="true" />}
-                </AppMenuItem>
-              )}
-              {providers.length ? providers.map((provider) => (
-                <div className="provider-model-menu-group" role="group" aria-label={provider.name || provider.provider} key={provider.id}>
-                  <span className="provider-model-menu-group-label">{provider.name || provider.provider}</span>
-                  {modelNamesForProvider(provider).map((modelName) => {
-                    const itemValue = modelChoiceValue(provider, modelName);
-                    const isSelected = selected.value === itemValue;
-                    return (
-                      <AppMenuItem className={isSelected ? 'provider-model-option selected' : 'provider-model-option'} key={itemValue} onSelect={() => chooseModel(itemValue)}>
-                        <span>{modelName}</span>
-                        {isSelected && <Check size={14} aria-hidden="true" />}
-                      </AppMenuItem>
-                    );
-                  })}
-                </div>
-              )) : <span className="provider-model-empty">{emptyLabel}</span>}
-            </AppMenuSubContent>
-          </AppMenuSub>
-
-          <AppMenuSub>
-            <AppMenuSubTrigger
-              className="provider-model-root-option"
-              disabled={!reasoningAvailable}
-              title={reasoningAvailable ? '调整当前运行的推理强度' : reasoningStatus}
-            >
-              <span>推理强度</span>
-              <em>{reasoningStatus}</em>
-            </AppMenuSubTrigger>
-            <AppMenuSubContent className="provider-model-submenu-v2" sideOffset={8} alignOffset={-5} aria-label="选择推理强度">
-              <AppMenuItem
-                className={!runOverride?.reasoningEffort ? 'provider-model-option selected' : 'provider-model-option'}
-                onSelect={() => onRunOverrideChange?.({ ...runOverride, reasoningEffort: undefined })}
-                title="不发送推理强度覆盖参数"
-              >
-                <span>跟随 Agent</span>
-                {!runOverride?.reasoningEffort && <Check size={14} aria-hidden="true" />}
-              </AppMenuItem>
-              {(selectedCapability?.reasoningEfforts || []).map((effort) => {
-                const isSelected = runOverride?.reasoningEffort === effort;
-                return (
-                  <AppMenuItem
-                    className={isSelected ? 'provider-model-option selected' : 'provider-model-option'}
-                    key={effort}
-                    onSelect={() => onRunOverrideChange?.({ ...runOverride, reasoningEffort: effort })}
-                  >
-                    <span>{reasoningLabels[effort] || effort}</span>
-                    {isSelected && <Check size={14} aria-hidden="true" />}
-                  </AppMenuItem>
-                );
-              })}
-            </AppMenuSubContent>
-          </AppMenuSub>
-
-          <AppMenuSub>
-            <AppMenuSubTrigger
-              className="provider-model-root-option"
-              disabled={!speedAvailable}
-              title={speedAvailable ? '调整当前运行的速度' : compactSpeedLabel}
-            >
-              <span>速度</span>
-              <em>{compactSpeedLabel}</em>
-            </AppMenuSubTrigger>
-            <AppMenuSubContent className="provider-model-submenu-v2" sideOffset={8} alignOffset={-5} aria-label="选择速度">
-              <AppMenuItem
-                className={!runOverride?.speedMode ? 'provider-model-option selected' : 'provider-model-option'}
-                onSelect={() => onRunOverrideChange?.({ ...runOverride, speedMode: undefined })}
-                title="不发送速度覆盖参数"
-              >
-                <span>跟随 Agent</span>
-                {!runOverride?.speedMode && <Check size={14} aria-hidden="true" />}
-              </AppMenuItem>
-              <AppMenuItem
-                className={runOverride?.speedMode === 'standard' ? 'provider-model-option selected' : 'provider-model-option'}
-                onSelect={() => onRunOverrideChange?.({ ...runOverride, speedMode: 'standard' })}
-              >
-                <span>标准</span>
-                {runOverride?.speedMode === 'standard' && <Check size={14} aria-hidden="true" />}
-              </AppMenuItem>
-              {(selectedCapability?.serviceTiers || []).map((tier) => {
-                const isSelected = runOverride?.speedMode === tier.id || runOverride?.speedMode === 'fast';
-                return (
-                  <AppMenuItem
-                    className={isSelected ? 'provider-model-option selected' : 'provider-model-option'}
-                    key={tier.id}
-                    onSelect={() => onRunOverrideChange?.({ ...runOverride, speedMode: tier.id })}
-                    title={tier.billingNotice || tier.description || tier.name}
-                  >
-                    <span>{tier.name}</span>
-                    {isSelected && <Check size={14} aria-hidden="true" />}
-                  </AppMenuItem>
-                );
-              })}
-            </AppMenuSubContent>
-          </AppMenuSub>
-        </AppMenuContent>
-      </AppMenu>
-    );
-  }
 
   return (
     <div className={`provider-model-picker ${className}`} ref={rootRef}>
@@ -12684,7 +12678,7 @@ function pricingSourceLabel(source?: string) {
   return '未计价';
 }
 
-function OrgPage({ agents, models, hermesRuntime, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreate, profileEditor, defaultAgentId, onUpdateDefaultAgent, onRefreshHermesRuntime, onStartProfileGateway }: {
+function OrgPage({ agents, models, hermesRuntime, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreate, profileEditor, defaultAgentId, onUpdateDefaultAgent, onRefreshHermesRuntime, onStartProfileGateway, onStopProfileGateway }: {
   agents: Agent[];
   models: ModelProfile[];
   hermesRuntime: HermesRuntimeStatus | null;
@@ -12699,6 +12693,7 @@ function OrgPage({ agents, models, hermesRuntime, selectedOrgAgentId, onSelectAg
   onUpdateDefaultAgent: (agentId: string) => void;
   onRefreshHermesRuntime: () => Promise<unknown>;
   onStartProfileGateway: (profileName: string) => Promise<void>;
+  onStopProfileGateway: (profileName: string) => Promise<void>;
 }) {
   const selectedAgent = agents.find((agent) => agent.id === selectedOrgAgentId) || agents[0] || null;
   return (
@@ -12715,7 +12710,7 @@ function OrgPage({ agents, models, hermesRuntime, selectedOrgAgentId, onSelectAg
           })}
           <button className="profile-card profile-card-add" onClick={onCreate}><span className="profile-add-icon"><Plus size={22} /></span><strong>新建 Agent</strong><small>创建新的 Hermes Profile</small><p>填写基础资料后，可在下方继续编辑笔记、用户画像和灵魂。</p></button>
         </div>
-        {selectedAgent && <AgentProfileDetail agent={selectedAgent} models={models} gateway={gatewayForAgent(selectedAgent, hermesRuntime)} onChanged={onProfilesChanged} onUpdateAgent={onUpdateAgent} onDelete={() => onDeleteAgent(selectedAgent.id)} profileEditor={profileEditor} onRefreshHermesRuntime={onRefreshHermesRuntime} onStartProfileGateway={onStartProfileGateway} />}
+        {selectedAgent && <AgentProfileDetail agent={selectedAgent} models={models} gateway={gatewayForAgent(selectedAgent, hermesRuntime)} onChanged={onProfilesChanged} onUpdateAgent={onUpdateAgent} onDelete={() => onDeleteAgent(selectedAgent.id)} profileEditor={profileEditor} onRefreshHermesRuntime={onRefreshHermesRuntime} onStartProfileGateway={onStartProfileGateway} onStopProfileGateway={onStopProfileGateway} />}
       </div>
     </section>
   );
@@ -12742,7 +12737,7 @@ function RuntimePulse({ gateway }: { gateway: HermesRuntimeStatus['gateways'][nu
   return <span className={`runtime-pulse ${gateway?.error ? 'error' : gateway?.running ? 'running' : 'idle'}`} aria-label={gatewayStatusLabel(gateway)} title={gatewayStatusLabel(gateway)} />;
 }
 
-type GatewayOperation = 'refreshing' | 'starting' | 'restarting';
+type GatewayOperation = 'refreshing' | 'starting' | 'restarting' | 'stopping';
 
 function AgentRuntimePolicyPanel({ agent, onUpdateAgent }: { agent: Agent; onUpdateAgent: (agentId: string, payload: Partial<Agent>) => Promise<void> }) {
   const [runtimes, setRuntimes] = useState<RuntimeDefinition[]>(runtimeSeed);
@@ -12804,7 +12799,7 @@ function AgentRuntimePolicyPanel({ agent, onUpdateAgent }: { agent: Agent; onUpd
   </section>;
 }
 
-function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, onDelete, profileEditor, onRefreshHermesRuntime, onStartProfileGateway }: { agent: Agent; models: ModelProfile[]; gateway: HermesRuntimeStatus['gateways'][number] | null; onChanged: () => Promise<void>; onUpdateAgent: (agentId: string, payload: Partial<Agent>) => Promise<void>; onDelete: () => void; profileEditor: ProfileEditorControls; onRefreshHermesRuntime: () => Promise<unknown>; onStartProfileGateway: (profileName: string) => Promise<void> }) {
+function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, onDelete, profileEditor, onRefreshHermesRuntime, onStartProfileGateway, onStopProfileGateway }: { agent: Agent; models: ModelProfile[]; gateway: HermesRuntimeStatus['gateways'][number] | null; onChanged: () => Promise<void>; onUpdateAgent: (agentId: string, payload: Partial<Agent>) => Promise<void>; onDelete: () => Promise<void>; profileEditor: ProfileEditorControls; onRefreshHermesRuntime: () => Promise<unknown>; onStartProfileGateway: (profileName: string) => Promise<void>; onStopProfileGateway: (profileName: string) => Promise<void> }) {
   const [tab, setTab] = useState<'notes' | 'user' | 'soul'>('notes');
   const [avatarError, setAvatarError] = useState('');
   const [avatarSaving, setAvatarSaving] = useState(false);
@@ -12816,6 +12811,7 @@ function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, 
   const [nameSaving, setNameSaving] = useState(false);
   const [nameError, setNameError] = useState('');
   const [runtimeConfigOpen, setRuntimeConfigOpen] = useState(false);
+  const [deleting, setDeleting] = useState(false);
   const [gatewayOperations, setGatewayOperations] = useState<Record<string, GatewayOperation>>({});
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const tabs = [
@@ -12827,7 +12823,7 @@ function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, 
   const runtimeProfileName = agent.profileName || agent.id;
   const gatewayOperation = gatewayOperations[runtimeProfileName] || null;
   const gatewayBusy = Boolean(gatewayOperation);
-  const gatewayOperationLabel = gatewayOperation === 'refreshing' ? '正在刷新网关状态' : gatewayOperation === 'restarting' ? '网关重启中' : gatewayOperation === 'starting' ? '网关启动中' : '';
+  const gatewayOperationLabel = gatewayOperation === 'refreshing' ? '正在刷新网关状态' : gatewayOperation === 'restarting' ? '网关重启中' : gatewayOperation === 'starting' ? '网关启动中' : gatewayOperation === 'stopping' ? '网关停止中' : '';
   useEffect(() => {
     setNameDraft(agent.name);
     setNameEditing(false);
@@ -12929,6 +12925,29 @@ function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, 
       });
     }
   }
+  async function stopGateway() {
+    if (gatewayBusy) return;
+    setGatewayOperations((current) => ({ ...current, [runtimeProfileName]: 'stopping' }));
+    try {
+      await onStopProfileGateway(runtimeProfileName);
+      await onRefreshHermesRuntime();
+    } finally {
+      setGatewayOperations((current) => {
+        const next = { ...current };
+        delete next[runtimeProfileName];
+        return next;
+      });
+    }
+  }
+  async function deleteAgent() {
+    if (deleting) return;
+    setDeleting(true);
+    try {
+      await onDelete();
+    } finally {
+      setDeleting(false);
+    }
+  }
   return (
     <section className="agent-profile-detail">
       <div className="agent-profile-hero">
@@ -12965,7 +12984,7 @@ function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, 
           {nameError && <div className="inline-error">{nameError}</div>}
           {avatarError && <div className="inline-error">{avatarError}</div>}
         </div>
-        <button className="secondary-btn danger-btn agent-delete-btn" onClick={onDelete}><Trash2 size={15} />删除</button>
+        <button className="secondary-btn danger-btn agent-delete-btn" onClick={() => void deleteAgent()} disabled={deleting}><Trash2 size={15} />{deleting ? '正在删除' : '删除'}</button>
       </div>
       <div className="agent-profile-toolbar">
         <div className="agent-tabs">
@@ -13001,6 +13020,7 @@ function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, 
         <div>
           <button className="secondary-btn" onClick={() => void refreshGatewayStatus()} disabled={gatewayBusy}>{gatewayOperation === 'refreshing' ? '刷新中' : '刷新状态'}</button>
           <button className="secondary-btn" onClick={() => void startGateway()} disabled={gatewayBusy}>{gatewayOperation === 'restarting' ? '重启中' : gatewayOperation === 'starting' ? '启动中' : gateway?.running ? '重启网关' : '启动网关'}</button>
+          <button className="secondary-btn" onClick={() => void stopGateway()} disabled={gatewayBusy || !agent.profileName}>{gatewayOperation === 'stopping' ? '停止中' : '停止网关'}</button>
         </div>
       </div>
       <div className={runtimeConfigOpen ? 'agent-runtime-config open' : 'agent-runtime-config'}>
@@ -15648,8 +15668,9 @@ function StreamRevealQaPage() {
 }
 
 function ManagedWebAuthGate({ children }: { children: React.ReactNode }) {
-  const [state, setState] = useState<'loading' | 'ready' | 'login'>('loading');
+  const [state, setState] = useState<'loading' | 'ready' | 'login' | 'change-password'>('loading');
   const [password, setPassword] = useState('');
+  const [defaultPasswordHint, setDefaultPasswordHint] = useState('');
   const [error, setError] = useState('');
   const [submitting, setSubmitting] = useState(false);
 
@@ -15659,7 +15680,9 @@ function ManagedWebAuthGate({ children }: { children: React.ReactNode }) {
       .then(async (response) => {
         if (!response.ok) throw new Error('无法读取 Web 服务登录状态。');
         const status = await response.json();
-        if (!cancelled) setState(status.managed && !status.authenticated ? 'login' : 'ready');
+        if (cancelled) return;
+        setDefaultPasswordHint(status.defaultPasswordHint || '');
+        setState(status.managed && !status.authenticated ? 'login' : status.passwordChangeRequired ? 'change-password' : 'ready');
       })
       .catch((reason) => {
         if (!cancelled) {
@@ -15684,7 +15707,8 @@ function ManagedWebAuthGate({ children }: { children: React.ReactNode }) {
       const result = await response.json().catch(() => ({}));
       if (!response.ok) throw new Error(result.error || '登录失败。');
       setPassword('');
-      setState('ready');
+      setDefaultPasswordHint('');
+      setState(result.passwordChangeRequired ? 'change-password' : 'ready');
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -15694,6 +15718,7 @@ function ManagedWebAuthGate({ children }: { children: React.ReactNode }) {
 
   if (state === 'ready') return <>{children}</>;
   if (state === 'loading') return <main className="managed-web-auth-shell" aria-label="正在连接 Frakio Work" />;
+  if (state === 'change-password') return <FirstManagedPasswordChange onComplete={() => setState('ready')} />;
   return (
     <main className="managed-web-auth-shell">
       <form className="managed-web-auth-card" onSubmit={submit}>
@@ -15712,12 +15737,52 @@ function ManagedWebAuthGate({ children }: { children: React.ReactNode }) {
             onChange={(event) => setPassword(event.target.value)}
           />
         </label>
+        {defaultPasswordHint && <small className="managed-web-default-password">首次登录密码：<strong>{defaultPasswordHint}</strong>。登录后需要立即修改。</small>}
         {error ? <p className="managed-web-auth-error" role="alert">{error}</p> : null}
         <button type="submit" disabled={!password || submitting}>{submitting ? '正在登录…' : '进入工作台'}</button>
         <small>仅限可信局域网使用。不要把此 HTTP 地址直接暴露到公网。</small>
       </form>
     </main>
   );
+}
+
+function FirstManagedPasswordChange({ onComplete }: { onComplete: () => void }) {
+  const [password, setPassword] = useState('');
+  const [confirmation, setConfirmation] = useState('');
+  const [error, setError] = useState('');
+  const [saving, setSaving] = useState(false);
+  async function submit(event: React.FormEvent) {
+    event.preventDefault();
+    setError('');
+    if (password.length < 10) return setError('新密码至少需要 10 个字符。');
+    if (password !== confirmation) return setError('两次输入的新密码不一致。');
+    setSaving(true);
+    try {
+      await fetch('/api/session');
+      const response = await fetch('/api/auth/password', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json', 'X-Frakio-Request': '1' },
+        body: JSON.stringify({ password }),
+      });
+      const result = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(result.error || '密码修改失败。');
+      onComplete();
+    } catch (reason) {
+      setError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setSaving(false);
+    }
+  }
+  return <main className="managed-web-auth-shell">
+    <form className="managed-web-auth-card" onSubmit={submit}>
+      <img src={frakioBrandLogoUrl} alt="" />
+      <div><h1>设置管理员密码</h1><p>首次登录需要设置新的管理员密码。</p></div>
+      <label><span>新密码</span><input autoFocus type="password" autoComplete="new-password" value={password} onChange={(event) => setPassword(event.target.value)} /></label>
+      <label><span>确认新密码</span><input type="password" autoComplete="new-password" value={confirmation} onChange={(event) => setConfirmation(event.target.value)} /></label>
+      {error ? <p className="managed-web-auth-error" role="alert">{error}</p> : null}
+      <button type="submit" disabled={!password || !confirmation || saving}>{saving ? '正在保存…' : '保存并进入工作台'}</button>
+    </form>
+  </main>;
 }
 
 const richContentQa = new URLSearchParams(window.location.search).get('rich-content-qa') === '1';
