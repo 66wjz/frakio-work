@@ -66,6 +66,10 @@ export function createLocalSecurity({ port, development = false, managedWeb = fa
 
   function protect(req, res, next) {
     if (!originAllowed(req.get('Origin'), req.get('Host'))) return res.status(403).json({ error: 'Origin is not allowed.' });
+    // Managed Web has its own authenticated, SameSite-protected admin session.
+    // Requiring the desktop-only local session here can reject the forced first
+    // password change before the workbench is reachable.
+    if (managedWeb) return next();
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
     const cookies = parseCookies(req.get('Cookie'));
     if (req.get('X-Frakio-Request') !== '1' || cookies.frakio_session !== sessionToken) {
