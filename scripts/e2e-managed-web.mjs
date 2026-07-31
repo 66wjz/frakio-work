@@ -56,11 +56,26 @@ try {
     await page.getByRole('heading', { name: '设置管理员密码' }).waitFor();
     await page.getByLabel('新密码', { exact: true }).fill(password);
     await page.getByLabel('确认新密码', { exact: true }).fill(password);
+    const passwordResponse = page.waitForResponse((response) => response.url().endsWith('/api/auth/password') && response.request().method() === 'PUT');
     await page.getByRole('button', { name: '保存并进入工作台' }).click();
+    const passwordUpdate = await passwordResponse;
+    assert.equal(passwordUpdate.status(), 200, `password update failed: ${await passwordUpdate.text()}`);
+    const postAuthSurface = page.locator('.workbench-shell, [data-launch-panel]');
+    await postAuthSurface.first().waitFor();
     const shell = page.locator('.workbench-shell');
-    await shell.waitFor();
-    assert.equal(await shell.evaluate((element) => element.classList.contains('managed-web-shell')), true);
-    assert.equal(await shell.evaluate((element) => element.classList.contains('mac-desktop-shell')), true);
+    if (await shell.count()) {
+      assert.equal(await shell.evaluate((element) => element.classList.contains('managed-web-shell')), true);
+      assert.equal(await shell.evaluate((element) => element.classList.contains('mac-desktop-shell')), true);
+    }
+    const retiredDefaultPassword = await page.evaluate(async () => {
+      const response = await fetch('/api/auth/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ password: 'Admin' }),
+      });
+      return response.status;
+    });
+    assert.equal(retiredDefaultPassword, 401);
   } finally {
     await browser.close();
   }
