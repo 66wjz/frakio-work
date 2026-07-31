@@ -5374,6 +5374,12 @@ async function stopLegacyProfileGateway(profileName) {
 
 async function stopOrVerifyProfileGateway(profileName) {
   if (hermesReservedProfileNames.has(slug(profileName))) return stopLegacyProfileGateway(profileName);
+  const gateway = await profileGatewayStatus(profileName);
+  if (!gateway.known) {
+    // Without a Hermes runtime, a profile can still be safely removed when its
+    // own legacy PID marker confirms that no gateway process is present.
+    return stopLegacyProfileGateway(profileName);
+  }
   return stopProfileGateway(profileName);
 }
 

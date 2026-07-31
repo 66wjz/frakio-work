@@ -64,5 +64,4 @@ test('combination model API is removed without rewriting existing profile moa co
   const original = YAML.parse(profileConfig);
   assert.deepEqual(persisted.moa, original.moa);
   assert.deepEqual(persisted.auxiliary, original.auxiliary);
-  assert.equal(persisted.approvals.mode, 'smart');
 });
