@@ -177,7 +177,7 @@ try {
       await errorPanel.waitFor({ state: 'visible', timeout: 5000 });
       assert.match(await errorPanel.textContent(), /Hermes Runtime 未能启动/);
       await errorPanel.getByRole('button', { name: '打开 Hermes Agent 设置' }).click();
-      await page.getByRole('heading', { name: 'Hermes Agent' }).waitFor({ state: 'visible', timeout: 5000 });
+      await page.getByRole('heading', { name: 'Hermes 集成' }).waitFor({ state: 'visible', timeout: 5000 });
     }
     await context.close();
   }
