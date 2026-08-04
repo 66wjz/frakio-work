@@ -22,11 +22,15 @@
 
 </div>
 
-Frakio Work 升级为多平台的多Agent协作工作台，内置 Hermes Agent 和 Pi 双重内核，可在各个 Agent 中自由切换内核，如果要用一句话来形容 Frakio，那就是在一个对话房间中，享受丝滑无缝的多 Agent 协作
+## 核心理念
 
-关于 Frakio Work 的起因是：我个人使用过网络上的各种 Hermes Web Ui 以及第三方客户端，但都无法满足我的协作需求，当然还有界面说实话挺丑的，并不满足我的审美，所以这也是 Frakio Work 诞生的起因。
+Frakio Work 是一个多 harness 的协同工作台。你可以打造一支拥有各自性格的 Agent 团队，让它们在一个会话窗口中自然协作，并拥有长期进化型记忆，为 OPC 模式提供支撑。
 
-# 沟通群
+Frakio Work 的核心理念是缝合。感谢以下开源项目提供的参考，排名不分先后：Hermes Agent、Hermes Studio、Pi、Codex、Craft Agent、Cindy、QM、SuperConductor、Orca。
+
+![Frakio Work 工作台总览](docs/assets/readme/workbench-overview.png)
+
+## 沟通群
 
 <img src="docs/assets/readme/qrcode_1784508398505.jpg" alt="Frakio Work 沟通群" width="200">
 
@@ -84,14 +88,6 @@ npm run dev
 
 
 ---
-
-## 核心理念
-
-Frakio Work 是一个多 harness 的协同工作台。你可以打造一支拥有各自性格的 Agent 团队，让它们在一个会话窗口中自然协作，并拥有长期进化型记忆，为 OPC 模式提供支撑。
-
-Frakio Work 的核心理念是缝合。感谢以下开源项目提供的参考，排名不分先后：Hermes Agent、Hermes Studio、Pi、Codex、Craft Agent、Cindy、QM、SuperConductor、Orca。
-
-![Frakio Work 工作台总览](docs/assets/readme/workbench-overview.png)
 
 ## 功能特性
 
