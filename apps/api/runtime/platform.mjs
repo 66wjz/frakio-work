@@ -41,6 +41,7 @@ export function createRuntimePlatform({ store, registry, packageManager = null, 
   const sessions = createSessionManager({ store });
   const events = createEventJournal({ store, onAppend: onHostEvent });
   const skillProjector = createSkillProjector({ store, adapters: adapterMap });
+  let terminalTransition = null;
 
   async function capability(runtimeId, { refresh = false, binding = null } = {}) {
     const cached = binding?.runtimeBuildId
@@ -515,6 +516,12 @@ export function createRuntimePlatform({ store, registry, packageManager = null, 
       : event.type === 'run.failed' ? 'failed'
         : event.type === 'run.cancelled' ? 'cancelled' : '';
     if (terminalStatus) {
+      if (terminalTransition) {
+        const before = store.getRun(runId);
+        const terminalRun = terminalTransition(runId, terminalStatus, { error: event.payload?.error || '', nativeTerminal: true });
+        if (!before || before.status === terminalRun?.status) return events.eventsAfter(runId, 0, 2000).find((item) => item.type === event.type) || null;
+        return events.eventsAfter(runId, 0, 2000).find((item) => item.type === event.type) || null;
+      }
       const terminal = store.transitionRunTerminal(runId, terminalStatus, { error: event.payload?.error || '' });
       if (!terminal.changed) return events.eventsAfter(runId, 0, 2000).find((item) => item.type === event.type) || null;
     }
@@ -553,20 +560,26 @@ export function createRuntimePlatform({ store, registry, packageManager = null, 
     markStarted,
     receipt,
     ingestEvent,
-    recoverAfterRestart() {
+    setTerminalTransition(handler) {
+      terminalTransition = typeof handler === 'function' ? handler : null;
+    },
+    async recoverAfterRestart() {
       const recoveredSessions = sessions.reconcileAfterRestart();
-      const recoveredRuns = [];
+      const inspectedRuns = [];
       for (const status of ['queued', 'starting', 'running', 'interrupting', 'waiting_approval']) {
         for (const run of store.listRuns({ status, limit: 1000 })) {
-          const error = status === 'starting'
-            ? 'The application stopped before the native runtime accepted this Run.'
-            : 'The application stopped while this Run was active.';
-          const terminal = store.transitionRunTerminal(run.id, status === 'interrupting' ? 'cancelled' : 'failed', { error });
-          if (terminal.changed) events.append({ runId: run.id, type: status === 'interrupting' ? 'run.cancelled' : 'run.failed', payload: { error, recoveredAfterRestart: true }, nativeEventKey: `restart:${run.id}` });
-          recoveredRuns.push(terminal.run);
+          const session = store.getSession(run.sessionId);
+          const adapter = adapterMap.get(run.runtimeId);
+          let inspection;
+          try {
+            inspection = await adapter?.inspectRun?.({ session, run, afterNativeSequence: run.lastNativeEventSequence });
+          } catch (error) {
+            inspection = { status: 'unknown', error: error?.message || String(error) };
+          }
+          inspectedRuns.push({ run, session, inspection: inspection || { status: 'unknown' } });
         }
       }
-      return { sessions: recoveredSessions, runs: recoveredRuns };
+      return { sessions: recoveredSessions, runs: inspectedRuns };
     },
     switchRuntime({ threadId, agentId, workspaceId = '', fromRuntimeId = '', toRuntimeId }) {
       const source = fromRuntimeId ? store.findSession({ threadId, agentId, runtimeId: fromRuntimeId, workspaceId, laneType: 'chat', laneId: threadId }) : null;

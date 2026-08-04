@@ -54,6 +54,7 @@ import { extractChatGptAccountId, fetchCodexOAuthCatalog } from './lib/oauth-pro
 import { runtimeStep, summarizeRuntimeAutoStart } from './lib/runtime-autostart.mjs';
 import { appendCollaborationEvent, boardLifecycle, collaborationEventsAfter, diffCollaborationPlans, normalizeThreadCollaboration, taskStatusEvent, validateCollaborationPlan } from './lib/collaboration.mjs';
 import { applyRunActivityToTranscript, normalizeRunActivityItem, normalizeRunTranscripts, summarizeActivityItems, upsertRunTranscript } from './lib/run-activity.mjs';
+import { appendRuntimeOutputDelta, createRuntimeOutputState } from './lib/runtime-output-state.mjs';
 import { migrateSpaceTheme, SPACE_THEME_RENDER_VERSION } from './lib/space-theme.mjs';
 import { normalizeWorkbenchSidebarPatch, normalizeWorkbenchSidebarSettings } from './lib/sidebar-width.mjs';
 import { resolveRichPreviewFile } from './lib/rich-preview.mjs';
@@ -284,6 +285,20 @@ const hermesRuntimeAdapter = {
     const started = await requestHermesBridge(input.brokerRequest, input.brokerOptions || { timeoutMs: 120000, retryMs: 5000 });
     return { nativeRunId: started.run_id || '', nativeSessionId: started.session_id || input.nativeSessionId || '', brokerResult: started };
   },
+  async inspectRun({ run }) {
+    const nativeRunId = String(run?.nativeRunId || '');
+    if (!nativeRunId) return { status: 'missing' };
+    try {
+      const output = await requestHermesBridge({ action: 'get_output', run_id: nativeRunId, cursor: 0, event_cursor: 0 }, { timeoutMs: 10000, retryMs: 1000 });
+      if (output?.done || output?.completed || output?.status === 'completed') return { status: 'terminal', runStatus: 'completed' };
+      if (output?.failed || output?.status === 'failed') return { status: 'terminal', runStatus: 'failed', error: output?.error || '' };
+      if (output?.cancelled || output?.status === 'cancelled') return { status: 'terminal', runStatus: 'cancelled' };
+      return { status: 'running' };
+    } catch (error) {
+      const message = String(error?.message || error || '');
+      return /not found|unknown run|不存在/i.test(message) ? { status: 'missing', error: message } : { status: 'unknown', error: message };
+    }
+  },
   async steer(sessionId, message) {
     return requestHermesBridge({ action: 'steer', session_id: sessionId, message }, { timeoutMs: 10000, retryMs: 1000 });
   },
@@ -376,11 +391,13 @@ const runtimePlatform = createRuntimePlatform({
   onHostEvent: (event) => {
     const run = runtimeStore.getRun(event.runId);
     if (!run || !['context.compaction.started', 'context.compaction.completed', 'context.compaction.failed', 'session.checkpoint.created', 'run.interrupting', 'run.completed', 'run.failed', 'run.cancelled'].includes(event.type)) return;
+    if (event.payload?.nativeTerminal && ['run.completed', 'run.failed', 'run.cancelled'].includes(event.type)) return;
     emitHermesTurnEvent(run.threadId, run.turnId, {
       event: event.type,
       runId: run.id,
       sessionId: run.sessionId,
       runtimeId: run.runtimeId,
+      runtimeCursor: event.cursor,
       ...(event.payload || {}),
     });
   },
@@ -15448,13 +15465,13 @@ app.delete('/api/workspaces/:id', async (req, res) => {
     return { deletedWorkspaceId: workspace.id, deletedThreadIds };
   });
   if (!result) return res.status(404).json({ error: 'Workspace 不存在。' });
+  await cancelRuntimeRunsForRemovedThreads(result.deletedThreadIds);
   await attachmentStore.removeForThreads(result.deletedThreadIds);
   res.json({ ok: true, ...result });
 });
 
 app.get('/api/conversations', async (_req, res) => {
   const state = await readState();
-  await healStaleRunningThreads(state);
   const conversations = state.threads
     .filter((thread) => thread.mode === 'direct' && !thread.archivedAt)
     .sort(sortPinnedThenUpdated)
@@ -15516,7 +15533,6 @@ app.post('/api/conversations', async (req, res) => {
 
 app.get('/api/workspaces/:id/threads', async (req, res) => {
   const state = await readState();
-  await healStaleRunningThreads(state);
   const threads = state.threads
     .filter((thread) => thread.workspaceId === req.params.id && thread.mode !== 'direct' && !thread.archivedAt)
     .sort(sortPinnedThenUpdated)
@@ -15802,10 +15818,118 @@ app.post('/api/workspaces/:id/threads', async (req, res) => {
 
 app.get('/api/threads/:id', async (req, res) => {
   const state = await readState();
-  await healStaleRunningThreads(state);
   const thread = state.threads.find((item) => item.id === req.params.id);
   if (!thread) return res.status(404).json({ error: '会话不存在。' });
   res.json({ thread });
+});
+
+function publicThreadRunState(run) {
+  if (!run) return null;
+  const status = run.status === 'starting' ? 'queued'
+    : run.status === 'waiting_approval' ? 'running'
+      : run.status;
+  return {
+    runId: run.id,
+    nativeRunId: run.nativeRunId || '',
+    sessionId: run.sessionId || '',
+    turnId: run.turnId || '',
+    agentId: run.agentId || '',
+    runtimeId: run.runtimeId || '',
+    status,
+    phase: run.status === 'waiting_approval' ? 'approval' : run.phase || 'model',
+    startedAt: run.startedAt || null,
+    finishedAt: run.completedAt || null,
+    error: run.error || '',
+  };
+}
+
+function resolveHostRun(runId) {
+  const value = String(runId || '').trim();
+  if (!value) return null;
+  const direct = runtimeStore.getRun(value);
+  if (direct) return direct;
+  return runtimeStore.listRuns({ limit: 1000 }).find((run) => run.nativeRunId === value) || null;
+}
+
+function latestThreadRun(thread) {
+  const runs = runtimeStore.listRuns({ threadId: thread.id, limit: 1000 })
+    .filter((run) => !run.metadata?.taskDispatch);
+  const activeStatuses = new Set(['queued', 'starting', 'running', 'waiting_approval', 'interrupting']);
+  const active = runs.find((run) => activeStatuses.has(run.status)
+    && (!thread.activeRunTurnId || run.turnId === thread.activeRunTurnId));
+  if (active) return active;
+  if (thread.runStatus === 'running') {
+    const matching = runs.find((run) => run.turnId === thread.activeRunTurnId
+      || run.nativeRunId === thread.activeRunId
+      || run.id === thread.activeRunId);
+    if (matching) return matching;
+  }
+  return runs[0] || null;
+}
+
+const activeRuntimeRunStatuses = new Set(['queued', 'starting', 'running', 'waiting_approval', 'interrupting']);
+
+function listActiveRuntimeRuns() {
+  return [...activeRuntimeRunStatuses]
+    .flatMap((status) => runtimeStore.listRuns({ status, limit: 1000 }))
+    .filter((run, index, runs) => runs.findIndex((candidate) => candidate.id === run.id) === index);
+}
+
+async function cancelRuntimeRunsForRemovedThreads(threadIds, errorCode = 'THREAD_REMOVED') {
+  const removed = new Set((threadIds || []).map(String).filter(Boolean));
+  if (!removed.size) return [];
+  const cancelled = [];
+  for (const run of listActiveRuntimeRuns().filter((candidate) => removed.has(candidate.threadId))) {
+    const session = runtimeStore.getSession(run.sessionId);
+    const adapter = runtimePlatform.adapters.get(run.runtimeId);
+    await Promise.resolve(adapter?.cancel?.(session?.id || run.sessionId, {
+      runId: run.id,
+      nativeSessionId: session?.nativeSessionId || run.nativeRunId || '',
+    })).catch(() => {});
+    cancelled.push(runtimeHostController.finish(run.id, 'cancelled', {
+      error: '会话已删除，运行已取消。',
+      metadata: { errorCode },
+    }));
+  }
+  return cancelled;
+}
+
+async function reconcileOrphanRuntimeRuns(state) {
+  const visibleThreadIds = new Set((state.threads || []).map((thread) => thread.id));
+  const orphanThreadIds = Array.from(new Set(listActiveRuntimeRuns()
+    .filter((run) => !visibleThreadIds.has(run.threadId))
+    .map((run) => run.threadId)));
+  return cancelRuntimeRunsForRemovedThreads(orphanThreadIds, 'THREAD_REMOVED_ON_RECOVERY');
+}
+
+app.get('/api/threads/:id/runs/active', async (req, res) => {
+  const state = await readState();
+  const thread = state.threads.find((item) => item.id === req.params.id);
+  if (!thread) return res.status(404).json({ error: '会话不存在。' });
+  const run = latestThreadRun(thread);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ threadId: thread.id, run: publicThreadRunState(run), presentation: run ? runtimeStore.getRunPresentation(run.id) : null, thread });
+});
+
+app.get('/api/runs/active', async (req, res) => {
+  const state = await readState();
+  const workspaceId = String(req.query.workspaceId || '').trim();
+  const activeStatuses = new Set(['queued', 'starting', 'running', 'waiting_approval', 'interrupting']);
+  const visibleThreads = new Map((state.threads || [])
+    .filter((thread) => !thread.archivedAt && (!workspaceId || thread.workspaceId === workspaceId))
+    .map((thread) => [thread.id, thread]));
+  const runs = [];
+  for (const thread of visibleThreads.values()) {
+    const run = latestThreadRun(thread);
+    if (!run || !activeStatuses.has(run.status)) continue;
+    runs.push({
+      threadId: thread.id,
+      run: publicThreadRunState(run),
+      presentation: runtimeStore.getRunPresentation(run.id),
+    });
+  }
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({ runs });
 });
 
 app.post('/api/threads/:threadId/branches', async (req, res) => {
@@ -16416,6 +16540,7 @@ app.delete('/api/threads/:id', async (req, res) => {
     return { ok: true, deletedThreadId: thread.id, nextThreadId: nextThread?.id || null, nextThread: nextThread ? summarizeThread(nextThread, state) : null };
   });
   if (!result) return res.status(404).json({ error: '会话不存在。' });
+  await cancelRuntimeRunsForRemovedThreads([result.deletedThreadId]);
   await attachmentStore.removeForThreads([result.deletedThreadId]);
   res.json(result);
 });
@@ -17462,13 +17587,13 @@ async function repairRichContentFinalOutput(threadId, runId, output) {
   return { output, repaired: false, issues: validation.issues };
 }
 
-async function completeHermesRunFromOutput(threadId, runId, output, usage, res, outputState = {}) {
+async function completeHermesRunFromOutput(threadId, runId, output, usage, res, outputState = {}, options = {}) {
   const telemetryState = await readState().catch(() => null);
   const telemetryThread = telemetryState?.threads?.find((item) => item.id === threadId);
   const structuredPlanSubmitted = (telemetryThread?.planSessions || []).some((plan) => (plan.drafts || []).some((draft) => draft.submittedByRunId === runId));
   if (!output && !structuredPlanSubmitted) {
     const error = 'Hermes 已结束但没有返回最终文本。';
-    const thread = await failHermesRun(threadId, runId, error, 'Hermes Agent 返回空回复');
+    const thread = await failHermesRun(threadId, runId, error, 'Hermes Agent 返回空回复', { nativeTerminal: true });
     captureTelemetry('agent_run_failed', { stage: 'empty_output', error_code: 'empty_output' });
     writeHermesRunSse(res, { event: 'run.failed', runId, error, thread, timestamp: Date.now() / 1000 });
     return { completed: true, failed: true, thread };
@@ -17478,11 +17603,20 @@ async function completeHermesRunFromOutput(threadId, runId, output, usage, res, 
   const streamedText = String(outputState.text || '');
   const contentOffsetShift = streamedText.length - trimLeadingBlankLines(streamedText).length;
   const thread = await appendHermesRunResult(threadId, finalOutput, runId, usage || {}, contentOffsetShift);
+  const hostRun = resolveHostRun(runId);
+  if (hostRun) {
+    runtimeHostController.finish(hostRun.id, 'completed', { nativeTerminal: Boolean(options.nativeTerminal) });
+    runtimePlatform.receipt(hostRun.id, { status: 'completed' });
+  }
   const completedMessage = thread?.messages?.find((message) => message.externalRunId === runId);
+  const presentation = hostRun ? runtimeStore.getRunPresentation(hostRun.id) : null;
   captureTelemetry('agent_run_completed', runTelemetryProperties(telemetryThread));
   writeHermesRunSse(res, {
     event: 'run.completed',
     runId,
+    hostRunId: hostRun?.id || runId,
+    threadId,
+    runtimeCursor: presentation?.lastCursor || 0,
     output: finalOutput,
     richContentRepaired: richResult.repaired,
     thread,
@@ -17496,34 +17630,38 @@ async function completeHermesRunFromOutput(threadId, runId, output, usage, res, 
   return { completed: true, failed: false, thread };
 }
 
-async function failHermesRunFromChunk(threadId, runId, errorMessage, res, outputState = {}) {
+async function failHermesRunFromChunk(threadId, runId, errorMessage, res, outputState = {}, options = {}) {
   const details = hermesRuntimeErrorDetails(errorMessage || 'Hermes Bridge run failed', 'default');
   const event = { event: 'run.failed', runId, error: enrichMissingExecutableError(errorMessage || 'Hermes Bridge run failed', 'default'), details, timestamp: Date.now() / 1000 };
-  let telemetryProperties = {};
-  const thread = await updateState(async (state) => {
-    const currentThread = state.threads.find((item) => item.id === threadId);
-    telemetryProperties = runTelemetryProperties(currentThread);
-    if (!currentThread) return null;
-    markPlanRunFailed(currentThread, runId, event.error);
-    currentThread.runStatus = 'failed';
-    await updateThreadChangeSet(currentThread, runId, 'failed');
-    finalizeStoredRunTranscript(currentThread, runId, 'failed', outputState.text || '');
-    finishStoredModelRun(state, { runId, threadId, status: 'failed', error: event.error });
-    finishActiveRunGroupChild(currentThread, runId, 'failed');
-    clearHermesRunState(currentThread);
-    currentThread.workflowState = mergeWorkflowStep(closeOpenWorkflowSteps(currentThread.workflowState || [], 'failed'), stepFromHermesEvent(event));
-    currentThread.workflow = currentThread.workflowState.map((step) => step.title);
-    currentThread.updatedAt = now();
-    return currentThread;
+  const telemetryState = await readState().catch(() => null);
+  const telemetryThread = telemetryState?.threads?.find((item) => item.id === threadId);
+  const thread = await failHermesRun(threadId, runId, event.error, 'Hermes Agent 运行失败', {
+    nativeTerminal: Boolean(options.nativeTerminal),
+    partialOutput: outputState.text || '',
   });
   if (thread) event.thread = thread;
-  captureTelemetry('agent_run_failed', { stage: 'runtime', error_code: telemetryErrorCode({ message: errorMessage }), ...telemetryProperties });
-  writeHermesRunSse(res, event);
+  const hostRun = resolveHostRun(runId);
+  const presentation = hostRun ? runtimeStore.getRunPresentation(hostRun.id) : null;
+  captureTelemetry('agent_run_failed', { stage: 'runtime', error_code: telemetryErrorCode({ message: errorMessage }), ...runTelemetryProperties(telemetryThread) });
+  writeHermesRunSse(res, { ...event, hostRunId: hostRun?.id || runId, threadId, runtimeCursor: presentation?.lastCursor || 0 });
   return { completed: true, failed: true, thread };
 }
 
 async function processHermesBridgeChunk({ threadId, runId, chunk, res, outputState }) {
+  const hostRun = resolveHostRun(runId);
+  const hostRunId = hostRun?.id || runId;
   let sawStreamDeltaEvent = false;
+  const ingestBridgeEvent = (event, nativeEventKey = '', nativeSequence = 0) => {
+    const canonical = event.event === 'tool.running' ? 'tool.started'
+      : event.event === 'approval.request' ? 'approval.requested'
+        : event.event === 'approval.responded' ? 'approval.resolved' : event.event;
+    if (!['run.started', 'message.delta', 'reasoning.summary', 'context.compaction.started', 'context.compaction.completed', 'context.compaction.failed', 'tool.started', 'tool.updated', 'tool.completed', 'approval.requested', 'approval.resolved', 'run.interrupting', 'run.completed', 'run.failed', 'run.cancelled'].includes(canonical)) return null;
+    return runtimePlatform.ingestEvent(hostRunId, {
+      event: { type: canonical, payload: { ...event, hostRunId, runtimeId: 'hermes' } },
+      nativeEventKey: nativeEventKey || event.id || event.eventId || '',
+      nativeSequence,
+    });
+  };
   for (const rawEvent of Array.isArray(chunk.events) ? chunk.events : []) {
     const rawName = String(rawEvent?.event || rawEvent?.type || '');
     if (rawName === 'bridge.compression.requested' && rawEvent.request_id) {
@@ -17579,55 +17717,42 @@ async function processHermesBridgeChunk({ threadId, runId, chunk, res, outputSta
       const delta = String(rawEvent.delta || '');
       if (delta) {
         outputState.text += delta;
+        const nativeSequence = Number(rawEvent.sequence || rawEvent.cursor || 0) || 0;
+        const nativeEventKey = String(rawEvent.id || rawEvent.event_id || (nativeSequence ? `hermes:${hostRunId}:${nativeSequence}` : `hermes-delta:${hostRunId}:${outputState.text.length}`));
+        const storedEvent = ingestBridgeEvent({ event: 'message.delta', runId, hostRunId, runtimeId: 'hermes', delta }, nativeEventKey, nativeSequence);
         outputState.activityGroupOpen = false;
-        writeHermesRunSse(res, { event: 'message.delta', runId, delta, timestamp: Date.now() / 1000 });
+        writeHermesRunSse(res, { event: 'message.delta', runId, hostRunId, runtimeId: 'hermes', delta, runtimeCursor: storedEvent?.cursor || 0, timestamp: Date.now() / 1000 });
       }
       continue;
     }
 
     const event = normalizeHermesBridgeChunkEvent(rawEvent);
+    if (event.event === 'run.completed') {
+      const output = extractHermesOutput(outputState.text, event.output, chunk.output, chunk.result);
+      return completeHermesRunFromOutput(threadId, runId, output, event.usage || chunk.usage || {}, res, outputState, { nativeTerminal: true });
+    }
+
+    if (event.event === 'run.failed') {
+      return failHermesRunFromChunk(threadId, runId, event.error || 'Hermes Bridge run failed', res, outputState, { nativeTerminal: true });
+    }
+
+    if (event.event === 'run.cancelled') {
+      const thread = await cancelHermesRun(threadId, runId, event.error || '', { nativeTerminal: true, partialOutput: outputState.text || '' });
+      const currentHostRun = resolveHostRun(runId);
+      const presentation = currentHostRun ? runtimeStore.getRunPresentation(currentHostRun.id) : null;
+      writeHermesRunSse(res, { ...event, runId, hostRunId: currentHostRun?.id || runId, threadId, thread, runtimeCursor: presentation?.lastCursor || 0 });
+      return { completed: true, failed: false, thread };
+    }
+
+    const storedEvent = ingestBridgeEvent(event, rawEvent.id || rawEvent.event_id || '', rawEvent.sequence || rawEvent.cursor || 0);
     if (event.event === 'message.delta') {
       const delta = String(event.delta || '');
       if (delta) {
         outputState.text += delta;
         outputState.activityGroupOpen = false;
-        writeHermesRunSse(res, { ...event, runId: event.runId || runId, delta });
+        writeHermesRunSse(res, { ...event, runId: event.runId || runId, delta, runtimeCursor: storedEvent?.cursor || 0 });
       }
       continue;
-    }
-
-    if (event.event === 'run.completed') {
-      const output = extractHermesOutput(outputState.text, event.output, chunk.output, chunk.result);
-      return completeHermesRunFromOutput(threadId, runId, output, event.usage || chunk.usage || {}, res, outputState);
-    }
-
-    if (event.event === 'run.failed' || event.event === 'run.cancelled') {
-      let telemetryProperties = {};
-      const thread = await updateState(async (state) => {
-        const currentThread = state.threads.find((item) => item.id === threadId);
-        telemetryProperties = runTelemetryProperties(currentThread);
-        if (!currentThread) return null;
-        markPlanRunFailed(currentThread, runId, event.error || (event.event === 'run.cancelled' ? '用户已停止运行。' : 'Plan run failed.'));
-        currentThread.runStatus = event.event === 'run.failed' ? 'failed' : 'idle';
-        await updateThreadChangeSet(currentThread, runId, event.event === 'run.failed' ? 'failed' : 'cancelled');
-        finalizeStoredRunTranscript(currentThread, runId, event.event === 'run.failed' ? 'failed' : 'cancelled', outputState.text || '');
-        finishStoredModelRun(state, {
-          runId,
-          threadId,
-          status: event.event === 'run.failed' ? 'failed' : 'cancelled',
-          error: event.error || (event.event === 'run.cancelled' ? '用户已停止运行。' : ''),
-        });
-        finishActiveRunGroupChild(currentThread, runId, event.event === 'run.failed' ? 'failed' : 'cancelled');
-        clearHermesRunState(currentThread);
-        currentThread.workflowState = closeOpenWorkflowSteps(currentThread.workflowState || [], event.event === 'run.failed' ? 'failed' : 'completed');
-        currentThread.workflow = currentThread.workflowState.map((step) => step.title);
-        currentThread.updatedAt = now();
-        return currentThread;
-      });
-      if (thread) event.thread = thread;
-      if (event.event === 'run.failed') captureTelemetry('agent_run_failed', { stage: 'runtime', error_code: 'bridge_failed', ...telemetryProperties });
-      writeHermesRunSse(res, event);
-      return { completed: true, failed: event.event === 'run.failed', thread };
     }
 
     const outgoingEvent = event.event === 'tool.running' || event.event === 'tool.completed'
@@ -17636,7 +17761,7 @@ async function processHermesBridgeChunk({ threadId, runId, chunk, res, outputSta
     if (outgoingEvent.event !== 'tool.running' && outgoingEvent.event !== 'tool.completed') {
       await mergeHermesWorkflowEvent(threadId, outgoingEvent);
     }
-    if (outgoingEvent.event !== 'agent.event' || outgoingEvent.title || outgoingEvent.detail) writeHermesRunSse(res, outgoingEvent);
+    if (outgoingEvent.event !== 'agent.event' || outgoingEvent.title || outgoingEvent.detail) writeHermesRunSse(res, { ...outgoingEvent, runtimeCursor: storedEvent?.cursor || 0 });
     if (outgoingEvent.event === 'tool.completed') {
       void refreshRunningChangeSet(threadId, runId).then((changeSet) => {
         if (changeSet) writeHermesRunSse(res, { event: 'changes.updated', changeSet, runId, timestamp: Date.now() / 1000 });
@@ -17647,16 +17772,22 @@ async function processHermesBridgeChunk({ threadId, runId, chunk, res, outputSta
   if (chunk.delta && !sawStreamDeltaEvent) {
     const delta = String(chunk.delta || '');
     outputState.text += delta;
+    const nativeSequence = Number(chunk.event_cursor || chunk.cursor || 0) || 0;
+    const storedEvent = ingestBridgeEvent(
+      { event: 'message.delta', runId, hostRunId, runtimeId: 'hermes', delta },
+      nativeSequence ? `hermes:${hostRunId}:${nativeSequence}` : `hermes-delta:${hostRunId}:${outputState.text.length}`,
+      nativeSequence,
+    );
     outputState.activityGroupOpen = false;
-    writeHermesRunSse(res, { event: 'message.delta', runId, delta, timestamp: Date.now() / 1000 });
+    writeHermesRunSse(res, { event: 'message.delta', runId, hostRunId, runtimeId: 'hermes', delta, runtimeCursor: storedEvent?.cursor || 0, timestamp: Date.now() / 1000 });
   }
 
   if (chunk.done || ['complete', 'completed', 'interrupted', 'error', 'failed'].includes(String(chunk.status || '').toLowerCase())) {
     const status = String(chunk.status || '').toLowerCase();
     const terminalError = hermesChunkError(chunk);
-    if (status === 'error' || status === 'failed' || terminalError) return failHermesRunFromChunk(threadId, runId, terminalError || 'Hermes Bridge run failed', res, outputState);
+    if (status === 'error' || status === 'failed' || terminalError) return failHermesRunFromChunk(threadId, runId, terminalError || 'Hermes Bridge run failed', res, outputState, { nativeTerminal: true });
     const output = extractHermesOutput(outputState.text, chunk.output, chunk.result);
-    return completeHermesRunFromOutput(threadId, runId, output, chunk.usage || {}, res, outputState);
+    return completeHermesRunFromOutput(threadId, runId, output, chunk.usage || {}, res, outputState, { nativeTerminal: true });
   }
 
   return { completed: false };
@@ -17680,9 +17811,10 @@ async function appendHermesRunResult(threadId, output, runId, usage = {}, conten
   const finalOutput = trimLeadingBlankLines(output);
   const runStartedAtMs = Date.parse(thread.activeRunStartedAt || '');
   const processingDurationMs = Number.isFinite(runStartedAtMs) ? Math.max(1, Date.now() - runStartedAtMs) : undefined;
-  const storedRuntimeRun = runtimeStore.getRun(runId);
-  if (storedRuntimeRun && storedRuntimeRun.status !== 'completed') runtimeStore.updateRun(runId, { status: 'completed' });
-  const runReceipt = storedRuntimeRun ? runtimePlatform.receipt(runId, { status: 'completed' }) : null;
+  const storedRuntimeRun = resolveHostRun(runId);
+  // Host Run Controller already committed the terminal state before the
+  // persisted reply is assembled. Never infer terminal state from thread output.
+  const runReceipt = storedRuntimeRun ? runtimePlatform.receipt(storedRuntimeRun.id, { status: 'completed' }) : null;
   const submittedPlan = (thread.planSessions || []).find((plan) => (plan.drafts || []).some((draft) => draft.submittedByRunId === runId));
   const executingPlan = (thread.planSessions || []).find((plan) => plan.executionRunId === runId);
   if (finalOutput && !submittedPlan && !(thread.messages || []).some((message) => message.externalRunId === runId)) {
@@ -17878,10 +18010,11 @@ function markPlanRunFailed(thread, runId, errorMessage) {
   return plan;
 }
 
-async function failHermesRun(threadId, runId, errorMessage, title = 'Hermes Agent 运行失败') {
-  if (runtimeStore.getRun(runId)) {
-    runtimeStore.updateRun(runId, { status: 'failed', error: errorMessage });
-    runtimePlatform.receipt(runId, { status: 'failed', error: errorMessage });
+async function failHermesRun(threadId, runId, errorMessage, title = 'Hermes Agent 运行失败', options = {}) {
+  const hostRun = resolveHostRun(runId);
+  if (hostRun) {
+    runtimeHostController.finish(hostRun.id, 'failed', { error: errorMessage, nativeTerminal: Boolean(options.nativeTerminal) });
+    runtimePlatform.receipt(hostRun.id, { status: 'failed', error: errorMessage });
   }
   return updateState(async (state) => {
     const thread = state.threads.find((item) => item.id === threadId);
@@ -17889,10 +18022,37 @@ async function failHermesRun(threadId, runId, errorMessage, title = 'Hermes Agen
     markPlanRunFailed(thread, runId, errorMessage);
     thread.runStatus = 'failed';
     await updateThreadChangeSet(thread, runId, 'failed');
+    finalizeStoredRunTranscript(thread, runId, 'failed', options.partialOutput || '');
     finishStoredModelRun(state, { runId, threadId, status: 'failed', error: errorMessage });
     finishActiveRunGroupChild(thread, runId, 'failed');
     clearHermesRunState(thread);
     thread.workflowState = mergeWorkflowStep(closeOpenWorkflowSteps(thread.workflowState || [], 'failed'), { title, status: 'failed', source: 'run', detail: String(errorMessage || '').slice(0, 200), updatedAt: now() });
+    thread.workflow = thread.workflowState.map((step) => step.title);
+    thread.updatedAt = now();
+    return thread;
+  });
+}
+
+async function cancelHermesRun(threadId, runId, errorMessage = '', options = {}) {
+  const hostRun = resolveHostRun(runId);
+  if (hostRun) {
+    runtimeHostController.finish(hostRun.id, 'cancelled', {
+      error: errorMessage,
+      nativeTerminal: Boolean(options.nativeTerminal),
+      metadata: options.metadata || {},
+    });
+    runtimePlatform.receipt(hostRun.id, { status: 'cancelled', error: errorMessage });
+  }
+  return updateState(async (state) => {
+    const thread = state.threads.find((item) => item.id === threadId);
+    if (!thread) return null;
+    thread.runStatus = 'idle';
+    await updateThreadChangeSet(thread, runId, 'cancelled');
+    finalizeStoredRunTranscript(thread, runId, 'cancelled', options.partialOutput || '');
+    finishStoredModelRun(state, { runId, threadId, status: 'cancelled', error: errorMessage });
+    finishActiveRunGroupChild(thread, runId, 'cancelled');
+    clearHermesRunState(thread);
+    thread.workflowState = closeOpenWorkflowSteps(thread.workflowState || [], 'completed');
     thread.workflow = thread.workflowState.map((step) => step.title);
     thread.updatedAt = now();
     return thread;
@@ -17940,33 +18100,6 @@ function hermesTurnEventSink(threadId, turnId, runMeta = {}) {
         if (!line.startsWith('data:')) continue;
         try {
           const event = JSON.parse(line.slice(5).trim());
-          const runtimeRunId = event.runId || runMeta.runId || '';
-          const storedRun = runtimeRunId ? runtimeStore.getRun(runtimeRunId) : null;
-          if (storedRun) {
-            const canonicalType = event.event === 'tool.running' ? 'tool.started'
-              : event.event === 'approval.request' ? 'approval.requested'
-                : event.event === 'approval.responded' ? 'approval.resolved'
-                  : event.event;
-            if (['run.started', 'message.delta', 'reasoning.summary', 'context.usage.updated', 'context.compaction.started', 'context.compaction.completed', 'context.compaction.failed', 'session.checkpoint.created', 'session.recovered', 'run.interrupting', 'tool.started', 'tool.updated', 'tool.completed', 'approval.requested', 'approval.resolved', 'artifact.published', 'run.completed', 'run.failed', 'run.cancelled'].includes(canonicalType)) {
-              runtimePlatform.ingestEvent(runtimeRunId, {
-                event: { type: canonicalType, payload: event },
-                nativeEventKey: event.id || event.eventId || '',
-                nativeSequence: event.sequence || event.cursor || 0,
-              });
-            }
-            if (event.event === 'run.completed') {
-              runtimeStore.updateRun(runtimeRunId, { status: 'completed' });
-              runtimePlatform.receipt(runtimeRunId, { status: 'completed' });
-            }
-            if (event.event === 'run.failed') {
-              runtimeStore.updateRun(runtimeRunId, { status: 'failed', error: event.error || '' });
-              runtimePlatform.receipt(runtimeRunId, { status: 'failed', error: event.error || '' });
-            }
-            if (event.event === 'run.cancelled') {
-              runtimeStore.updateRun(runtimeRunId, { status: 'cancelled' });
-              runtimePlatform.receipt(runtimeRunId, { status: 'cancelled' });
-            }
-          }
           emitHermesTurnEvent(threadId, turnId, {
             ...event,
             runId: event.runId || runMeta.runId || '',
@@ -18380,6 +18513,8 @@ async function healStaleRunningThreads(state) {
       }
       continue;
     }
+    const storedRun = resolveHostRun(activeRunId);
+    if (storedRun && (storedRun.runtimeId !== 'hermes' || ['completed', 'failed', 'cancelled'].includes(storedRun.status))) continue;
     const turnId = thread.activeRunTurnId || thread.activeRunGroup?.turnId || activeRunId;
     const runMeta = thread.activeRunGroup?.activeRuns?.[activeRunId] || {};
     ensureHermesRunConsumer({
@@ -19030,6 +19165,11 @@ async function processCanonicalRuntimeEvent(runId, event) {
     workScheduler.heartbeat(run.metadata.taskId);
   }
   if (type === 'message.delta') {
+    // External runtimes may alternate text and tools. Preserve the text cursor so
+    // the activity transcript can be rendered at the point work actually occurred.
+    const outputState = externalRunOutputStates.get(runId) || createRuntimeOutputState();
+    appendRuntimeOutputDelta(outputState, payload.delta);
+    externalRunOutputStates.set(runId, outputState);
     emitHermesTurnEvent(run.threadId, run.turnId, {
       event: 'message.delta',
       runId,
@@ -19053,7 +19193,7 @@ async function processCanonicalRuntimeEvent(runId, event) {
   }
   if (type === 'tool.started' || type === 'tool.updated' || type === 'tool.completed') {
     const mapped = type === 'tool.completed' ? 'tool.completed' : 'tool.running';
-    const outputState = piRunOutputStates.get(runId) || { text: '', activityGroupOpen: false };
+    const outputState = externalRunOutputStates.get(runId) || createRuntimeOutputState();
     const outgoing = await recordRunActivity(run.threadId, runId, outputState, {
       event: mapped,
       tool: payload.toolName,
@@ -19063,7 +19203,7 @@ async function processCanonicalRuntimeEvent(runId, event) {
       is_error: payload.isError,
       timestamp: Date.now() / 1000,
     });
-    piRunOutputStates.set(runId, outputState);
+    externalRunOutputStates.set(runId, outputState);
     emitHermesTurnEvent(run.threadId, run.turnId, {
       ...outgoing,
       runId,
@@ -19094,7 +19234,6 @@ async function processCanonicalRuntimeEvent(runId, event) {
       );
       if (resolved?.status !== 'unsupported') return;
     }
-    runtimeStore.updateRun(runId, { status: 'waiting_approval' });
     emitHermesTurnEvent(run.threadId, run.turnId, {
       event: 'approval.request',
       runId,
@@ -19113,7 +19252,6 @@ async function processCanonicalRuntimeEvent(runId, event) {
     return;
   }
   if (type === 'approval.resolved') {
-    runtimeStore.updateRun(runId, { status: 'running' });
     emitHermesTurnEvent(run.threadId, run.turnId, {
       event: 'approval.responded',
       runId,
@@ -19128,7 +19266,6 @@ async function processCanonicalRuntimeEvent(runId, event) {
     return;
   }
   if (type === 'run.completed') {
-    runtimeStore.updateRun(runId, { status: 'completed' });
     runtimePlatform.receipt(runId, { status: 'completed' });
     const completedTask = run.metadata?.taskId ? runtimeStore.getWorkTask(run.metadata.taskId) : null;
     if (completedTask) {
@@ -19187,12 +19324,11 @@ async function processCanonicalRuntimeEvent(runId, event) {
       await collectHermesMentionRoutes(run.threadId, run.turnId, runId);
       void startNextHermesMentionRoute(run.threadId, run.turnId);
     }
-    piRunOutputStates.delete(runId);
+    externalRunOutputStates.delete(runId);
     emitHermesTurnEvent(run.threadId, run.turnId, { event: 'run.completed', runId, sessionId: run.sessionId, agentId: run.agentId, output: payload.output || '', runtimeId, thread });
     return;
   }
   if (type === 'run.failed' || type === 'run.cancelled') {
-    runtimeStore.updateRun(runId, { status: type === 'run.failed' ? 'failed' : 'cancelled', error: payload.error || '' });
     runtimePlatform.receipt(runId, { status: type === 'run.failed' ? 'failed' : 'cancelled', error: payload.error || '' });
     const failedTask = run.metadata?.taskId ? runtimeStore.getWorkTask(run.metadata.taskId) : null;
     if (failedTask) {
@@ -19234,13 +19370,13 @@ async function processCanonicalRuntimeEvent(runId, event) {
         current.updatedAt = now();
         return current;
       });
-    piRunOutputStates.delete(runId);
+    externalRunOutputStates.delete(runId);
     emitHermesTurnEvent(run.threadId, run.turnId, { event: type, runId, sessionId: run.sessionId, agentId: run.agentId, runtimeId, error: payload.error || '', thread });
     emitHermesTurnEvent(run.threadId, run.turnId, { event: type === 'run.failed' ? 'turn.failed' : 'turn.cancelled', runId, sessionId: run.sessionId, agentId: run.agentId, runtimeId, error: payload.error || '', thread });
   }
 }
 
-const piRunOutputStates = new Map();
+const externalRunOutputStates = new Map();
 piBridge.on('event', ({ runId, event }) => {
   void processCanonicalRuntimeEvent(runId, event).catch((error) => console.warn('Pi event processing failed:', error?.message || error));
 });
@@ -19325,7 +19461,7 @@ async function startPiRunRequest(req, res) {
       runtimeStore.updateRun(createdRun.id, { metadata: { taskId, taskDispatch, worktreePath: workTask?.worktreePath || '' } });
     }
     if (!taskDispatch) {
-      const userMessage = { id: id('msg'), agentId: 'user', agentName: '你', role: 'Workspace Owner', content: message, attachments: attachmentMetadata.map(attachmentStore.publicAttachment), createdAt: now() };
+      const userMessage = { id: String(req.body?.clientMessageId || '').trim() || id('msg'), agentId: 'user', agentName: '你', role: 'Workspace Owner', content: message, attachments: attachmentMetadata.map(attachmentStore.publicAttachment), createdAt: now() };
       await attachmentStore.claim(attachmentMetadata, thread.id, userMessage.id);
       await attachRunMessageContext(thread, userMessage, resolvedMessageContext);
       thread.messages = [...(thread.messages || []), userMessage];
@@ -19435,7 +19571,7 @@ async function startPiRunRequest(req, res) {
       taskId,
     });
   } catch (error) {
-    if (createdRun) runtimeStore.updateRun(createdRun.id, { status: 'failed', error: error.message || String(error) });
+    if (createdRun) runtimeHostController.fail(createdRun, error);
     if (createdRun?.runtimeBuildId && ['PI_WORKER_STARTUP_FAILED', 'PI_WORKER_STARTUP_TIMEOUT'].includes(String(error?.code || ''))) {
       const activation = runtimeStore.getRuntimeActivation('pi');
       const failedPackage = runtimeStore.getRuntimePackage(createdRun.runtimeBuildId);
@@ -19544,7 +19680,7 @@ async function startExternalChannelRunRequest(req, res, { runtimeId: requestedRu
     }
     if (!taskDispatch) {
       const userMessage = {
-        id: id('msg'),
+        id: String(req.body?.clientMessageId || '').trim() || id('msg'),
         agentId: 'user',
         agentName: '你',
         role: 'Workspace Owner',
@@ -19656,7 +19792,7 @@ async function startExternalChannelRunRequest(req, res, { runtimeId: requestedRu
       taskId: workTask?.id || '',
     });
   } catch (error) {
-    if (createdRun) runtimeStore.updateRun(createdRun.id, { status: 'failed', error: error.message || String(error) });
+    if (createdRun) runtimeHostController.fail(createdRun, error);
     if (createdRun) {
       const run = runtimeStore.getRun(createdRun.id);
       const task = run?.metadata?.taskId ? runtimeStore.getWorkTask(run.metadata.taskId) : null;
@@ -19826,7 +19962,7 @@ async function startHermesRunRequest(req, res) {
       if (hasUnfinishedRoot) {
         const intervention = await queueWorkSteer(state, thread, workflow, { message: routingMessage, idempotencyKey: `run-steer:${turnId}`, actorAgentId: 'user' });
         if (intervention.queueStatus === 'delivered' || intervention.queueStatus === 'held') {
-          const userMessage = { id: id('msg'), agentId: 'user', agentName: '你', role: 'Workspace Owner', content: message, attachments: attachmentMetadata.map(attachmentStore.publicAttachment) };
+          const userMessage = { id: String(req.body?.clientMessageId || '').trim() || id('msg'), agentId: 'user', agentName: '你', role: 'Workspace Owner', content: message, attachments: attachmentMetadata.map(attachmentStore.publicAttachment) };
           await attachmentStore.claim(attachmentMetadata, thread.id, userMessage.id);
           await attachRunMessageContext(thread, userMessage, resolvedMessageContext);
           thread.messages = [...(thread.messages || []), userMessage];
@@ -19855,7 +19991,7 @@ async function startHermesRunRequest(req, res) {
       }
     }
     const sessionId = hermesAgentSessionId(thread, primaryAgent.id);
-    const userMessage = { id: id('msg'), agentId: 'user', agentName: '你', role: 'Workspace Owner', content: message, attachments: attachmentMetadata.map(attachmentStore.publicAttachment) };
+    const userMessage = { id: String(req.body?.clientMessageId || '').trim() || id('msg'), agentId: 'user', agentName: '你', role: 'Workspace Owner', content: message, attachments: attachmentMetadata.map(attachmentStore.publicAttachment) };
     const relayMessage = req.body?.sourceAgentId ? {
       id: id('msg'),
       agentId: String(req.body.sourceAgentId),
@@ -20119,6 +20255,7 @@ async function startHermesRunRequest(req, res) {
     captureMeaningfulActivity('agent_run_started');
     const responsePayload = {
       runId: started.run_id,
+      hostRunId: hermesRun.id,
       sessionId: started.session_id || sessionId,
       status: started.status || 'started',
       runtime: 'hermes-bridge',
@@ -20207,6 +20344,7 @@ function streamHermesTurnEvents(req, res, { turnId, runId = '' }) {
   });
   const runtime = turnRuntime(req.params.id, turnId);
   const requestedCursor = Math.max(0, Number(req.query.cursor || req.headers['last-event-id'] || 0) || 0);
+  const presentationCursor = Math.max(0, Number(req.query.presentationCursor || 0) || 0);
   const matches = (event) => !runId || event.runId === runId || event.event.startsWith('turn.');
   const send = (event) => {
     if (!matches(event) || res.writableEnded) return;
@@ -20219,7 +20357,16 @@ function streamHermesTurnEvents(req, res, { turnId, runId = '' }) {
   const replayEvents = runtime.events.length === 0
     ? runtimeStore.listRuns({ threadId: req.params.id, limit: 1000 })
       .filter((run) => run.turnId === turnId && (!runId || run.id === runId))
-      .flatMap((run) => runtimeStore.eventsAfter(run.id, requestedCursor, 2000).flatMap((event) => {
+      .flatMap((run) => {
+        const events = [];
+        let cursor = presentationCursor || requestedCursor;
+        for (;;) {
+          const page = runtimeStore.eventsAfter(run.id, cursor, 2000);
+          events.push(...page);
+          if (page.length < 2000) break;
+          cursor = page.at(-1).cursor;
+        }
+        return events.flatMap((event) => {
         const base = {
           event: event.type,
           runId: run.id,
@@ -20233,11 +20380,13 @@ function streamHermesTurnEvents(req, res, { turnId, runId = '' }) {
         if (event.type === 'run.failed') return [base, { ...base, event: 'turn.failed' }];
         if (event.type === 'run.cancelled') return [base, { ...base, event: 'turn.cancelled' }];
         return [base];
-      }))
+        });
+      })
       .sort((a, b) => a.cursor - b.cursor)
     : [];
   for (const event of [...replayEvents, ...runtime.events]) {
-    if (event.cursor > requestedCursor) send(event);
+    const newerThanPresentation = !presentationCursor || event.event.startsWith('turn.') || (Number(event.runtimeCursor || 0) > presentationCursor);
+    if (event.cursor > requestedCursor && newerThanPresentation) send(event);
     if (res.writableEnded) return;
   }
   if (runtime.completed) {
@@ -20258,7 +20407,11 @@ app.get('/api/threads/:id/turns/:turnId/events', async (req, res) => {
   const state = await readState();
   const thread = state.threads.find((item) => item.id === req.params.id);
   if (!thread) return res.status(404).json({ error: '会话不存在。' });
-  if (thread.activeRunGroup?.turnId !== req.params.turnId && !hermesTurnRuntime.has(`${req.params.id}:${req.params.turnId}`)) {
+  const storedTurnExists = runtimeStore.listRuns({ threadId: req.params.id, limit: 1000 })
+    .some((run) => run.turnId === req.params.turnId);
+  if (thread.activeRunGroup?.turnId !== req.params.turnId
+    && !hermesTurnRuntime.has(`${req.params.id}:${req.params.turnId}`)
+    && !storedTurnExists) {
     return res.status(404).json({ error: '运行轮次不存在。' });
   }
   return streamHermesTurnEvents(req, res, { turnId: req.params.turnId });
@@ -20335,11 +20488,22 @@ app.post('/api/threads/:id/runs/:runId/stop', async (req, res) => {
   try {
     const storedRuntimeRun = runtimeStore.getRun(req.params.runId);
     if (storedRuntimeRun) {
+      const currentState = await readState();
+      const currentThread = currentState.threads.find((item) => item.id === req.params.id);
       if (['completed', 'failed', 'cancelled'].includes(storedRuntimeRun.status)) {
-        return res.status(409).json({ error: '这次运行已经结束或无法停止', resolved: false });
+        const state = currentState;
+        const thread = currentThread;
+        if (thread?.runStatus === 'running'
+          && (thread.activeRunId === storedRuntimeRun.nativeRunId || thread.activeRunTurnId === storedRuntimeRun.turnId)) {
+          thread.runStatus = storedRuntimeRun.status === 'failed' ? 'failed' : 'idle';
+          clearHermesRunState(thread);
+          thread.updatedAt = now();
+          await writeState(state);
+        }
+        return res.status(202).json({ ok: true, resolved: true, alreadyTerminal: true, stoppedRuns: 0, run: publicThreadRunState(storedRuntimeRun), thread: thread || null });
       }
       const interrupted = await runtimeHostController.interrupt(storedRuntimeRun.id);
-      return res.status(202).json({ ok: true, resolved: true, stoppedRuns: 1, turnId: storedRuntimeRun.turnId, run: interrupted });
+      return res.status(202).json({ ok: true, resolved: true, stoppedRuns: 1, turnId: storedRuntimeRun.turnId, run: publicThreadRunState(interrupted) });
     }
     const state = await readState();
     const thread = state.threads.find((item) => item.id === req.params.id);
@@ -20347,7 +20511,17 @@ app.post('/api/threads/:id/runs/:runId/stop', async (req, res) => {
     const groupRuns = Object.values(thread.activeRunGroup?.activeRuns || {});
     const requestedRun = groupRuns.find((run) => String(run.runId) === String(req.params.runId));
     if ((!thread.activeRunId || String(thread.activeRunId) !== String(req.params.runId)) && !requestedRun) {
-      return res.status(409).json({ error: '这次运行已经结束或无法停止', resolved: false });
+      const latestRun = latestThreadRun(thread);
+      if (!latestRun || ['completed', 'failed', 'cancelled'].includes(latestRun.status) || thread.runStatus !== 'running') {
+        if (thread.runStatus === 'running') {
+          thread.runStatus = latestRun?.status === 'failed' ? 'failed' : 'idle';
+          clearHermesRunState(thread);
+          thread.updatedAt = now();
+          await writeState(state);
+        }
+        return res.status(202).json({ ok: true, resolved: true, alreadyTerminal: true, stoppedRuns: 0, run: publicThreadRunState(latestRun), thread });
+      }
+      return res.status(409).json({ error: '这次运行已经结束或无法停止', resolved: false, run: publicThreadRunState(latestRun) });
     }
     const runsToStop = req.body?.childOnly
       ? [requestedRun || { runId: req.params.runId, sessionId: req.body?.sessionId || req.query.sessionId || thread.activeSessionId }]
@@ -20360,7 +20534,22 @@ app.post('/api/threads/:id/runs/:runId/stop', async (req, res) => {
   } catch (error) {
     const message = String(error?.message || '').trim();
     const expired = /unknown run|not found|expired|already (?:ended|finished)|not running|no active/i.test(message);
-    res.status(expired ? 409 : 502).json({ error: expired ? '这次运行已经结束或无法停止' : message || '停止运行失败，请重试。', resolved: false });
+    if (expired) {
+      const state = await readState();
+      const thread = state.threads.find((item) => item.id === req.params.id);
+      const latestRun = thread ? latestThreadRun(thread) : null;
+      const stillActive = Boolean(latestRun && ['queued', 'starting', 'running', 'waiting_approval', 'interrupting'].includes(latestRun.status));
+      if (thread && !stillActive) {
+        if (thread.runStatus === 'running') {
+          thread.runStatus = latestRun?.status === 'failed' ? 'failed' : 'idle';
+          clearHermesRunState(thread);
+          thread.updatedAt = now();
+          await writeState(state);
+        }
+        return res.status(202).json({ ok: true, resolved: true, alreadyTerminal: true, stoppedRuns: 0, run: publicThreadRunState(latestRun), thread });
+      }
+    }
+    res.status(502).json({ error: message || '停止运行失败，请重试。', resolved: false });
   }
 });
 
@@ -20494,7 +20683,8 @@ export async function createApp() {
   if (await migrateLegacyDefaultWorkspaceDirectories(startupState)) await writeState(startupState);
   runtimeStore.migrateHermesSessions(startupState.threads || []);
   runtimeStore.migrateWorkspaceMemoryScopes(startupState.workspaces || []);
-  runtimeHostController.reconcileAfterRestart();
+  await runtimeHostController.reconcileAfterRestart();
+  await reconcileOrphanRuntimeRuns(startupState);
   let threadProjectionChanged = false;
   for (const thread of startupState.threads || []) {
     const activeRun = thread.activeRunId ? runtimeStore.getRun(thread.activeRunId) : null;
@@ -20515,6 +20705,7 @@ export async function createApp() {
     }
   }
   if (threadProjectionChanged) await writeState(startupState);
+  await healStaleRunningThreads(startupState);
   for (const vault of startupState.vaults || []) {
     if (!vault?.path || !(await exists(vault.path))) continue;
     await knowledgeGateway.index(vault).catch((error) => console.warn(`Knowledge consistency scan skipped for ${vault.id}:`, error?.message || error));

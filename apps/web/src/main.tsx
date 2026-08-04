@@ -47,6 +47,14 @@ import { contrastForegroundForTint, workspaceTintAlpha } from './theme-contrast.
 import { buildProfileActivity } from './profile-activity.mjs';
 import type { ProfileActivityCell, ProfileActivityMode } from './profile-activity.mjs';
 import {
+  canApplyPresentation,
+  canApplyRunSnapshot,
+  canApplyRuntimeCursor,
+  mergeThreadWithPendingMessages,
+  normalizeApprovalPresentation,
+  normalizeClarificationPresentation,
+} from './run-ui-state.mjs';
+import {
   STREAM_REVEAL_ANIMATION_MS,
   STREAM_REVEAL_MAX_LAG_MS,
   STREAM_REVEAL_MIN_COMMIT_MS,
@@ -538,7 +546,35 @@ type Thread = {
   branchRootThreadId?: string | null;
 };
 type ThreadSummary = { id: string; spaceId?: string | null; workspaceId: string | null; workspaceRootPath?: string; title: string; mode: ThreadMode; executionMode?: 'chat' | 'work'; collaborationMode?: CollaborationMode; activePlanId?: string; workerOutputMode?: 'summary' | 'all'; primaryAgentId: string | null; primaryAgentName?: string; defaultAgentId?: string | null; activeAgentId?: string | null; participantAgentIds: string[]; followMode?: FollowMode; permissionMode?: PermissionMode; agentModelOverrides?: AgentModelOverrides; agentRunOverrides?: AgentRunOverrides; agentRuntimeOverrides?: AgentRuntimeOverrides; runtimeId?: RuntimeId; vaultId: string | null; vaultName: string; updatedAt: string; preview: string; engine?: 'simulate' | 'hermes-studio' | 'model-provider' | 'workspace-group' | 'hermes-agent'; artifactCount?: number; lastArtifactName?: string; runStatus?: 'idle' | 'running' | 'failed'; archivedAt?: string | null; pinnedAt?: string | null; forkedFromThreadId?: string | null; forkedFromMessageId?: string | null; branchRootThreadId?: string | null };
-type ActiveHermesRun = { runId: string; sessionId: string; threadId: string };
+type ActiveHermesRun = { runId: string; hostRunId?: string; sessionId: string; threadId: string; turnId?: string };
+type ThreadRunState = {
+  runId: string;
+  nativeRunId?: string;
+  sessionId: string;
+  turnId: string;
+  agentId?: string;
+  runtimeId?: string;
+  status: 'queued' | 'running' | 'interrupting' | 'completed' | 'failed' | 'cancelled';
+  phase?: 'opening' | 'model' | 'tool' | 'approval' | 'compaction';
+  startedAt?: string | null;
+  finishedAt?: string | null;
+  error?: string;
+};
+type RunPresentationSnapshot = {
+  runId: string;
+  revision: number;
+  lastCursor: number;
+  status: ThreadRunState['status'];
+  phase?: ThreadRunState['phase'];
+  content: string;
+  activityGroups: RunActivityGroup[];
+  approval: HermesRunApproval | null;
+  clarification: HermesRunClarification | null;
+  compaction: RunUiState['compaction'];
+  error?: string;
+};
+type ThreadRunStateResponse = { threadId: string; run: ThreadRunState | null; presentation?: RunPresentationSnapshot | null; thread: Thread };
+type ActiveRunsResponse = { runs: Array<Omit<ThreadRunStateResponse, 'thread'>> };
 type HermesApprovalChoice = 'once' | 'session' | 'always' | 'deny';
 type HermesRunApproval = {
   id?: string;
@@ -553,6 +589,7 @@ type HermesRunApproval = {
 type HermesRunClarification = { id: string; question: string; choices: string[]; timeoutMs?: number };
 type RunUiState = {
   isRunning: boolean;
+  startPending: boolean;
   /** Keeps the composer locked while a completed reply has already been handed to history. */
   hideStatus: boolean;
   presentationPhase: RunPresentationPhase;
@@ -572,11 +609,15 @@ type RunUiState = {
   changeSet: RunChangeSet | null;
   compaction: { operationId: string; status: 'running' | 'completed' | 'failed'; tokensBefore?: number; tokensAfterEstimate?: number; error?: string; originalContextPreserved?: boolean } | null;
   compactionRecords: Array<{ operationId: string; status: 'running' | 'completed' | 'failed'; tokensBefore?: number; tokensAfterEstimate?: number; error?: string; originalContextPreserved?: boolean }>;
+  presentationRevision: number;
+  lastRuntimeCursor: number;
+  terminalRunId: string;
 };
 
 function createRunUiState(overrides: Partial<RunUiState> = {}): RunUiState {
   return {
     isRunning: false,
+    startPending: false,
     hideStatus: false,
     presentationPhase: 'thinking',
     startedAt: null,
@@ -595,6 +636,9 @@ function createRunUiState(overrides: Partial<RunUiState> = {}): RunUiState {
     changeSet: null,
     compaction: null,
     compactionRecords: [],
+    presentationRevision: 0,
+    lastRuntimeCursor: 0,
+    terminalRunId: '',
     ...overrides,
   };
 }
@@ -1205,6 +1249,9 @@ function App() {
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [conversations, setConversations] = useState<ThreadSummary[]>([]);
   const [activeThread, setActiveThread] = useState<Thread | null>(null);
+  const activeThreadIdRef = useRef('');
+  const openThreadRequestRef = useRef(0);
+  const pendingMessageIdsByThreadRef = useRef<Map<string, Set<string>>>(new Map());
   const [workspaceArtifacts, setWorkspaceArtifacts] = useState<WorkArtifact[]>([]);
   const [activeView, setActiveView] = useState<'thread' | 'new-chat'>('new-chat');
   const [input, setInput] = useState('');
@@ -1307,6 +1354,8 @@ function App() {
   const [vaultBusy, setVaultBusy] = useState<Record<string, 'index' | 'delete' | 'keep' | 'detach'>>({});
   const [modelError, setModelError] = useState('');
   const [runUiByThreadId, setRunUiByThreadId] = useState<Record<string, RunUiState>>({});
+  const liveRunSubscriptionKeysRef = useRef<Set<string>>(new Set());
+  const recoveredRunSubscriptionsRef = useRef<Map<string, { events: EventSource | null; retryTimer: number | null; lastCursor: number; presentationCursor: number; attempts: number }>>(new Map());
   const [newChatStarting, setNewChatStarting] = useState(false);
   const [runTick, setRunTick] = useState(0);
   const [workflowControlInProgress, setWorkflowControlInProgress] = useState(false);
@@ -1346,6 +1395,37 @@ function App() {
   const runError = activeRunUi?.error || '';
   const runStopping = Boolean(activeRunUi?.stopping);
 
+  useEffect(() => {
+    activeThreadIdRef.current = activeThread?.id || '';
+  }, [activeThread?.id]);
+
+  function pendingMessageIds(threadId: string) {
+    return [...(pendingMessageIdsByThreadRef.current.get(threadId) || [])];
+  }
+
+  function addPendingMessage(threadId: string, messageId: string) {
+    const next = new Set(pendingMessageIdsByThreadRef.current.get(threadId) || []);
+    next.add(messageId);
+    pendingMessageIdsByThreadRef.current.set(threadId, next);
+  }
+
+  function confirmPendingMessage(threadId: string, messageId: string) {
+    const next = new Set(pendingMessageIdsByThreadRef.current.get(threadId) || []);
+    next.delete(messageId);
+    if (next.size) pendingMessageIdsByThreadRef.current.set(threadId, next);
+    else pendingMessageIdsByThreadRef.current.delete(threadId);
+  }
+
+  function adoptThreadSnapshot(threadId: string, thread: Thread) {
+    const confirmedIds = new Set((thread.messages || []).map((message) => message.id));
+    for (const messageId of pendingMessageIds(threadId)) {
+      if (confirmedIds.has(messageId)) confirmPendingMessage(threadId, messageId);
+    }
+    setActiveThread((current) => current?.id === threadId
+      ? mergeThreadWithPendingMessages(current, thread, pendingMessageIds(threadId))
+      : current);
+  }
+
   function updateRunUi(threadId: string, update: Partial<RunUiState> | ((current: RunUiState) => RunUiState)) {
     if (!threadId) return;
     setRunUiByThreadId((current) => {
@@ -1358,6 +1438,238 @@ function App() {
   function resetRunUi(threadId: string, overrides: Partial<RunUiState> = {}) {
     updateRunUi(threadId, createRunUiState(overrides));
   }
+
+  function runSubscriptionKey(threadId: string, turnId: string, hostRunId = '') {
+    return `${threadId}:${turnId}:${hostRunId}`;
+  }
+
+  function clearRecoveredRunSubscription(key: string) {
+    const subscription = recoveredRunSubscriptionsRef.current.get(key);
+    if (!subscription) return;
+    subscription.events?.close();
+    if (subscription.retryTimer !== null) window.clearTimeout(subscription.retryTimer);
+    recoveredRunSubscriptionsRef.current.delete(key);
+  }
+
+  function applyTerminalRunUi(threadId: string, error = '', runId = '', runtimeCursor = 0) {
+    updateRunUi(threadId, (current) => ({
+      ...current,
+      isRunning: false,
+      startPending: false,
+      hideStatus: false,
+      startedAt: null,
+      target: null,
+      activeRun: null,
+      stopping: false,
+      approval: null,
+      approvalSubmitting: false,
+      clarification: null,
+      clarificationSubmitting: false,
+      error,
+      terminalRunId: String(runId || current.activeRun?.hostRunId || current.activeRun?.runId || ''),
+      lastRuntimeCursor: Math.max(current.lastRuntimeCursor, Number(runtimeCursor || 0)),
+    }));
+  }
+
+  function applyThreadRunSnapshot(snapshot: ThreadRunStateResponse, adoptThread = true) {
+    const { threadId, run, thread, presentation } = snapshot;
+    if (adoptThread) adoptThreadSnapshot(threadId, thread);
+    const active = Boolean(run && ['queued', 'running', 'interrupting'].includes(run.status));
+    const runIdentity = String(run?.runId || '');
+    if (!active) {
+      updateRunUi(threadId, (current) => {
+        if (current.startPending && !run) return current;
+        return createRunUiState({
+          error: run?.status === 'failed' ? run.error || '运行失败。' : '',
+          terminalRunId: String(run?.runId || current.terminalRunId || ''),
+          presentationRevision: Math.max(current.presentationRevision, Number(presentation?.revision || 0)),
+          lastRuntimeCursor: Math.max(current.lastRuntimeCursor, Number(presentation?.lastCursor || 0)),
+        });
+      });
+      return;
+    }
+    const targetAgent = agents.find((agent) => agent.id === run?.agentId) || null;
+    const parsedStartedAt = run?.startedAt ? Date.parse(run.startedAt) : Number.NaN;
+    const normalizedApproval = normalizeApprovalPresentation(presentation?.approval);
+    const normalizedClarification = normalizeClarificationPresentation(presentation?.clarification);
+    updateRunUi(threadId, (current) => {
+      if (!canApplyRunSnapshot(current.terminalRunId, runIdentity, run?.status || '')) return current;
+      if (presentation && (!canApplyPresentation(current.presentationRevision, presentation.revision)
+        || (Number(presentation.revision || 0) === current.presentationRevision && Number(presentation.lastCursor || 0) < current.lastRuntimeCursor))) return current;
+      const approvalSyncError = normalizedApproval.missingId ? '审批信息同步不完整，正在重新获取。' : '';
+      const clarificationSyncError = normalizedClarification.missingId ? '提问信息同步不完整，正在重新获取。' : '';
+      return {
+        ...current,
+        isRunning: true,
+        startPending: false,
+        startedAt: current.startedAt || (Number.isFinite(parsedStartedAt) ? parsedStartedAt : Date.now()),
+        target: current.target || (targetAgent ? { kind: 'agent', agent: targetAgent } : null),
+        activeRun: {
+          runId: run?.nativeRunId || run?.runId || '',
+          hostRunId: run?.runId || '',
+          sessionId: run?.sessionId || '',
+          threadId,
+          turnId: run?.turnId || '',
+        },
+        stopping: run?.status === 'interrupting',
+        draft: presentation?.content ?? current.draft,
+        activityGroups: presentation?.activityGroups ?? current.activityGroups,
+        approval: normalizedApproval.approval ?? (run?.phase === 'approval' ? current.approval : null),
+        approvalError: approvalSyncError,
+        clarification: normalizedClarification.clarification,
+        clarificationError: clarificationSyncError,
+        compaction: presentation?.compaction ?? current.compaction,
+        presentationRevision: Math.max(current.presentationRevision, Number(presentation?.revision || 0)),
+        lastRuntimeCursor: Math.max(current.lastRuntimeCursor, Number(presentation?.lastCursor || 0)),
+        presentationPhase: run?.phase === 'approval' || normalizedApproval.approval || normalizedClarification.clarification
+          ? 'waiting-input'
+          : presentation?.content ? 'responding' : presentation?.activityGroups?.length ? 'activity' : current.presentationPhase,
+        error: '',
+        terminalRunId: '',
+      };
+    });
+    if (run) ensureRecoveredRunSubscription(threadId, run, presentation?.lastCursor || 0);
+  }
+
+  async function reconcileThreadRun(threadId: string, adoptThread = true) {
+    if (!threadId) return null;
+    try {
+      const snapshot = await requestJson<ThreadRunStateResponse>(`/api/threads/${threadId}/runs/active`);
+      applyThreadRunSnapshot(snapshot, adoptThread);
+      return snapshot;
+    } catch {
+      return null;
+    }
+  }
+
+  function ensureRecoveredRunSubscription(threadId: string, run: ThreadRunState, initialCursor = 0) {
+    if (!run.turnId || !['queued', 'running', 'interrupting'].includes(run.status)) return;
+    const key = runSubscriptionKey(threadId, run.turnId, run.runId);
+    if (liveRunSubscriptionKeysRef.current.has(key) || recoveredRunSubscriptionsRef.current.has(key)) return;
+    const subscription = { events: null as EventSource | null, retryTimer: null as number | null, lastCursor: 0, presentationCursor: initialCursor, attempts: 0 };
+    recoveredRunSubscriptionsRef.current.set(key, subscription);
+    const connect = () => {
+      if (!recoveredRunSubscriptionsRef.current.has(key) || liveRunSubscriptionKeysRef.current.has(key)) {
+        clearRecoveredRunSubscription(key);
+        return;
+      }
+      const search = new URLSearchParams();
+      if (subscription.lastCursor) search.set('cursor', String(subscription.lastCursor));
+      if (subscription.presentationCursor) search.set('presentationCursor', String(subscription.presentationCursor));
+      const events = new EventSource(`/api/threads/${threadId}/turns/${run.turnId}/events${search.size ? `?${search.toString()}` : ''}`);
+      subscription.events = events;
+      events.onmessage = (event) => {
+        const cursorValue = Math.max(0, Number(event.lastEventId || 0) || 0);
+        if (cursorValue && cursorValue <= subscription.lastCursor) return;
+        if (cursorValue) subscription.lastCursor = cursorValue;
+        subscription.attempts = 0;
+        const data = JSON.parse(event.data || '{}');
+        if (data.event === 'message.delta') {
+          const delta = String(data.delta || '');
+          const runtimeCursor = Math.max(0, Number(data.runtimeCursor || 0) || 0);
+          if (delta) updateRunUi(threadId, (current) => canApplyRuntimeCursor(current.lastRuntimeCursor, runtimeCursor)
+            ? { ...current, draft: current.draft + delta, lastRuntimeCursor: Math.max(current.lastRuntimeCursor, runtimeCursor), presentationPhase: 'responding' }
+            : current);
+          return;
+        }
+        if (data.event === 'tool.running' || data.event === 'tool.started' || data.event === 'tool.updated' || data.event === 'tool.completed') {
+          const activityEvent = data.event === 'tool.completed' ? data : { ...data, event: 'tool.running' };
+          updateRunUi(threadId, (current) => ({ ...current, activityGroups: mergeRunActivityEvent(current.activityGroups, activityEvent), presentationPhase: 'activity' }));
+          return;
+        }
+        if (data.event === 'context.compaction.started' || data.event === 'context.compaction.completed' || data.event === 'context.compaction.failed') {
+          const operationId = String(data.operationId || `compaction:${data.runId || run.runId}`);
+          const failed = data.event === 'context.compaction.failed';
+          const status = data.event === 'context.compaction.started' ? 'running' as const : failed ? 'failed' as const : 'completed' as const;
+          updateRunUi(threadId, (current) => {
+            const record = { operationId, status, tokensBefore: Number(data.tokensBefore) || undefined, tokensAfterEstimate: Number(data.tokensAfterEstimate) || undefined, error: failed ? String(data.error || '上下文压缩失败。') : undefined, originalContextPreserved: failed ? data.originalContextPreserved !== false : undefined };
+            const records = current.compactionRecords.some((item) => item.operationId === operationId)
+              ? current.compactionRecords.map((item) => item.operationId === operationId ? { ...item, ...record } : item)
+              : [...current.compactionRecords, record];
+            return { ...current, compaction: record, compactionRecords: records, presentationPhase: 'activity' };
+          });
+          return;
+        }
+        if (data.event === 'approval.request' || data.event === 'approval.requested') {
+          const normalized = normalizeApprovalPresentation(data);
+          updateRunUi(threadId, {
+            presentationPhase: 'waiting-input',
+            approval: normalized.approval,
+            approvalError: normalized.missingId ? '审批信息同步不完整，正在重新获取。' : '',
+          });
+          if (normalized.missingId) void reconcileThreadRun(threadId, true);
+          return;
+        }
+        if (data.event === 'run.completed' || data.event === 'run.failed' || data.event === 'run.cancelled' || data.event === 'turn.completed' || data.event === 'turn.failed' || data.event === 'turn.cancelled') {
+          if (data.thread) adoptThreadSnapshot(threadId, data.thread as Thread);
+          applyTerminalRunUi(
+            threadId,
+            data.event === 'run.failed' || data.event === 'turn.failed' ? String(data.error || '运行失败。') : '',
+            String(data.hostRunId || data.runId || run.runId),
+            Number(data.runtimeCursor || 0),
+          );
+          clearRecoveredRunSubscription(key);
+          void reconcileThreadRun(threadId, true);
+        }
+      };
+      events.onerror = () => {
+        events.close();
+        subscription.events = null;
+        void reconcileThreadRun(threadId, true).then((snapshot) => {
+          const stillActive = Boolean(snapshot?.run && ['queued', 'running', 'interrupting'].includes(snapshot.run.status));
+          if (!stillActive || !recoveredRunSubscriptionsRef.current.has(key)) {
+            clearRecoveredRunSubscription(key);
+            return;
+          }
+          subscription.attempts += 1;
+          subscription.retryTimer = window.setTimeout(connect, Math.min(4000, 500 * 2 ** Math.min(3, subscription.attempts)));
+        });
+      };
+    };
+    connect();
+  }
+
+  async function reconcileActiveRuns() {
+    try {
+      const response = await requestJson<ActiveRunsResponse>('/api/runs/active');
+      const activeThreadIds = new Set(response.runs.map((item) => item.threadId));
+      for (const snapshot of response.runs) {
+        applyThreadRunSnapshot({ ...snapshot, thread: activeThread?.id === snapshot.threadId ? activeThread : ({ id: snapshot.threadId } as Thread) }, false);
+      }
+      setRunUiByThreadId((current) => Object.fromEntries(Object.entries(current).map(([threadId, ui]) => [
+        threadId,
+        ui.isRunning && !ui.startPending && !activeThreadIds.has(threadId) ? createRunUiState({ error: ui.error }) : ui,
+      ])));
+    } catch { /* A focus refresh must not disturb an active local stream. */ }
+  }
+
+  useEffect(() => () => {
+    for (const key of [...recoveredRunSubscriptionsRef.current.keys()]) clearRecoveredRunSubscription(key);
+  }, []);
+
+  useEffect(() => {
+    const threadId = activeThread?.id;
+    if (!threadId) return undefined;
+    void reconcileThreadRun(threadId, true);
+    const refresh = () => void reconcileThreadRun(threadId, true);
+    window.addEventListener('focus', refresh);
+    window.addEventListener('pageshow', refresh);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('pageshow', refresh);
+    };
+  }, [activeThread?.id]);
+
+  useEffect(() => {
+    void reconcileActiveRuns();
+    const refresh = () => void reconcileActiveRuns();
+    window.addEventListener('focus', refresh);
+    window.addEventListener('pageshow', refresh);
+    return () => {
+      window.removeEventListener('focus', refresh);
+      window.removeEventListener('pageshow', refresh);
+    };
+  }, [workspaceId]);
 
   useEffect(() => {
     const threadId = activeThread?.id;
@@ -2843,18 +3155,25 @@ function App() {
     setArchivedThreads(data.threads || []);
   }
 
-  async function loadThreads(targetWorkspaceId = workspaceId, preferredThreadId?: string | null) {
+  async function loadThreads(targetWorkspaceId = workspaceId, preferredThreadId?: string | null, options: { openPreferred?: boolean } = {}) {
     const data = await fetch(`/api/workspaces/${targetWorkspaceId}/threads`).then((res) => res.json());
     setThreads(data.threads);
     const targetId = preferredThreadId || data.threads[0]?.id;
-    if (targetId) await openThread(targetId);
+    if (targetId && options.openPreferred !== false) await openThread(targetId);
   }
 
   async function openThread(threadId: string) {
-    const data = await fetch(`/api/threads/${threadId}`).then((res) => res.json());
+    const requestRevision = ++openThreadRequestRef.current;
+    const data = await fetch(`/api/threads/${threadId}/runs/active`).then((res) => res.json());
+    if (requestRevision !== openThreadRequestRef.current) return;
     setInput('');
     setThreadFollowState(true);
-    setActiveThread(data.thread);
+    const confirmedIds = new Set(((data.thread as Thread).messages || []).map((message) => message.id));
+    for (const messageId of pendingMessageIds(threadId)) {
+      if (confirmedIds.has(messageId)) confirmPendingMessage(threadId, messageId);
+    }
+    setActiveThread((current) => mergeThreadWithPendingMessages(current?.id === threadId ? current : null, data.thread, pendingMessageIds(threadId)));
+    applyThreadRunSnapshot(data as ThreadRunStateResponse, false);
     setActiveView('thread');
     scheduleThreadScrollToLatest();
   }
@@ -3482,12 +3801,13 @@ function App() {
     target: ChatRunTarget | null,
     runAttachments: Attachment[] = [],
     onAccepted?: () => void,
-    options: { suppressUserMessage?: boolean; planExecutionId?: string; messageContext?: MessageContext } = {},
+    options: { suppressUserMessage?: boolean; planExecutionId?: string; messageContext?: MessageContext; clientMessageId?: string } = {},
   ): Promise<Thread | null> {
-    resetRunUi(threadId, { isRunning: true, startedAt, target });
+    resetRunUi(threadId, { isRunning: true, startPending: true, startedAt, target });
     const messageContext = options.messageContext || { browserAnnotations: [], reviewComments: [] };
     const hasMessageContext = Boolean(messageContext.browserAnnotations.length || messageContext.reviewComments.length);
-    const userDraftMessage: ChatEvent = { id: `local-user-${startedAt}`, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments, ...(hasMessageContext ? { context: messageContext } : {}) };
+    const clientMessageId = options.clientMessageId || `client-message-${startedAt}`;
+    const userDraftMessage: ChatEvent = { id: clientMessageId, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments, ...(hasMessageContext ? { context: messageContext } : {}) };
     let completedThread: Thread | null = null;
     let planDraftRun = false;
     const appendMissingRunMessages = (thread: Thread, runId: string, assistantDraft = '') => {
@@ -3535,6 +3855,7 @@ function App() {
         selectedAgents: selectedAgentsForRun,
         targetAgentId: target?.kind === 'agent' ? target.agent.id : '',
         turnId: `turn-${startedAt}`,
+        clientMessageId,
         ...(options.suppressUserMessage ? { suppressUserMessage: true } : {}),
         ...(options.planExecutionId ? { planExecutionId: options.planExecutionId } : {}),
       }),
@@ -3544,19 +3865,26 @@ function App() {
       throw new Error(formatHermesRuntimeError(created.error || 'Hermes Bridge run 创建失败。', target?.agent ? resolveHermesProfileNameForAgent(target.agent, localProfilesForComposer) : activeComposerProfileName, created.details));
     }
     planDraftRun = created.kind === 'plan-drafting';
+    updateRunUi(threadId, { startPending: false });
     onAccepted?.();
     if (created.kind === 'steer') {
       completedThread = created.thread as Thread;
-      if (completedThread) setActiveThread(completedThread);
+      if (completedThread) setActiveThread((current) => current?.id === threadId ? completedThread : current);
       updateRunUi(threadId, { draft: '', isRunning: false, activeRun: null });
       return completedThread;
     }
-    const run = { runId: created.runId, sessionId: created.sessionId, threadId };
+    const turnId = String(created.turnId || `turn-${startedAt}`);
+    const subscriptionKey = runSubscriptionKey(threadId, turnId, String(created.hostRunId || created.runId || ''));
+    const run = { runId: created.runId, hostRunId: created.hostRunId, sessionId: created.sessionId, threadId, turnId };
     updateRunUi(threadId, { activeRun: run });
     await new Promise<void>((resolve, reject) => {
-      const events = new EventSource(`/api/threads/${threadId}/turns/${created.turnId || `turn-${startedAt}`}/events`);
+      liveRunSubscriptionKeysRef.current.add(subscriptionKey);
+      clearRecoveredRunSubscription(subscriptionKey);
+      const events = new EventSource(`/api/threads/${threadId}/turns/${turnId}/events`);
       let settled = false;
       let terminalReceived = false;
+      let lastEventCursor = 0;
+      let lastRuntimeCursor = 0;
       let finalizationTimer: number | null = null;
       let handoffTimer: number | null = null;
       let streamedDraft = '';
@@ -3572,6 +3900,7 @@ function App() {
         finalizationTimer = null;
         handoffTimer = null;
         events.close();
+        liveRunSubscriptionKeysRef.current.delete(subscriptionKey);
         updateRunUi(threadId, {
           approval: null,
           approvalSubmitting: false,
@@ -3603,20 +3932,26 @@ function App() {
       };
       events.onerror = () => {
         if (terminalReceived) return;
-        // EventSource reconnects with Last-Event-ID. The API owns the run, so a
-        // temporary browser or network disconnect must not cancel the Turn.
+        void reconcileThreadRun(threadId, true).then((snapshot) => {
+          if (settled || !snapshot) return;
+          const stillActive = Boolean(snapshot.run && ['queued', 'running', 'interrupting'].includes(snapshot.run.status));
+          if (!stillActive) finish();
+        });
       };
       const processTurnEvent = (data: any) => {
         if (terminalReceived) return;
         if (data.event === 'run.started') {
           activeStreamRunId = String(data.runId || activeStreamRunId);
           streamedDraft = '';
+          lastRuntimeCursor = 0;
           const routedAgent = agents.find((agent) => agent.id === data.agentId);
           updateRunUi(threadId, {
             activeRun: {
               runId: activeStreamRunId,
+              hostRunId: run.hostRunId,
               sessionId: String(data.sessionId || ''),
               threadId,
+              turnId,
             },
             target: routedAgent ? { kind: 'agent', agent: routedAgent } : null,
             draft: '',
@@ -3661,12 +3996,17 @@ function App() {
           if (data.runId && data.runId !== activeStreamRunId) {
             activeStreamRunId = String(data.runId);
             streamedDraft = '';
+            lastRuntimeCursor = 0;
             updateRunUi(threadId, { draft: '', activityGroups: [], hideStatus: false });
           }
+          const runtimeCursor = Math.max(0, Number(data.runtimeCursor || 0) || 0);
+          if (runtimeCursor && runtimeCursor <= lastRuntimeCursor) return;
+          if (runtimeCursor) lastRuntimeCursor = runtimeCursor;
           streamedDraft += delta;
           updateRunUi(threadId, (current) => ({
             ...current,
             draft: current.draft + delta,
+            lastRuntimeCursor: Math.max(current.lastRuntimeCursor, runtimeCursor),
             presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event, { delta }),
           }));
           return;
@@ -3692,43 +4032,31 @@ function App() {
           return;
         }
         if (data.event === 'approval.request') {
+          const normalized = normalizeApprovalPresentation(data);
           updateRunUi(threadId, {
             presentationPhase: 'waiting-input',
             clarification: null,
             clarificationError: '',
             clarificationSubmitting: false,
-            approval: {
-              id: data.approvalId || data.approval_id || '',
-              title: data.title || '需要确认',
-              command: data.command || '',
-              cwd: data.cwd || '',
-              tool: data.tool || '',
-              choices: Array.isArray(data.choices)
-                ? data.choices.filter((choice: unknown): choice is HermesApprovalChoice => ['once', 'session', 'always', 'deny'].includes(String(choice)))
-                : undefined,
-              allowPermanent: typeof data.allowPermanent === 'boolean' ? data.allowPermanent : undefined,
-              smartDenied: Boolean(data.smartDenied),
-            },
-            approvalError: '',
+            approval: normalized.approval,
+            approvalError: normalized.missingId ? '审批信息同步不完整，正在重新获取。' : '',
             approvalSubmitting: false,
           });
+          if (normalized.missingId) void reconcileThreadRun(threadId, true);
           return;
         }
         if (data.event === 'clarify.request') {
+          const normalized = normalizeClarificationPresentation(data);
           updateRunUi(threadId, {
             presentationPhase: 'waiting-input',
             approval: null,
             approvalError: '',
             approvalSubmitting: false,
-            clarification: {
-            id: data.clarifyId || data.clarify_id || '',
-            question: data.question || '需要你补充一个选择',
-            choices: Array.isArray(data.choices) ? data.choices.map((choice: unknown) => String(choice)).filter(Boolean) : [],
-            timeoutMs: Number(data.timeoutMs || data.timeout_ms || 0) || undefined,
-            },
-            clarificationError: '',
+            clarification: normalized.clarification,
+            clarificationError: normalized.missingId ? '提问信息同步不完整，正在重新获取。' : '',
             clarificationSubmitting: false,
           });
+          if (normalized.missingId) void reconcileThreadRun(threadId, true);
           return;
         }
         if (data.event === 'clarify.responded') {
@@ -3756,7 +4084,7 @@ function App() {
             ...group,
             status: group.status === 'running' ? 'completed' : group.status,
             items: group.items.map((item) => item.status === 'running' ? { ...item, status: 'completed' } : item),
-          })), presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event) }));
+            })), presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event) }));
           if (data.thread) {
             const threadFromServer = data.thread as Thread;
             const completedRunId = String(data.runId || activeStreamRunId);
@@ -3769,6 +4097,12 @@ function App() {
             const nextThread = appendMissingRunMessages(threadFromServer, completedRunId, hasAssistantResult ? '' : streamedDraft);
             completedThread = nextThread;
             scheduleHandoff(nextThread);
+            const group = (threadFromServer as any).activeRunGroup;
+            const hasPendingRoute = Array.isArray(group?.routes) && group.routes.some((route: any) => ['pending', 'starting', 'running'].includes(route.status));
+            const hasActiveRoute = Object.keys(group?.activeRuns || {}).length > 0;
+            if (!hasPendingRoute && !hasActiveRoute) {
+              applyTerminalRunUi(threadId, '', String(data.hostRunId || data.runId || run.hostRunId || activeStreamRunId), Number(data.runtimeCursor || 0));
+            }
           }
           return;
         }
@@ -3777,14 +4111,8 @@ function App() {
           if (finalThread) completedThread = finalThread;
           finishAfterReveal(() => {
             if (finalThread) setActiveThread((current) => current?.id === finalThread.id ? finalThread : current);
-            updateRunUi(threadId, {
-              draft: '',
-              isRunning: false,
-              startedAt: null,
-              target: null,
-              stopping: false,
-              activeRun: null,
-            });
+            applyTerminalRunUi(threadId, '', String(data.hostRunId || data.runId || run.hostRunId || activeStreamRunId), Number(data.runtimeCursor || 0));
+            updateRunUi(threadId, { draft: '' });
           });
           return;
         }
@@ -3800,6 +4128,18 @@ function App() {
             completedThread = nextThread;
             scheduleHandoff(nextThread);
           }
+          return;
+        }
+        if (data.event === 'turn.failed' || data.event === 'turn.cancelled') {
+          const finalThread = (data.thread as Thread | undefined) || completedThread;
+          const formatted = data.event === 'turn.failed'
+            ? formatHermesRuntimeError(data.error || '运行失败。', activeComposerProfileName, data.details)
+            : '';
+          finishAfterReveal(() => {
+            if (finalThread) setActiveThread((current) => current?.id === finalThread.id ? finalThread : current);
+            applyTerminalRunUi(threadId, formatted, String(data.hostRunId || data.runId || run.hostRunId || activeStreamRunId), Number(data.runtimeCursor || 0));
+            updateRunUi(threadId, { draft: '' });
+          }, data.event === 'turn.failed' ? new Error(formatted) : undefined);
           return;
         }
         if (data.event === 'mention.failed') {
@@ -3851,6 +4191,9 @@ function App() {
       };
       events.onmessage = (event) => {
         if (terminalReceived) return;
+        const eventCursor = Math.max(0, Number(event.lastEventId || 0) || 0);
+        if (eventCursor && eventCursor <= lastEventCursor) return;
+        if (eventCursor) lastEventCursor = eventCursor;
         const data = JSON.parse(event.data || '{}');
         if (pendingHandoff) {
           bufferedTurnEvents.push(data);
@@ -3920,19 +4263,27 @@ function App() {
 
   async function stopActiveRun() {
     if (!activeHermesRun || runStopping) return;
-    updateRunUi(activeHermesRun.threadId, { stopping: true, error: '' });
+    const { threadId } = activeHermesRun;
+    updateRunUi(threadId, { stopping: true, error: '' });
     try {
-      const res = await fetch(`/api/threads/${activeHermesRun.threadId}/runs/${activeHermesRun.runId}/stop`, {
+      const res = await fetch(`/api/threads/${threadId}/runs/${activeHermesRun.hostRunId || activeHermesRun.runId}/stop`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sessionId: activeHermesRun.sessionId }),
       });
       const data = await res.json().catch(() => ({}));
+      if (data.thread) setActiveThread((current) => current?.id === threadId ? data.thread as Thread : current);
+      if (data.alreadyTerminal || data.run && ['completed', 'failed', 'cancelled'].includes(data.run.status)) {
+        applyTerminalRunUi(threadId, data.run?.status === 'failed' ? String(data.run?.error || '运行失败。') : '');
+        return;
+      }
       if (!res.ok || data.resolved === false) {
         throw new Error(data.error || '这次运行已经结束或无法停止');
       }
     } catch (error) {
-      updateRunUi(activeHermesRun.threadId, { stopping: false, error: error instanceof Error ? error.message : '停止运行失败，请重试。' });
+      const snapshot = await reconcileThreadRun(threadId, true);
+      const stillActive = Boolean(snapshot?.run && ['queued', 'running', 'interrupting'].includes(snapshot.run.status));
+      if (stillActive) updateRunUi(threadId, { stopping: snapshot?.run?.status === 'interrupting', error: error instanceof Error ? error.message : '停止运行失败，请重试。' });
     }
   }
 
@@ -3941,6 +4292,7 @@ function App() {
     const runAttachments = attachments.flatMap((item) => item.status === 'ready' && item.attachment ? [item.attachment] : []);
     if (!newChatAgent || !newChatProfileModelValue || newChatStarting || attachments.some((item) => item.status !== 'ready') || (!text && !runAttachments.length)) return;
     const startedAt = Date.now();
+    const clientMessageId = typeof crypto.randomUUID === 'function' ? `client-message-${crypto.randomUUID()}` : `client-message-${startedAt}`;
     newChatInputRef.current = '';
     setNewChatInput('');
     setThreadFollowState(true);
@@ -3983,8 +4335,9 @@ function App() {
       setCollaborationModeError(null);
       if (created.snapshot) window.dispatchEvent(new CustomEvent('frakio:collaboration-snapshot', { detail: created.snapshot }));
       await patchThreadPermission(thread.id, newChatPermissionMode, newChatProfileName);
-      const localUserMessage: ChatEvent = { id: `local-${Date.now()}`, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments };
+      const localUserMessage: ChatEvent = { id: clientMessageId, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments };
       const optimisticThread = { ...thread, messages: [...thread.messages, localUserMessage] };
+      addPendingMessage(thread.id, clientMessageId);
       setInput(newChatInputRef.current);
       newChatInputRef.current = '';
       setNewChatInput('');
@@ -3993,23 +4346,39 @@ function App() {
       setNewChatPlanEnabled(false);
       setActiveView('thread');
       setActiveThread(optimisticThread);
-      resetRunUi(thread.id, { isRunning: true, startedAt, target });
+      resetRunUi(thread.id, { isRunning: true, startPending: true, startedAt, target });
       movedToThread = true;
       setNewChatStarting(false);
+
+      // Put the newly-created thread in the rail before the runtime stream starts.
+      // The stream promise resolves only after the turn ends, so waiting for it
+      // here makes a new conversation invisible during the whole first response.
+      if (thread.mode === 'direct') {
+        const summary = created.conversation as ThreadSummary | undefined;
+        if (summary) {
+          setConversations((current) => [{ ...summary, runStatus: 'running', preview: text || summary.preview }, ...current.filter((item) => item.id !== summary.id)]);
+        }
+      } else if (thread.workspaceId) {
+        void loadThreads(thread.workspaceId, thread.id, { openPreferred: false });
+      }
       const runAgents = thread.selectedAgents?.length ? thread.selectedAgents : [newChatAgent.id];
       let runAccepted = false;
       try {
         await runHermesAgentThread(thread.id, text, runAgents, startedAt, target, runAttachments, () => {
           runAccepted = true;
           clearAttachmentDrafts();
-        });
+        }, { clientMessageId });
       } catch (error) {
-        if (!runAccepted) setInput((current) => current || text);
+        if (!runAccepted) {
+          confirmPendingMessage(thread.id, clientMessageId);
+          applyTerminalRunUi(thread.id, error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。');
+          setInput((current) => current || text);
+        }
         updateRunUi(thread.id, { error: error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。' });
         await refreshHermesRuntime();
       }
       await refreshLeftRail();
-      if (thread.mode === 'workspace' && thread.workspaceId) await loadThreads(thread.workspaceId, thread.id);
+      if (thread.mode === 'workspace' && thread.workspaceId) await loadThreads(thread.workspaceId, thread.id, { openPreferred: false });
     } catch (error) {
       if (!movedToThread) {
         setNewChatInput((current) => {
@@ -4027,7 +4396,6 @@ function App() {
       await refreshHermesRuntime();
     } finally {
       setNewChatStarting(false);
-      if (movedToThread && createdThreadId) updateRunUi(createdThreadId, { isRunning: false, startedAt: null, target: null, stopping: false, activeRun: null });
     }
   }
 
@@ -4521,14 +4889,18 @@ function App() {
     const hasRunContext = Boolean(runContext.browserAnnotations.length || runContext.reviewComments.length);
     if (isRunning || !activeThread || attachments.some((item) => item.status !== 'ready') || (!text && !runAttachments.length && !hasRunContext)) return;
     const startedAt = Date.now();
+    const clientMessageId = typeof crypto.randomUUID === 'function' ? `client-message-${crypto.randomUUID()}` : `client-message-${startedAt}`;
     const threadId = activeThread.id;
+    const threadWorkspaceId = activeThread.workspaceId;
+    const threadMode = activeThread.mode;
     setThreadFollowState(true);
     const target = resolveRunTarget(text, agents, activeComposerAgent);
-    resetRunUi(threadId, { isRunning: true, startedAt, target });
+    resetRunUi(threadId, { isRunning: true, startPending: true, startedAt, target });
     const optimisticThread = {
       ...activeThread,
-      messages: [...activeThread.messages, { id: `local-user-${startedAt}`, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments, ...(hasRunContext ? { context: runContext } : {}) }],
+      messages: [...activeThread.messages, { id: clientMessageId, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments, ...(hasRunContext ? { context: runContext } : {}) }],
     };
+    addPendingMessage(threadId, clientMessageId);
     setActiveThread(optimisticThread);
     let runAccepted = false;
     try {
@@ -4539,18 +4911,20 @@ function App() {
           writeThreadDraft(activeThread, '');
           clearAttachmentDrafts();
           setDraftContext({ browserAnnotations: [], reviewComments: [] });
-        }, { messageContext: runContext });
-        if (routedThread) setActiveThread(routedThread);
+        }, { messageContext: runContext, clientMessageId });
+        if (routedThread) setActiveThread((current) => current?.id === threadId ? routedThread : current);
       } catch (error) {
-        if (!runAccepted) setInput((current) => current || text);
+        if (!runAccepted) {
+          confirmPendingMessage(threadId, clientMessageId);
+          applyTerminalRunUi(threadId, error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。');
+          setInput((current) => current || text);
+        }
         updateRunUi(threadId, { error: error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。' });
         await refreshHermesRuntime();
       }
       await refreshLeftRail();
-      if (activeThread.mode === 'workspace' && activeThread.workspaceId) await loadThreads(activeThread.workspaceId, activeThread.id);
-    } finally {
-      updateRunUi(threadId, { isRunning: false, startedAt: null, target: null, stopping: false, activeRun: null });
-    }
+      if (threadMode === 'workspace' && threadWorkspaceId) await loadThreads(threadWorkspaceId, threadId, { openPreferred: false });
+    } finally { /* Host Run terminal events own composer unlock. */ }
   }
 
   function clearAttachmentDrafts() {
@@ -15661,7 +16035,7 @@ function RunActivityGroupView({ group, hasFollowingText, runFinished, isCurrentG
             {awaitingNextStep && (
               <div className="run-activity-awaiting" role="status">
                 <LoaderCircle size={13} aria-hidden="true" />
-                <span>正在思考下一步…</span>
+                <span>正在整理结果…</span>
               </div>
             )}
           </div>

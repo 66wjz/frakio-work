@@ -110,9 +110,14 @@ test('two conversations can run concurrently without losing either thread state'
   assert.deepEqual(runResponses.map((response) => response.status), [202, 202], JSON.stringify(await Promise.all(runResponses.map((response) => response.clone().json().catch(() => ({}))))));
   const runs = await Promise.all(runResponses.map((response) => response.json()));
 
-  for (const { thread } of conversations) {
+  for (const [index, { thread }] of conversations.entries()) {
     const runningThread = await fetch(`${baseUrl}/api/threads/${thread.id}`).then((response) => response.json());
     assert.equal(runningThread.thread.runStatus, 'running');
+    const activeRun = await fetch(`${baseUrl}/api/threads/${thread.id}/runs/active`).then((response) => response.json());
+    assert.equal(activeRun.threadId, thread.id);
+    assert.equal(activeRun.run.runId, runs[index].hostRunId);
+    assert.equal(activeRun.run.nativeRunId, runs[index].runId);
+    assert.ok(['queued', 'running'].includes(activeRun.run.status));
   }
 
   const duplicateRunResponse = await fetch(`${baseUrl}/api/threads/${conversations[0].thread.id}/runs`, {
@@ -132,5 +137,20 @@ test('two conversations can run concurrently without losing either thread state'
     const completedMessage = completedThread.thread.messages.find((message) => message.content === `reply for ${runs[index].runId}`);
     assert.ok(completedMessage);
     assert.ok(completedMessage.processingDurationMs > 0);
+    const reconciledRun = await fetch(`${baseUrl}/api/threads/${thread.id}/runs/active`).then((response) => response.json());
+    assert.equal(reconciledRun.run.runId, runs[index].hostRunId);
+    assert.equal(reconciledRun.run.status, 'completed');
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const stopResponse = await fetch(`${baseUrl}/api/threads/${thread.id}/runs/${runs[index].hostRunId}/stop`, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify({ sessionId: runs[index].sessionId }),
+      });
+      assert.equal(stopResponse.status, 202);
+      const stopped = await stopResponse.json();
+      assert.equal(stopped.resolved, true);
+      assert.equal(stopped.alreadyTerminal, true);
+      assert.equal(stopped.run.status, 'completed');
+    }
   }
 });

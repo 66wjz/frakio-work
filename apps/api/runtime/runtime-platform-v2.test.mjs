@@ -161,6 +161,58 @@ test('Event Journal storage deduplicates retried native events', async (t) => {
   assert.equal(first.id, duplicate.id);
   assert.equal(next.cursor, 2);
   assert.equal(store.eventsAfter(run.id).length, 2);
+  assert.deepEqual(store.getRunPresentation(run.id), {
+    runId: run.id,
+    revision: 2,
+    lastCursor: 2,
+    status: 'completed',
+    phase: 'opening',
+    content: 'A',
+    activityGroups: [],
+    approval: null,
+    clarification: null,
+    compaction: null,
+    error: '',
+    updatedAt: next.createdAt,
+  });
+});
+
+test('approval presentation exposes one normalized identifier after native replay', async (t) => {
+  const { store } = await storeFixture('frakio-runtime-approval-presentation-');
+  t.after(() => store.close());
+  const session = store.upsertSession({ runtimeId: 'hermes', threadId: 'thread-approval', agentId: 'iris', laneType: 'chat', laneId: 'thread-approval' });
+  const run = store.createRun({ sessionId: session.id, runtimeId: 'hermes', threadId: 'thread-approval', agentId: 'iris', turnId: 'turn-approval' });
+  const first = store.appendEvent({ runId: run.id, nativeEventKey: 'approval-native-1', type: 'approval.requested', payload: { approval_id: 'approval-1', title: '允许命令' } });
+  const duplicate = store.appendEvent({ runId: run.id, nativeEventKey: 'approval-native-1', type: 'approval.requested', payload: { approval_id: 'approval-1', title: '允许命令' } });
+  const presentation = store.getRunPresentation(run.id);
+
+  assert.equal(first.id, duplicate.id);
+  assert.equal(presentation.revision, 1);
+  assert.equal(presentation.approval.id, 'approval-1');
+  assert.equal(presentation.approval.approvalId, 'approval-1');
+});
+
+test('restart recovery trusts adapter inspection and Host Controller owns terminal state', async (t) => {
+  const { store } = await storeFixture('frakio-runtime-restart-');
+  t.after(() => store.close());
+  const session = store.upsertSession({ runtimeId: 'hermes', threadId: 'thread-restart', agentId: 'iris', laneType: 'chat', laneId: 'thread-restart', nativeSessionId: 'native-session' });
+  const running = store.createRun({ sessionId: session.id, runtimeId: 'hermes', threadId: 'thread-restart', agentId: 'iris', turnId: 'turn-running', nativeRunId: 'native-running', status: 'running' });
+  const missing = store.createRun({ sessionId: session.id, runtimeId: 'codex', threadId: 'thread-restart-2', agentId: 'iris', turnId: 'turn-missing', nativeRunId: 'native-missing', status: 'running' });
+  const registry = { get: (id) => ({ id, capabilities: {} }), detect: async () => ({ installed: true, status: 'ready', checkedAt: new Date().toISOString() }) };
+  const platform = createRuntimePlatform({
+    store, registry,
+    adapters: new Map([
+      ['hermes', { inspectRun: async () => ({ status: 'running' }) }],
+      ['codex', { inspectRun: async () => ({ status: 'missing' }) }],
+    ]),
+    contextFactory: async () => ({ memory: [], handoff: {} }),
+  });
+  const controller = createRuntimeHostController({ platform, store });
+  await controller.reconcileAfterRestart();
+  assert.equal(store.getRun(running.id).status, 'running');
+  assert.equal(store.getRun(missing.id).status, 'failed');
+  assert.equal(store.getRun(missing.id).metadata.errorCode, 'HOST_RESTART_INTERRUPTED');
+  assert.equal(store.eventsAfter(missing.id).filter((event) => event.type === 'run.failed').length, 1);
 });
 
 test('Runtime Platform falls back within the selected runtime when native resume fails', async (t) => {
@@ -287,7 +339,7 @@ test('schema v4 sessions migrate idempotently into chat lanes', async () => {
   legacy.close();
 
   const migrated = createRuntimeStore(file);
-  assert.equal(migrated.schemaVersion, 11);
+  assert.equal(migrated.schemaVersion, 12);
   assert.ok(migrated.migrationBackupPath);
   await access(migrated.migrationBackupPath);
   assert.equal(migrated.getSession('legacy-session').laneType, 'chat');

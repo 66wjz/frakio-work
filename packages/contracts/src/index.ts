@@ -287,6 +287,21 @@ export type RuntimeRun = {
   completedAt?: string | null;
 };
 
+export type RunPresentation = {
+  runId: string;
+  revision: number;
+  lastCursor: number;
+  status: RuntimeRunStatus;
+  phase: RuntimeRunPhase;
+  content: string;
+  activityGroups: RunActivityGroup[];
+  approval: Record<string, unknown> | null;
+  clarification: Record<string, unknown> | null;
+  compaction: Record<string, unknown> | null;
+  error: string;
+  updatedAt: string;
+};
+
 export type RuntimeLaunchSpec = {
   runId: string;
   sessionId: string;

@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 import { mkdirSync } from 'node:fs';
 import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
+import { reduceRunPresentation } from './presentation.mjs';
 
-const SCHEMA_VERSION = 11;
+const SCHEMA_VERSION = 12;
 
 function timestamp() {
   return new Date().toISOString();
@@ -117,6 +118,21 @@ export function createRuntimeStore(filePath) {
       FOREIGN KEY(session_id) REFERENCES runtime_sessions(id)
     );
     CREATE INDEX IF NOT EXISTS runtime_events_run_idx ON runtime_events(run_id, cursor);
+    CREATE TABLE IF NOT EXISTS runtime_run_presentations (
+      run_id TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL DEFAULT 0,
+      last_cursor INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'queued',
+      phase TEXT NOT NULL DEFAULT 'opening',
+      content TEXT NOT NULL DEFAULT '',
+      activity_groups_json TEXT NOT NULL DEFAULT '[]',
+      approval_json TEXT,
+      clarification_json TEXT,
+      compaction_json TEXT,
+      error TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(run_id) REFERENCES runtime_runs(id)
+    );
     CREATE TABLE IF NOT EXISTS context_checkpoints (
       id TEXT PRIMARY KEY,
       thread_id TEXT NOT NULL,
@@ -511,6 +527,23 @@ export function createRuntimeStore(filePath) {
   if (!eventColumns.has('runtime_version')) db.exec("ALTER TABLE runtime_events ADD COLUMN runtime_version TEXT NOT NULL DEFAULT ''");
   if (!eventColumns.has('runtime_build_id')) db.exec("ALTER TABLE runtime_events ADD COLUMN runtime_build_id TEXT NOT NULL DEFAULT ''");
   db.exec("CREATE UNIQUE INDEX IF NOT EXISTS runtime_events_native_key_idx ON runtime_events(run_id, native_event_key) WHERE native_event_key != '';");
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS runtime_run_presentations (
+      run_id TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL DEFAULT 0,
+      last_cursor INTEGER NOT NULL DEFAULT 0,
+      status TEXT NOT NULL DEFAULT 'queued',
+      phase TEXT NOT NULL DEFAULT 'opening',
+      content TEXT NOT NULL DEFAULT '',
+      activity_groups_json TEXT NOT NULL DEFAULT '[]',
+      approval_json TEXT,
+      clarification_json TEXT,
+      compaction_json TEXT,
+      error TEXT NOT NULL DEFAULT '',
+      updated_at TEXT NOT NULL,
+      FOREIGN KEY(run_id) REFERENCES runtime_runs(id)
+    );
+  `);
   const runtimePackageVersionIndex = db.prepare('PRAGMA index_list(runtime_packages)').all().find((index) => {
     if (!index.unique) return false;
     const columns = db.prepare(`PRAGMA index_info('${String(index.name).replaceAll("'", "''")}')`).all().map((entry) => entry.name);
@@ -925,6 +958,60 @@ export function createRuntimeStore(filePath) {
     getRun(id) {
       return mapRun(db.prepare('SELECT * FROM runtime_runs WHERE id = ?').get(id));
     },
+    getRunPresentation(runId) {
+      const row = db.prepare('SELECT * FROM runtime_run_presentations WHERE run_id = ?').get(runId);
+      if (!row) return null;
+      return {
+        runId: row.run_id,
+        revision: Number(row.revision || 0),
+        lastCursor: Number(row.last_cursor || 0),
+        status: row.status,
+        phase: row.phase,
+        content: row.content || '',
+        activityGroups: json(row.activity_groups_json, []),
+        approval: row.approval_json ? json(row.approval_json, null) : null,
+        clarification: row.clarification_json ? json(row.clarification_json, null) : null,
+        compaction: row.compaction_json ? json(row.compaction_json, null) : null,
+        error: row.error || '',
+        updatedAt: row.updated_at,
+      };
+    },
+    upsertRunPresentation(input) {
+      const run = api.getRun(input.runId);
+      if (!run) throw new Error(`Runtime run does not exist: ${input.runId}`);
+      const current = api.getRunPresentation(input.runId);
+      const next = {
+        runId: input.runId,
+        revision: Math.max(Number(input.revision ?? ((current?.revision || 0) + 1)), current?.revision || 0),
+        lastCursor: Math.max(Number(input.lastCursor ?? current?.lastCursor ?? 0), current?.lastCursor || 0),
+        status: input.status || current?.status || run.status,
+        phase: input.phase || current?.phase || run.phase,
+        content: input.content ?? current?.content ?? '',
+        activityGroups: input.activityGroups ?? current?.activityGroups ?? [],
+        approval: input.approval === undefined ? current?.approval ?? null : input.approval,
+        clarification: input.clarification === undefined ? current?.clarification ?? null : input.clarification,
+        compaction: input.compaction === undefined ? current?.compaction ?? null : input.compaction,
+        error: input.error ?? current?.error ?? '',
+        updatedAt: input.updatedAt || timestamp(),
+      };
+      db.prepare(`
+        INSERT INTO runtime_run_presentations(
+          run_id, revision, last_cursor, status, phase, content, activity_groups_json,
+          approval_json, clarification_json, compaction_json, error, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(run_id) DO UPDATE SET
+          revision=excluded.revision, last_cursor=excluded.last_cursor, status=excluded.status,
+          phase=excluded.phase, content=excluded.content, activity_groups_json=excluded.activity_groups_json,
+          approval_json=excluded.approval_json, clarification_json=excluded.clarification_json,
+          compaction_json=excluded.compaction_json, error=excluded.error, updated_at=excluded.updated_at
+      `).run(
+        next.runId, next.revision, next.lastCursor, next.status, next.phase, next.content,
+        encode(next.activityGroups), next.approval == null ? null : encode(next.approval),
+        next.clarification == null ? null : encode(next.clarification),
+        next.compaction == null ? null : encode(next.compaction), next.error, next.updatedAt,
+      );
+      return api.getRunPresentation(input.runId);
+    },
     listRuns({ runtimeId = '', runtimeBuildId = '', threadId = '', status = '', limit = 100 } = {}) {
       const clauses = [];
       const args = [];
@@ -989,30 +1076,43 @@ export function createRuntimeStore(filePath) {
     appendEvent(input) {
       const run = api.getRun(input.runId);
       if (!run) throw new Error(`Runtime run does not exist: ${input.runId}`);
-      const nextCursor = Number(input.cursor) || Number(db.prepare('SELECT COALESCE(MAX(cursor), 0) + 1 AS cursor FROM runtime_events WHERE run_id = ?').get(input.runId)?.cursor || 1);
-      const event = {
-        id: input.id || `runtime_event_${randomUUID()}`,
-        cursor: nextCursor,
-        runId: input.runId,
-        sessionId: input.sessionId || run.sessionId,
-        runtimeId: input.runtimeId || run.runtimeId,
-        nativeEventKey: String(input.nativeEventKey || ''),
-        type: input.type,
-        payload: input.payload || {},
-        createdAt: input.createdAt || timestamp(),
-      };
-      db.prepare(`
-        INSERT OR IGNORE INTO runtime_events(
-          id, cursor, run_id, session_id, runtime_id, runtime_version, runtime_build_id, native_event_key, type, payload_json, created_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-      `).run(
-        event.id, event.cursor, event.runId, event.sessionId, event.runtimeId,
-        input.runtimeVersion || run.runtimeVersion || '', input.runtimeBuildId || run.runtimeBuildId || '',
-        event.nativeEventKey, event.type, encode(event.payload), event.createdAt,
-      );
-      return mapEvent(event.nativeEventKey
-        ? db.prepare('SELECT * FROM runtime_events WHERE run_id = ? AND native_event_key = ?').get(event.runId, event.nativeEventKey)
-        : db.prepare('SELECT * FROM runtime_events WHERE run_id = ? AND cursor = ?').get(event.runId, event.cursor));
+      db.exec('BEGIN IMMEDIATE;');
+      try {
+        const nextCursor = Number(input.cursor) || Number(db.prepare('SELECT COALESCE(MAX(cursor), 0) + 1 AS cursor FROM runtime_events WHERE run_id = ?').get(input.runId)?.cursor || 1);
+        const event = {
+          id: input.id || `runtime_event_${randomUUID()}`,
+          cursor: nextCursor,
+          runId: input.runId,
+          sessionId: input.sessionId || run.sessionId,
+          runtimeId: input.runtimeId || run.runtimeId,
+          nativeEventKey: String(input.nativeEventKey || ''),
+          type: input.type,
+          payload: input.payload || {},
+          createdAt: input.createdAt || timestamp(),
+        };
+        const result = db.prepare(`
+          INSERT OR IGNORE INTO runtime_events(
+            id, cursor, run_id, session_id, runtime_id, runtime_version, runtime_build_id, native_event_key, type, payload_json, created_at
+          ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `).run(
+          event.id, event.cursor, event.runId, event.sessionId, event.runtimeId,
+          input.runtimeVersion || run.runtimeVersion || '', input.runtimeBuildId || run.runtimeBuildId || '',
+          event.nativeEventKey, event.type, encode(event.payload), event.createdAt,
+        );
+        const row = event.nativeEventKey
+          ? db.prepare('SELECT * FROM runtime_events WHERE run_id = ? AND native_event_key = ?').get(event.runId, event.nativeEventKey)
+          : db.prepare('SELECT * FROM runtime_events WHERE run_id = ? AND cursor = ?').get(event.runId, event.cursor);
+        if (Number(result.changes || 0) > 0 && row) {
+          const storedEvent = mapEvent(row);
+          const presentation = reduceRunPresentation(api.getRunPresentation(run.id), storedEvent, api.getRun(run.id));
+          api.upsertRunPresentation(presentation);
+        }
+        db.exec('COMMIT;');
+        return mapEvent(row);
+      } catch (error) {
+        db.exec('ROLLBACK;');
+        throw error;
+      }
     },
     eventsAfter(runId, cursor = 0, limit = 1000) {
       return db.prepare('SELECT * FROM runtime_events WHERE run_id = ? AND cursor > ? ORDER BY cursor ASC LIMIT ?')

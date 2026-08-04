@@ -60,6 +60,14 @@ export function normalizeRuntimeAdapter(runtimeId, adapter = {}) {
       if (typeof adapter.recover === 'function') return adapter.recover(...args);
       return unsupported('recover');
     },
+    async inspectRun(input = {}) {
+      if (typeof adapter.inspectRun === 'function') return adapter.inspectRun(input);
+      return unsupported('inspectRun');
+    },
+    async resumeRun(input = {}) {
+      if (typeof adapter.resumeRun === 'function') return adapter.resumeRun(input);
+      return unsupported('resumeRun');
+    },
     async applySkills(input = {}) {
       return typeof adapter.applySkills === 'function' ? adapter.applySkills(input) : unsupported('applySkills');
     },
