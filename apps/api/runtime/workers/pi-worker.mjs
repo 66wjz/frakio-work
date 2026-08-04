@@ -1,7 +1,6 @@
 import { mkdir, readFile } from 'node:fs/promises';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
-import { Type } from 'typebox';
 
 const runtimeRoot = String(process.env.FRAKIO_PI_RUNTIME_ROOT || '').trim();
 const expectedRuntimeVersion = String(process.env.FRAKIO_PI_RUNTIME_VERSION || '').trim();
@@ -13,12 +12,20 @@ function runtimePackageRoot(packageName) {
   return path.join(dependencyRoot, 'node_modules', ...packageName.split('/'));
 }
 async function runtimeImport(packageName) {
-  const packageRoot = runtimePackageRoot(packageName);
+  const primaryRoot = runtimePackageRoot(packageName);
+  const nestedRoot = path.join(runtimePackageRoot('@earendil-works/pi-coding-agent'), 'node_modules', ...packageName.split('/'));
+  let packageRoot = primaryRoot;
+  try {
+    await readFile(path.join(packageRoot, 'package.json'));
+  } catch {
+    packageRoot = nestedRoot;
+  }
   const manifest = JSON.parse(await readFile(path.join(packageRoot, 'package.json'), 'utf8'));
-  const entry = manifest.exports?.['.']?.import || manifest.module || manifest.main;
+  const entry = manifest.exports?.['.']?.import || manifest.exports?.['.']?.default || manifest.exports?.['.'] || manifest.module || manifest.main;
   if (!entry) throw new Error(`Pi Runtime package has no ESM entry: ${packageName}`);
   return import(pathToFileURL(path.resolve(packageRoot, entry)).href);
 }
+const { Type } = await runtimeImport('typebox');
 const piAi = await runtimeImport('@earendil-works/pi-ai');
 const piCodingAgent = await runtimeImport('@earendil-works/pi-coding-agent');
 const {

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.1 — 2026-08-04
+
+Runtime Center 会自动修复从旧版本升级后失效的 Pi Runtime。桌面安装包现在使用应用自身版本判断兼容性，Pi Worker 只从对应 Runtime 加载依赖；更新后不再错误提示 Frakio 版本过低，也不需要用户重新安装 Pi。
+
+Hermes Gateway 增加升级清理机制。首次启动会识别旧版 Frakio 或 Hermes Web UI 留下的后台服务，停止可以确认归属的旧 Gateway，并清除已经删除 Agent 的自动启动记录，避免后台进程被系统反复拉起。
+
+旧 Agent 的 Profile 不会直接删除。SOUL、配置、记忆和日志会完整归档到 Frakio 备份目录；无法确认归属的外部 Hermes Profile 和进程只会提示，不会自动处理。Runtime Center 可以查看修复结果并重新检测旧 Gateway。
+
 ## 1.2.0 — 2026-08-04
 
 Frakio Work 现在由宿主层统一管理 Runtime、会话上下文、Run 生命周期、权限和恢复状态。Pi、Codex、Claude 与 Hermes 都通过统一适配层运行，同一会话可以在不同 Runtime 之间继续工作。

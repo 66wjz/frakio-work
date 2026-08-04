@@ -59,6 +59,7 @@ export function createPiRuntimeProvider({
   execFile,
   resolveCommand,
   bridgeFactory,
+  appVersion = '',
   fetchImpl = fetch,
 } = {}) {
   let releaseCache = null;
@@ -279,7 +280,8 @@ export function createPiRuntimeProvider({
       throw Object.assign(new Error('该 Pi 版本与当前 Runtime Host 协议不兼容。'), { status: 409, code: 'PI_HOST_PROTOCOL_INCOMPATIBLE' });
     }
     const appPackage = await readJson(path.join(appRoot, 'package.json'), {});
-    if (release.minimumFrakioVersion && !versionAtLeast(appPackage.version, release.minimumFrakioVersion)) {
+    const currentAppVersion = String(appVersion || process.env.FRAKIO_WORK_APP_VERSION || appPackage.version || '0.0.0');
+    if (release.minimumFrakioVersion && !versionAtLeast(currentAppVersion, release.minimumFrakioVersion)) {
       throw Object.assign(new Error(`该 Pi 版本需要 Frakio Work ${release.minimumFrakioVersion} 或更高版本。`), { status: 409, code: 'PI_FRAKIO_VERSION_INCOMPATIBLE' });
     }
     if (!nodeRequirementSatisfied(release.node)) {

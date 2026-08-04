@@ -33,6 +33,7 @@ import { createLocalSecurity } from './lib/local-security.mjs';
 import { createManagedWebAuth } from './lib/managed-web-auth.mjs';
 import { acquireManagedServiceLock, FRAKIO_SERVICE_PROTOCOL, removeServiceDescriptor, writeServiceDescriptor } from './lib/service-discovery.mjs';
 import { isSystemHermesProfile, resolveDeletableHermesProfileDir, userVisibleHermesProfiles } from './lib/hermes-profile-safety.mjs';
+import { createHermesGatewayRepair } from './lib/hermes-gateway-repair.mjs';
 import { isOfficialHermesReleaseTag, parseOfficialHermesReleaseTags } from './lib/hermes-runtime-releases.mjs';
 import { resolveInsideRoot } from './lib/path-boundary.mjs';
 import { resolveCommand as resolvePlatformCommand, runtimeNodeCandidate, runtimePlatformDir, runtimePythonCandidates, runtimePythonSitePackagesCandidates } from './lib/platform.mjs';
@@ -102,6 +103,7 @@ const homeDir = os.homedir();
 const frakioWorkHome = process.env.FRAKIO_WORK_HOME || path.join(homeDir, '.frakio-work');
 const isDesktopMode = process.env.FRAKIO_WORK_DESKTOP === '1';
 const isManagedWebMode = process.env.FRAKIO_WORK_DEPLOYMENT_MODE === 'managed-web';
+const automaticGatewayRepairEnabled = process.env.FRAKIO_WORK_PACKAGED === '1' || isManagedWebMode || process.env.FRAKIO_WORK_GATEWAY_REPAIR === '1';
 const tlsCertPath = String(process.env.FRAKIO_WORK_TLS_CERT || '').trim();
 const tlsKeyPath = String(process.env.FRAKIO_WORK_TLS_KEY || '').trim();
 const tlsEnabled = Boolean(tlsCertPath && tlsKeyPath);
@@ -191,6 +193,7 @@ const worktreeManager = createWorktreeManager({
 });
 const piRuntimeProvider = createPiRuntimeProvider({
   appRoot,
+  appVersion: process.env.FRAKIO_WORK_APP_VERSION || '',
   managedRoot: frakioManagedPiRuntimeRoot,
   stagingRoot: frakioPackageStagingRoot,
   catalogPath: frakioPiCatalogPath,
@@ -5982,17 +5985,92 @@ function gatewayAutoStartTargets(profiles, config) {
   return filtered.length ? filtered : profileNames.includes('default') && !config.exclude.includes('default') ? ['default'] : [];
 }
 
+async function uninstallManagedHermesGatewayService(service) {
+  const python = await findHermesBridgePython();
+  if (!python) throw new Error('未找到当前 Hermes Runtime，无法卸载旧 Gateway 服务。');
+  const profileArg = service.profileName === 'default' ? [] : ['--profile', service.profileName];
+  await execFileAsync(python, ['-m', 'hermes_cli.main', ...profileArg, 'gateway', 'uninstall'], {
+    timeout: 20_000,
+    env: runtimeEnv({ HERMES_HOME: hermesHome }),
+  });
+}
+
+async function inspectLegacyHermesGatewayProcesses() {
+  const legacyRoot = path.resolve(homeDir, '.hermes-web-ui', 'desktop-runtime', 'hermes');
+  let rows = [];
+  if (process.platform === 'win32') {
+    const { stdout } = await execFileAsync('powershell.exe', ['-NoProfile', '-Command', "Get-CimInstance Win32_Process | Where-Object { $_.CommandLine -match 'hermes_cli\\.main' -and $_.CommandLine -match 'gateway' } | Select-Object ProcessId,CommandLine | ConvertTo-Json -Compress"], { timeout: 5000 }).catch(() => ({ stdout: '' }));
+    const parsed = String(stdout || '').trim();
+    if (parsed) {
+      const values = JSON.parse(parsed);
+      rows = (Array.isArray(values) ? values : [values]).map((item) => ({ pid: Number(item.ProcessId), command: String(item.CommandLine || '') }));
+    }
+  } else {
+    const { stdout } = await execFileAsync('ps', ['-axo', 'pid=,command='], { timeout: 5000 }).catch(() => ({ stdout: '' }));
+    rows = String(stdout || '').split('\n').flatMap((line) => {
+      const match = line.match(/^\s*(\d+)\s+(.+)$/);
+      return match ? [{ pid: Number(match[1]), command: match[2] }] : [];
+    });
+  }
+  return rows.flatMap((item) => {
+    if (!/hermes_cli\.main/.test(item.command) || !/gateway\s+run/.test(item.command)) return [];
+    const runtimePath = item.command.match(/^"([^"]+)"/)?.[1] || item.command.split(/\s+/)[0] || '';
+    const relative = path.relative(legacyRoot, path.resolve(runtimePath));
+    if (relative.startsWith('..') || path.isAbsolute(relative)) return [];
+    const profileName = item.command.match(/--profile(?:=|\s+)([a-z0-9_-]+)/i)?.[1] || 'default';
+    return [{ ...item, runtimePath, profileName }];
+  });
+}
+
+function hermesGatewayRepairRunner() {
+  return createHermesGatewayRepair({
+    hermesHome,
+    frakioWorkHome,
+    homeDir,
+    readFile,
+    readdir,
+    writeFile,
+    readState,
+    writeState,
+    exists,
+    mkdir,
+    rename,
+    rm,
+    stopGateway: stopOrVerifyProfileGateway,
+    uninstallService: uninstallManagedHermesGatewayService,
+    inspectProcesses: inspectLegacyHermesGatewayProcesses,
+    allowedRuntimeRoots: [
+      frakioBundledHermesRuntimeRoot,
+      frakioManagedHermesRuntimeRoot,
+      path.join(homeDir, '.hermes-web-ui', 'desktop-runtime', 'hermes'),
+    ],
+    legacyRuntimeRoots: [path.join(homeDir, '.hermes-web-ui', 'desktop-runtime', 'hermes')],
+    log: (result) => {
+      if (result.stoppedServices.length || result.archivedProfiles.length || result.cleanedAutoStartNames.length) {
+        console.log(`Hermes Gateway legacy cleanup: services=${result.stoppedServices.length} profiles=${result.archivedProfiles.length} autoStart=${result.cleanedAutoStartNames.length}`);
+      }
+      for (const item of result.unresolved) console.warn(`Hermes Gateway legacy cleanup warning [${item.profileName}]: ${item.reason}`);
+    },
+  });
+}
+
+async function runHermesGatewayLegacyCleanup(state = null, options = {}) {
+  return hermesGatewayRepairRunner().run(state || await readState(), options);
+}
+
 async function ensureHermesRuntimeReady({ force = false } = {}) {
   if (hermesAutoStartPromise && !force) return hermesAutoStartPromise;
   const run = (async () => {
     resetHermesAutoStartState('starting');
     try {
+      const repaired = automaticGatewayRepairEnabled ? await runHermesGatewayLegacyCleanup() : { state: await readState() };
       addHermesAutoStartStep('home', '初始化 Hermes Home', 'running', '', 'core');
       await ensureHermesBaseConfig(hermesAutoStartState.logs);
       addHermesAutoStartStep('home', '初始化 Hermes Home', 'ready', hermesHome, 'core');
 
       addHermesAutoStartStep('profiles', '读取本地 Hermes Profiles', 'running');
-      const profiles = await readHermesProfiles();
+      const registeredProfiles = new Set(['default', ...(repaired.state.agents || []).map((agent) => slug(agent.profileName || agent.id || '')).filter(Boolean)]);
+      const profiles = (await readHermesProfiles()).filter((profile) => registeredProfiles.has(profile.name));
       addHermesAutoStartStep('profiles', '读取本地 Hermes Profiles', profiles.length ? 'ready' : 'skipped', profiles.length ? `${profiles.length} profiles` : '未发现 profile');
       const removedAutoStartProfiles = await pruneMissingGatewayAutoStartProfiles(profiles);
       if (removedAutoStartProfiles.length) hermesAutoStartState.logs.push(`已清理不存在 Profile 的 Gateway 自动启动项：${removedAutoStartProfiles.join(', ')}`);
@@ -6061,6 +6139,7 @@ async function ensureHermesRuntimeReady({ force = false } = {}) {
 async function hermesRuntimeStatus() {
   const bridge = await probeHermesBridge({ timeoutMs: 1000 });
   const profiles = await readHermesProfiles();
+  const state = await readState();
   const tools = await runtimeToolDiagnostics();
   const runtime = await findFrakioHermesRuntime();
   const manager = await runtimeManagerStatus();
@@ -6072,6 +6151,7 @@ async function hermesRuntimeStatus() {
     bridge,
     profiles,
     gateways,
+    gatewayRepair: state.runtimeMigrations?.hermesGatewayLegacyCleanupV1 || null,
     hermesHome,
     frakioWorkHome,
     agentRoot: runtime?.pythonRoot || '',
@@ -10611,6 +10691,15 @@ app.get('/api/hermes-runtime/diagnostics', async (_req, res) => {
     res.json(await hermesRuntimeDiagnostics());
   } catch (error) {
     res.status(500).json({ error: error.message || 'Hermes runtime diagnostics failed.' });
+  }
+});
+
+app.post('/api/hermes-runtime/gateway-repair', async (_req, res) => {
+  try {
+    const repaired = await runHermesGatewayLegacyCleanup(null, { force: true });
+    res.json({ ok: repaired.result.status === 'completed', gatewayRepair: repaired.result, runtime: await hermesRuntimeStatus() });
+  } catch (error) {
+    res.status(500).json({ error: error.message || 'Gateway 历史修复失败。' });
   }
 });
 
@@ -20374,7 +20463,17 @@ export async function createApp() {
   await runLegacyDemoDataCleanupMigration().catch((error) => {
     console.warn('Legacy demo data cleanup skipped:', error?.message || error);
   });
-  const startupState = await readState();
+  let startupState = await readState();
+  const gatewayRepair = automaticGatewayRepairEnabled
+    ? await runHermesGatewayLegacyCleanup(startupState).catch((error) => {
+        console.warn('Hermes Gateway legacy cleanup skipped:', error?.message || error);
+        return null;
+      })
+    : null;
+  if (gatewayRepair?.state) startupState = gatewayRepair.state;
+  await runtimePackageManager.repairBroken('pi').catch((error) => {
+    console.warn('Pi Runtime automatic repair skipped:', error?.message || error);
+  });
   let runtimeMigrationChanged = false;
   for (const agent of startupState.agents || []) {
     if (agent.runtimePolicy?.defaultRuntimeId !== 'gemini' && !(agent.runtimePolicy?.allowedRuntimeIds || []).includes('gemini')) continue;

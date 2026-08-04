@@ -229,6 +229,34 @@ export function createRuntimePackageManager({ store, providers = new Map() } = {
     });
   }
 
+  async function repairBroken(runtimeId) {
+    const provider = providerMap.get(runtimeId);
+    if (!provider?.verify) return { status: 'unsupported', repaired: [] };
+    const candidates = store.listRuntimePackages(runtimeId).filter((pkg) => (
+      pkg.installationState === 'installed'
+      && (pkg.availability === 'broken' || ['failed', 'incompatible'].includes(pkg.verificationState))
+    ));
+    const repaired = [];
+    for (const candidate of candidates) {
+      const verified = await provider.verify(candidate).catch((error) => ({ ok: false, error: error.message || String(error) }));
+      if (!verified?.ok) continue;
+      store.putRuntimePackage({
+        ...candidate,
+        verificationState: 'verified',
+        availability: 'ready',
+        verificationReceipt: verified,
+        verifiedAt: new Date().toISOString(),
+        lastVerifiedAt: new Date().toISOString(),
+      });
+      repaired.push(candidate.runtimeBuildId);
+    }
+    const activation = store.getRuntimeActivation(runtimeId);
+    if (!activation?.activeBuildId && repaired[0]) {
+      store.putRuntimeActivation({ runtimeId, activeBuildId: repaired[0], previousBuildId: '', activationRevision: `activation_${randomUUID()}` });
+    }
+    return { status: repaired.length ? 'repaired' : 'unchanged', repaired, activation: store.getRuntimeActivation(runtimeId) };
+  }
+
   async function remove(runtimeId, version) {
     const provider = providerMap.get(runtimeId);
     const pkg = store.listRuntimePackages(runtimeId).find((item) => item.runtimeVersion === String(version || '') && item.source === 'managed');
@@ -245,5 +273,5 @@ export function createRuntimePackageManager({ store, providers = new Map() } = {
     return pkg;
   }
 
-  return { providers: providerMap, ensureBundled, resolveBinding, status, install, migrateLegacyBundled, discover, bindNative, unbindNative, activate, remove };
+  return { providers: providerMap, ensureBundled, resolveBinding, status, install, migrateLegacyBundled, repairBroken, discover, bindNative, unbindNative, activate, remove };
 }

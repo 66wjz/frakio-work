@@ -729,6 +729,7 @@ type HermesRuntimeStatus = {
   bridge: { endpoint: string; running: boolean; ready: boolean; status: string; error?: string };
   profiles: HermesProfile[];
   gateways: Array<{ profileName: string; running: boolean; status: string; error?: string }>;
+  gatewayRepair?: HermesGatewayRepair | null;
   hermesHome: string;
   frakioWorkHome?: string;
   agentRoot?: string;
@@ -746,6 +747,16 @@ type HermesRuntimeStatus = {
     warnings?: string[];
   };
   checkedAt: string;
+};
+type HermesGatewayRepair = {
+  version: 1;
+  status: 'completed' | 'completed_with_warnings';
+  repairedAt: string;
+  stoppedServices: string[];
+  archivedProfiles: string[];
+  cleanedAutoStartNames: string[];
+  unresolved: Array<{ profileName: string; reason: string }>;
+  backupPath?: string;
 };
 type HermesRuntimeInfo = {
   source: 'bundled' | 'managed' | 'override' | string;
@@ -11252,6 +11263,7 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
   const [runtimeBusy, setRuntimeBusy] = useState('');
   const [checkingIds, setCheckingIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState('');
+  const [gatewayRepair, setGatewayRepair] = useState<HermesGatewayRepair | null>(null);
   const detect = useCallback(async (runtimeId: string) => {
     setCheckingIds((current) => new Set(current).add(runtimeId));
     try {
@@ -11259,6 +11271,10 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || '运行时检测失败。');
       setRuntimes((current) => mergeRuntimeDefinitions(current, [data.runtime]));
+      if (runtimeId === 'hermes') {
+        const hermes = await fetch('/api/hermes-runtime/status').then((item) => item.json()).catch(() => null);
+        if (hermes?.gatewayRepair) setGatewayRepair(hermes.gatewayRepair);
+      }
     } finally {
       setCheckingIds((current) => {
         const next = new Set(current);
@@ -11274,6 +11290,8 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Runtime 状态读取失败。');
       setRuntimes((current) => mergeRuntimeDefinitions(current, data.runtimes || []));
+      const hermesRuntimeStatus = await fetch('/api/hermes-runtime/status').then((item) => item.json()).catch(() => null);
+      if (hermesRuntimeStatus?.gatewayRepair) setGatewayRepair(hermesRuntimeStatus.gatewayRepair);
       const catalogs = await Promise.all(['hermes', 'pi', 'codex', 'claude'].map(async (runtimeId) => {
         try {
           const catalogResponse = await fetch(`/api/runtimes/${runtimeId}/models`);
@@ -11378,6 +11396,18 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
       setRuntimeBusy('');
     }
   };
+  const repairHermesGateways = async () => {
+    setRuntimeBusy('repair:hermes-gateways');
+    setError('');
+    try {
+      const data = await requestJson<{ gatewayRepair: HermesGatewayRepair }>('/api/hermes-runtime/gateway-repair', { method: 'POST', body: '{}' });
+      setGatewayRepair(data.gatewayRepair);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Gateway 历史修复失败。');
+    } finally {
+      setRuntimeBusy('');
+    }
+  };
   const verifyAll = () => void Promise.all(runtimeSeed.map((runtime) => detect(runtime.id)));
   const runtimeSummary = useMemo(() => {
     const checked = runtimes.filter((runtime) => Boolean(runtime.capabilitySnapshot)).length;
@@ -11470,6 +11500,13 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
                 {!packageStatus?.packages.length && <small className="runtime-detail-empty">尚未发现已绑定的安装来源。</small>}
               </div></section>
               <section><span>操作记录</span><small>{[runtimeSource, buildDetail, catalogDetail, checkedAt ? `最近验证 ${formatTime(checkedAt)}` : '尚无验证记录'].filter(Boolean).join(' · ')}</small></section>
+              {runtime.id === 'hermes' && gatewayRepair && <section>
+                <span>Gateway 历史修复</span>
+                <strong>{gatewayRepair.status === 'completed' ? '旧版残留已自动清理' : '自动清理已完成，仍有项目需要确认'}</strong>
+                <small>{[`停止 ${gatewayRepair.stoppedServices.length} 个旧服务`, `归档 ${gatewayRepair.archivedProfiles.length} 个孤儿 Profile`, `清理 ${gatewayRepair.cleanedAutoStartNames.length} 个自动启动项`, `执行于 ${formatTime(gatewayRepair.repairedAt)}`].join(' · ')}</small>
+                {gatewayRepair.unresolved.length > 0 && <div className="runtime-source-list">{gatewayRepair.unresolved.slice(0, 6).map((item, index) => <div className="runtime-source-card" key={`${item.profileName}:${index}`}><div><strong>{item.profileName || '未知 Profile'}</strong><small>{item.reason}</small></div><em>未自动处理</em></div>)}</div>}
+                <div className="runtime-source-actions"><button className="secondary-btn compact quiet" onClick={() => void repairHermesGateways()} disabled={Boolean(runtimeBusy)}>{runtimeBusy === 'repair:hermes-gateways' ? '检测中' : '重新检测旧 Gateway'}</button></div>
+              </section>}
               {candidates.length > 0 && <section><span>发现的系统安装</span><div className="runtime-source-list">{candidates.map((candidate) => <div className="runtime-source-card" key={`${candidate.realPath}:${candidate.fingerprint}`}><div><strong>{candidate.version || '未知版本'} · {candidate.compatibility === 'compatible' ? '兼容' : '需检查'}</strong><small title={candidate.realPath}>{candidate.realPath}</small></div>{candidate.compatibility === 'compatible' && <button className="secondary-btn compact quiet" disabled={Boolean(runtimeBusy)} onClick={() => void bindRuntime(runtime.id, candidate)}>确认绑定</button>}</div>)}</div></section>}
             </div>}
           </article>;

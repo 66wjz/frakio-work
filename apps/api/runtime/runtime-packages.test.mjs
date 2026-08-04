@@ -150,6 +150,42 @@ test('missing legacy bundled Pi is recorded as broken without activating PATH fa
   assert.equal(await manager.resolveBinding('pi'), null);
 });
 
+test('broken Pi packages are reverified and reactivated after a host upgrade', async (t) => {
+  const { store } = await fixture();
+  t.after(() => store.close());
+  store.putRuntimePackage({
+    runtimeId: 'pi', runtimeVersion: '0.83.0', runtimeBuildId: 'pi-managed-broken', runtimeDir: '/managed',
+    source: 'managed', platform: process.platform, arch: process.arch, adapterProtocolVersion: 1,
+    installationState: 'installed', verificationState: 'failed', availability: 'broken',
+  });
+  const manager = createRuntimePackageManager({ store, providers: new Map([['pi', {
+    async verify(pkg) { return { ok: true, runtimeVersion: pkg.runtimeVersion, runtimeBuildId: pkg.runtimeBuildId }; },
+  }]]) });
+  const repaired = await manager.repairBroken('pi');
+  assert.equal(repaired.status, 'repaired');
+  assert.deepEqual(repaired.repaired, ['pi-managed-broken']);
+  assert.equal(store.getRuntimePackage('pi-managed-broken').availability, 'ready');
+  assert.equal(store.getRuntimeActivation('pi').activeBuildId, 'pi-managed-broken');
+  assert.equal((await manager.repairBroken('pi')).status, 'unchanged');
+});
+
+test('Pi installation uses the desktop-provided Frakio version when app.asar package.json is unavailable', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-pi-app-version-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const catalogPath = path.join(root, 'pi.json');
+  await writeFile(catalogPath, JSON.stringify({
+    schema: 1, runtimeId: 'pi', versions: [{ version: '0.83.0', integrity: 'sha512-ok', adapterProtocolVersion: 1, minimumFrakioVersion: '1.1.1' }],
+  }));
+  const providerWithVersion = (appVersion) => createPiRuntimeProvider({
+    appRoot: path.join(root, 'missing-app-root'), appVersion,
+    managedRoot: path.join(root, `managed-${appVersion}`), stagingRoot: path.join(root, `staging-${appVersion}`), catalogPath,
+    execFile: async () => { throw new Error('npm reached'); },
+    fetchImpl: async () => ({ ok: true, async json() { return { 'dist-tags': { latest: '0.83.0' }, versions: { '0.83.0': { dist: { integrity: 'sha512-ok' } } }, time: {} }; } }),
+  });
+  await assert.rejects(() => providerWithVersion('1.0.0').install('0.83.0'), /需要 Frakio Work 1\.1\.1/);
+  await assert.rejects(() => providerWithVersion('1.2.1').install('0.83.0'), /npm reached/);
+});
+
 test('native CLI binding is explicit and becomes broken when the executable changes', async (t) => {
   const { root, store } = await fixture();
   t.after(() => store.close());
