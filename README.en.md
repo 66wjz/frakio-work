@@ -1,17 +1,40 @@
-# Frakio Work
+<div align="center">
 
-[中文](README.md)
+<img src="docs/assets/readme/72e3a0fe-eb3d-485a-9c5c-6456e4ed25a6.png" alt="Frakio Work Logo" width="100">
 
-Frakio Work is a multi-agent workspace built around Hermes Agent. I have personally used all kinds of Hermes Web UIs and third-party clients on the internet, but none of them really matched my collaboration needs. Also, to be honest, many of the interfaces looked pretty ugly and did not match my taste. That is why Frakio Work was born.
+<h1>Frakio Work</h1>
+
+<p>A multi-agent collaborative workspace powered by Hermes Agent and Pi.</p>
+
+<p>
+  <a href="https://madsgogo.com">🌱 Homepage</a>
+  ·
+  <a href="https://madsgogo.life">📚 Blog</a>
+  ·
+  <a href="https://qm.qq.com/q/EMhcKWipnW">💬 Community</a>
+  ·
+  <a href="README.md">🇨🇳 中文</a>
+  ·
+  <a href="README.en.md">🇺🇸 English</a>
+</p>
+
+</div>
+
+Frakio Work is a cross-platform multi-agent workspace with Hermes Agent and Pi as dual runtimes. Switch runtimes freely for each Agent and let a team of Agents collaborate naturally in one conversation.
+
 ## Quick Setup
 
-If you just want to use Frakio Work directly, the desktop app is recommended. Open [GitHub Releases](https://github.com/MadsGao/frakio-work/releases) and download the DMG that matches your computer architecture. Apple Silicon users should download `arm64`; Intel users should download `x64`. The current macOS installer is not yet Apple-signed or notarized. If macOS says it cannot verify the developer on first launch, right-click Frakio Work in Finder and choose **Open**.
+For direct use, download the desktop app from [GitHub Releases](https://github.com/MadsGao/frakio-work/releases). Download `arm64` for Apple Silicon or `x64` for an Intel Mac. The current macOS installer is not Apple-signed or notarized. If macOS blocks the first launch, Control-click Frakio Work in Finder and choose **Open**. If the app is reported as damaged after installation, run:
 
-The desktop app includes the Web UI, local API, and bundled Runtime. You do not need to run `npm run dev` manually. When a new version is available, you can check GitHub Releases from Settings and open the matching download page.
+```bash
+xattr -dr com.apple.quarantine "/Applications/Frakio Work.app"
+```
+
+The desktop app includes the Web UI, local API, and bundled Runtime files, so you do not need to run `npm run dev`. New releases can be checked from Settings, which opens the matching GitHub Releases download page.
 
 ### Self-hosted Web UI
 
-The Web UI uses the same workbench as the desktop app. Native self-hosted packages include Node, Python, Hermes Runtime, and Bridge, so Node, Python, and Hermes Agent do not need to be installed separately. Packages are available for Windows x64 and Linux x64; macOS users should use the desktop DMG.
+The self-hosted Web UI includes Node, Python, Hermes Runtime, and Bridge. Windows and Linux users do not need to start it from source. Packages are available for Windows x64 and Linux x64; macOS users should use the desktop DMG.
 
 Linux x64:
 
@@ -25,7 +48,7 @@ Windows PowerShell:
 irm https://raw.githubusercontent.com/MadsGao/frakio-work/main/scripts/install.ps1 | iex
 ```
 
-The service starts automatically and prints the generated administrator password once. Open `http://127.0.0.1:8787` locally, or use the host's private LAN address from another device on the same trusted network. Trusted-LAN HTTP is intended for private networks; use your own HTTPS reverse proxy for public access. The `frakio-work` command supports `start`, `stop`, `restart`, `status`, `logs`, `update`, `rollback`, and `password reset`.
+The service starts automatically and prints the generated administrator password once. Open `http://127.0.0.1:8787` locally, or use the host's private LAN address from another device on the same trusted network. The `frakio-work` command supports `start`, `stop`, `restart`, `status`, `logs`, `update`, `rollback`, and `password reset`.
 
 Linux x64 also supports the Docker image published from this repository:
 
@@ -37,9 +60,9 @@ docker run -d --name frakio-work \
   ghcr.io/madsgao/frakio-work:latest
 ```
 
-### Development from source
+### Development from Source
 
-Source development requires Node.js 24, npm, Git, and uv.
+Source development requires Node.js 24, npm, Git, and uv:
 
 ```bash
 git clone https://github.com/MadsGao/frakio-work.git
@@ -49,98 +72,84 @@ npm run runtime:build
 npm run dev
 ```
 
-After starting from source, the Web UI is available at `http://127.0.0.1:5173`, and the local API is available at `http://127.0.0.1:8787`. User data, credentials, logs, Runtime files, and backups are stored under `~/.frakio-work` and will not be written into the source repository.
-
+After starting from source, the Web UI is available at `http://127.0.0.1:5173` and the local API is available at `http://127.0.0.1:8787`. User data, credentials, logs, Runtime files, and backups are stored under `~/.frakio-work` and are not written into the source repository.
 
 ---
+
 ## Core Idea
 
-The core of Frakio Work is Hermes Agent. In a broad sense, it is a third-party client for Hermes Agent, but because the main focus is deep multi-agent collaboration, another core interaction layer is local Markdown document interaction. At the moment, the recommended setup is Frakio Work + Obsidian.
+Frakio Work is a collaborative workspace built around multiple harnesses. Build a team of Agents with distinct personalities, let them work naturally in one conversation, and give them long-term evolving memory to support the OPC model.
 
-Deep Obsidian integration is still under development and cannot be fully automated in one click yet. The current way to interact with it still requires manually configuring rule documents in Obsidian. You can also follow my blog madsgogo.life. Before that feature is fully adapted, I will publish related tutorial articles there.
-## Future Direction
+Stitching together useful ideas is a central part of Frakio Work. It draws inspiration from the following open-source projects, in no particular order: Hermes Agent, Hermes Studio, Pi, Codex, Craft Agent, Cindy, QM, SuperConductor, and Orca.
 
-Frakio Work will continue to grow around the idea of multi-agent collaboration and add more configuration capabilities. In terms of the overall function set, I will keep taking the stitching route. At the moment, it stitches together:
+![Frakio Work overview](docs/assets/readme/workbench-overview.png)
 
-1.  The AI core driver of Hermes Agent
-2. Codex's design interface and some dynamic interactions
-3. Arc browser's interface color customization and project area switching
-4. Some module ideas from Hermes Studio
-5. Accio Work's right-side task area structure
-6. ...
-
-At the current stage, my own evaluation of Frakio Work in actual use is that it is a superior experience.
 ## Features
-### Quick Multi-Agent Conversation Entry
-#### New Conversation
 
-[Watch the Frakio Work main interface demo](https://github.com/MadsGao/frakio-work/releases/download/v0.1.2/frakio-work-main-demo.mp4)
+### Natural Collaboration in Conversation
 
-1. Click the @ above the input box to talk to any configured Agent at any time.
-2. Type @ in the input box to call up another Agent at any time, either to start a conversation or inherit a conversation.
-3. The lower-right corner of the input box adds model switching, so you can switch the model for the current Agent at any time. This does not affect the Agent's global default model and only takes effect in the current session.
-#### Conversation Interface - Summon With @ At Any Time
+Talk to any Agent in natural language, much like a group chat. Agents can autonomously @ mention one another for up to 64 turns; the limit is configurable in Settings.
 
-![CleanShot 2026-07-19 at 13.19.33@2x.png](docs/assets/readme/chat-mention.png)
+![Natural multi-agent collaboration](docs/assets/readme/natural-agent-collaboration.png)
 
-During a conversation, you can freely type @ to summon other Agents into the conversation.
-#### Conversation Follow Mode Switching
+#### Conversation Follow Modes
 
-![CleanShot 2026-07-19 at 13.24.10@2x.png](docs/assets/readme/conversation-follow.png)
+![Conversation follow modes](docs/assets/readme/conversation-follow-mode.png)
 
-At the top of the conversation, you can set the multi-agent mode for the current conversation:
-1. Default follow: when you do not @ another Agent, the next reply will be handled by the global default Agent. The global default Agent can be set in the Agent configuration center.
-2. Conversation follow: when the user @ mentions an Agent, the following conversation will be taken over by that Agent.
-3. Convert to project: if this conversation needs to become a project, you can convert it to a project, and it will automatically be added to the project area of the current workspace.
-4. Knowledge vault (in development): link a local Obsidian vault and call the rule index from the corresponding Obsidian vault to enable deep multi-agent collaboration.
+Set the multi-agent mode at the top of each conversation:
+
+1. Default follow: when you do not @ mention another Agent, the global default Agent handles the next reply. Set it in the Agent Configuration Center.
+2. Conversation follow: after you @ mention an Agent, that Agent takes over the following replies.
+3. Convert to project: turn a conversation into a project and add it to the current workspace's project area.
+4. Knowledge Vault (Beta): connect a local Obsidian vault and use its rule index for deeper multi-agent collaboration.
+
 #### Quick Conversation Index
 
-![CleanShot 2026-07-19 at 13.53.04@2x.png](docs/assets/readme/quick-index.png)
+![Quick conversation index](docs/assets/readme/conversation-quick-index.png)
 
-A quick jump index has been added during conversations. It recreates Codex's quick conversation index and is useful when there are too many messages and you need to jump quickly.
-## Left And Right Sidebars
+Use the quick-jump index to find content quickly in longer conversations.
 
-[Watch the Frakio Work left and right sidebar demo](https://github.com/MadsGao/frakio-work/releases/download/v0.1.2/frakio-work-sidebars-demo.mp4)
+## Settings
 
-This recreates Codex's smooth dynamic left and right sidebar interactions, and the right sidebar configuration also references Accio Work's layout.
-## Settings Improvements
-### Fast Agent Configuration Center
+### Agent Configuration Center
 
-![CleanShot 2026-07-19 at 12.54.15@2x.png](docs/assets/readme/agent-config-center.png)
+![Agent configuration center](docs/assets/readme/agent-configuration-center.png)
 
-1. Scattered Agent settings are collected into one place and displayed as cards for easier management.
-2. Agent avatars can be customized.
-3. A default Agent is added. The default Agent is Frakio Work's global default Agent, meaning it is the default reply Agent when the user does not specify any Agent. It acts as the butler model.
-4. Agent default models are added, meaning the default model used when the user does not specify a model for that Agent.
+1. Manage otherwise scattered Agent settings together as cards.
+2. Customize Agent avatars.
+3. Set the global default Agent for replies where no Agent is specified.
+4. Set an Agent's default model when no model is specified.
+
 ### Model Configuration
 
-![CleanShot 2026-07-19 at 13.28.46@2x.png](docs/assets/readme/model-config.png)
+![Model configuration](docs/assets/readme/model-configuration.png)
 
-Configure a model once, and multiple Agents can share it. I developed this module because in Hermes Agent and other third-party usage flows, each Agent has to be configured separately, which feels repetitive.
-### Monitoring Beautification
+Configure a model once and share it among multiple Agents, without repeating the same setup for every Agent.
 
-![CleanShot 2026-07-19 at 13.31.05@2x.png](docs/assets/readme/monitor-dashboard.png)
+### Monitoring Dashboard
 
-Because the original one was too ugly, I made a visual beautification, referencing the CC Switch Token monitoring panel.
+![Monitoring dashboard](docs/assets/readme/monitoring-dashboard.png)
+
+The monitoring page provides a visual dashboard inspired by the CC Switch Token dashboard.
+
 ### Personal Profile
 
-![CleanShot 2026-07-19 at 13.32.57@2x.png](docs/assets/readme/profile.png)
+![Personal profile](docs/assets/readme/personal-profile.png)
 
-A personal profile page has been added, referencing Codex's personal profile page. There should always be a stats panel to show off your AI usage process. You can customize your own conversation avatar, and that avatar will appear on the loading welcome page and in conversations.
-### Obsidian Vault (In Development)
+The profile page summarizes AI usage and supports a custom conversation avatar, which appears on the welcome screen and in conversations.
 
-![CleanShot 2026-07-19 at 13.34.13@2x.png](docs/assets/readme/obsidian-vault.png)
+### LLM Wiki Knowledge Vault (Beta)
 
-This is a key point for deep multi-agent collaboration. Only when each Agent's working interaction files actually interact locally can precise collaboration be achieved, instead of relying on context or cross-session context guessing. The development direction is to switch between different vaults and reference the rule indexes in those vaults, so different large-scale operations projects can be operated precisely.
-### Multi-Workspace Concept
+![LLM Wiki knowledge vault](docs/assets/readme/llm-wiki-vault.png)
 
-![CleanShot 2026-07-19 at 13.37.55@2x.png](docs/assets/readme/workspaces.png)
+Knowledge vaults let Agents collaborate through local working files rather than relying only on one-off context or guesses across sessions. Switch between vaults and use their rule indexes for different projects.
 
-This idea comes from Arc's workspace classification concept. In actual use, for example, there can be one workspace for project development, one for media operations, one for casual conversations, and one for independent site operations.
+### Multiple Workspaces
 
-Putting all conversations in the same workspace makes them hard to view and categorize, so I came up with this idea. Also, to distinguish different workspaces, I recreated custom theme colors for different workspaces. You can set the workspace name, icon, and color.
+![Multiple workspaces](docs/assets/readme/multi-workspaces.png)
 
-Colors can be a single color or a gradient of up to three colors, with freely adjustable brightness and noise.
-## Ending
+Organize workspaces for product development, media operations, everyday chats, or independent-site operations. Each workspace can have its own name, icon, and color theme. Use a solid color or a gradient of up to three colors, then adjust brightness and noise.
 
-That is everything about the new and optimized modules in Frakio Work. Everyone is very welcome to try it. If you run into any problems, you can add the author's WeChat, MadsGao, and discuss future optimization directions together.
+## Closing
+
+This is the current feature set and direction for Frakio Work. For questions or feedback, add the author on WeChat: `MadsGao`.
