@@ -191,6 +191,60 @@ try {
   assert.deepEqual(errors.filter((value) => !value.includes('favicon') && !value.includes('503 (Service Unavailable)')), []);
   await primary.context.close();
 
+  async function inspectAdvancedModelSurface(side, extraStyle = '') {
+    const session = await createWorkbenchPage(browser, { viewport: { width: 1440, height: 900 } });
+    const threadButtons = session.page.locator('.rail-thread-main');
+    assert.ok(await threadButtons.count() > 0, 'Advanced model surface regression needs an existing thread.');
+    await threadButtons.first().click();
+    if (extraStyle) await session.page.addStyleTag({ content: extraStyle });
+    const trigger = session.page.locator('.provider-model-trigger').first();
+    await trigger.waitFor({ state: 'visible' });
+    await trigger.click();
+    const menu = session.page.locator('.provider-model-menu.advanced:visible');
+    await menu.waitFor({ state: 'visible' });
+    await menu.locator('.provider-model-root-panel > button', { hasText: '模型' }).click();
+    const root = menu.locator('.provider-model-root-panel:visible');
+    const subpanel = menu.locator('.provider-model-subpanel:visible');
+    await root.waitFor({ state: 'visible' });
+    await subpanel.waitFor({ state: 'visible' });
+    const surface = await menu.evaluate((element) => {
+      const menuStyle = getComputedStyle(element);
+      return {
+        menuWidth: element.getBoundingClientRect().width,
+        menuBackground: menuStyle.backgroundColor,
+        menuBorder: menuStyle.borderTopWidth,
+        menuShadow: menuStyle.boxShadow,
+        menuFilter: menuStyle.backdropFilter,
+      };
+    });
+    const rootSurface = await root.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { width: element.getBoundingClientRect().width, background: style.backgroundColor, border: style.borderTopWidth, shadow: style.boxShadow, filter: style.backdropFilter };
+    });
+    const subpanelSurface = await subpanel.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return { background: style.backgroundColor, border: style.borderTopWidth, shadow: style.boxShadow, filter: style.backdropFilter };
+    });
+    assert.equal(await menu.evaluate((element, targetSide) => element.classList.contains(`submenu-${targetSide}`), side), true, `The submenu should open to the ${side}.`);
+    assert.equal(surface.menuWidth, rootSurface.width, JSON.stringify({ surface, rootSurface, subpanelSurface }));
+    assert.equal(surface.menuBackground, 'rgba(0, 0, 0, 0)', JSON.stringify(surface));
+    assert.equal(surface.menuBorder, '0px', JSON.stringify(surface));
+    assert.equal(surface.menuShadow, 'none', JSON.stringify(surface));
+    assert.equal(surface.menuFilter, 'none', JSON.stringify(surface));
+    assert.equal(rootSurface.background, subpanelSurface.background, JSON.stringify({ surface, rootSurface, subpanelSurface }));
+    assert.notEqual(rootSurface.background, 'rgba(0, 0, 0, 0)', JSON.stringify({ surface, rootSurface, subpanelSurface }));
+    assert.equal(rootSurface.border, '0px', JSON.stringify({ surface, rootSurface, subpanelSurface }));
+    assert.equal(subpanelSurface.border, '0px', JSON.stringify({ surface, rootSurface, subpanelSurface }));
+    assert.notEqual(rootSurface.shadow, 'none', JSON.stringify({ surface, rootSurface, subpanelSurface }));
+    assert.notEqual(subpanelSurface.shadow, 'none', JSON.stringify({ surface, rootSurface, subpanelSurface }));
+    assert.equal(rootSurface.filter, 'none', JSON.stringify({ surface, rootSurface, subpanelSurface }));
+    assert.equal(subpanelSurface.filter, 'none', JSON.stringify({ surface, rootSurface, subpanelSurface }));
+    await session.context.close();
+  }
+
+  await inspectAdvancedModelSurface('left');
+  await inspectAdvancedModelSurface('right', '.composer { margin-right: 500px !important; }');
+
   const reduced = await createWorkbenchPage(browser, { viewport: { width: 720, height: 820 }, reducedMotion: 'reduce' });
   const reducedTrigger = reduced.page.getByRole('button', { name: '运行模式：Chat' });
   const reducedMetrics = await reducedTrigger.evaluate((element) => {

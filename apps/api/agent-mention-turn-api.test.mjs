@@ -25,13 +25,13 @@ async function startMentionBridge(t) {
         chats.push({ runId, profile: request.profile, message: request.message, sessionId: request.session_id });
         runs.set(runId, {
           profile: request.profile,
-          output: request.profile === 'iris' ? '@Max 烧麦叫你出来打招呼。' : '烧麦，早上好。我是 Max。',
+          output: request.profile === 'iris' ? '@Victor 请接着说明。' : '收到，我是 Victor。',
         });
         response = { ok: true, run_id: runId, session_id: request.session_id, status: 'started' };
       } else if (request.action === 'get_output') {
         const run = runs.get(request.run_id);
         const output = run?.output || '';
-        const explicitCompletion = run?.profile === 'max';
+        const explicitCompletion = run?.profile === 'victor';
         response = {
           ok: true,
           run_id: request.run_id,
@@ -73,10 +73,10 @@ test('API owns Agent mention routing after the browser starts only the root run'
   const home = path.join(parent, '.frakio-work');
   const hermesHome = path.join(parent, '.hermes');
   await mkdir(path.join(home, 'data'), { recursive: true });
-  for (const profile of ['iris', 'max']) {
+  for (const profile of ['iris', 'victor']) {
     const profileHome = path.join(hermesHome, 'profiles', profile);
     await mkdir(profileHome, { recursive: true });
-    await writeFile(path.join(profileHome, 'profile.yaml'), `name: ${profile === 'iris' ? 'Iris' : 'Max'}\nrole: Test Agent\n`);
+    await writeFile(path.join(profileHome, 'profile.yaml'), `name: ${profile === 'iris' ? 'Iris' : 'Victor'}\nrole: Test Agent\n`);
     await writeFile(path.join(profileHome, 'config.yaml'), '{}\n');
   }
 
@@ -115,7 +115,7 @@ test('API owns Agent mention routing after the browser starts only the root run'
   });
   assert.equal(modelResponse.status, 200);
   const model = (await modelResponse.json()).model;
-  for (const agentId of ['iris', 'max']) {
+  for (const agentId of ['iris', 'victor']) {
     assert.equal((await fetch(`${baseUrl}/api/agents/${agentId}`, {
       method: 'PATCH',
       headers,
@@ -132,38 +132,42 @@ test('API owns Agent mention routing after the browser starts only the root run'
     method: 'POST',
     headers,
     body: JSON.stringify({
-      message: '早上好，叫Max出来打声招呼。',
+      message: '请 Iris 转交 Victor 继续说明。',
       selectedAgents: ['iris'],
       targetAgentId: 'iris',
       turnId: 'turn-agent-mention',
     }),
   });
-  assert.equal(rootResponse.status, 202);
+  assert.equal(rootResponse.status, 202, JSON.stringify(await rootResponse.clone().json().catch(() => ({}))));
   assert.equal((await rootResponse.json()).turnId, 'turn-agent-mention');
 
   const completed = await waitFor(async () => {
     const response = await fetch(`${baseUrl}/api/threads/${thread.id}`).then((item) => item.json());
     return response.thread.runStatus === 'idle'
-      && response.thread.messages.some((message) => message.agentId === 'max')
+      && response.thread.messages.some((message) => message.agentId === 'victor')
       && response.thread.activeRunGroup?.routes?.[0]?.status === 'completed'
       ? response.thread
       : null;
   });
-  assert.deepEqual(bridge.chats.map((chat) => chat.profile), ['iris', 'max']);
-  assert.deepEqual(completed.selectedAgents.sort(), ['iris', 'max']);
-  assert.equal(completed.messages.filter((message) => message.agentId === 'max').length, 1);
+  assert.deepEqual(bridge.chats.map((chat) => chat.profile), ['iris', 'victor']);
+  assert.deepEqual(completed.selectedAgents.sort(), ['iris', 'victor']);
+  assert.equal(completed.messages.filter((message) => message.agentId === 'victor').length, 1);
   const iris = completed.messages.find((message) => message.agentId === 'iris');
-  const max = completed.messages.find((message) => message.agentId === 'max');
-  assert.equal(iris.content, '@Max 烧麦叫你出来打招呼。');
-  assert.equal(max.parentMessageId, iris.id);
-  assert.equal(max.mentionDepth, 1);
-  assert.equal(max.routeReason, 'agent_mention');
-  assert.deepEqual(completed.activeRunGroup.routedEdges, ['iris->max']);
+  const victor = completed.messages.find((message) => message.agentId === 'victor');
+  assert.equal(iris.content, '@Victor 请接着说明。');
+  assert.equal(victor.parentMessageId, iris.id);
+  assert.equal(victor.mentionDepth, 1);
+  assert.equal(victor.routeReason, 'agent_mention');
+  assert.equal(iris.handoffs.length, 1);
+  assert.equal(iris.handoffs[0].targetAgentId, 'victor');
+  assert.equal(iris.handoffs[0].status, 'completed');
+  assert.equal(iris.handoffs[0].sourceMessageId, iris.id);
+  assert.deepEqual(completed.activeRunGroup.routedEdges, ['iris->victor']);
   assert.equal(completed.activeRunGroup.routes[0].status, 'completed');
   assert.equal(completed.runStatus, 'idle');
 
   await new Promise((resolve) => setTimeout(resolve, 100));
-  assert.deepEqual(bridge.chats.map((chat) => chat.profile), ['iris', 'max']);
+  assert.deepEqual(bridge.chats.map((chat) => chat.profile), ['iris', 'victor']);
 
   const eventText = await fetch(`${baseUrl}/api/threads/${thread.id}/turns/turn-agent-mention/events`, {
     headers: { cookie },
@@ -175,7 +179,7 @@ test('API owns Agent mention routing after the browser starts only the root run'
   assert.equal(events.filter((event) => event.event === 'run.started').length, 2);
   assert.equal(events.filter((event) => event.event === 'run.completed').length, 2);
   assert.equal(events.filter((event) => event.event === 'turn.completed').length, 1);
-  assert.deepEqual(events.filter((event) => event.event === 'run.started').map((event) => event.agentId), ['iris', 'max']);
+  assert.deepEqual(events.filter((event) => event.event === 'run.started').map((event) => event.agentId), ['iris', 'victor']);
 
   const finalCursor = Math.max(...events.map((event) => Number(event.cursor || 0)));
   const replayAfterCompletion = await fetch(`${baseUrl}/api/threads/${thread.id}/turns/turn-agent-mention/events?cursor=${finalCursor}`, {

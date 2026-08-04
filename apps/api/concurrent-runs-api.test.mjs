@@ -107,7 +107,7 @@ test('two conversations can run concurrently without losing either thread state'
     headers,
     body: JSON.stringify({ message: `task ${index + 1}`, turnId: `turn-${index + 1}`, targetAgentId: 'iris' }),
   })));
-  assert.deepEqual(runResponses.map((response) => response.status), [202, 202]);
+  assert.deepEqual(runResponses.map((response) => response.status), [202, 202], JSON.stringify(await Promise.all(runResponses.map((response) => response.clone().json().catch(() => ({}))))));
   const runs = await Promise.all(runResponses.map((response) => response.json()));
 
   for (const { thread } of conversations) {

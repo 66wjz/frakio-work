@@ -48,6 +48,18 @@ const toolsBySet = {
   ],
   use: [
     { name: 'hermes_workbench_protocol_get', description: 'Return the Frakio Workbench MCP protocol version and collaboration capabilities.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
+    {
+      name: 'frakio_agent_handoff',
+      description: 'Register an intentional Agent-to-Agent handoff for the current reply. Frakio executes it only after this reply is saved. In Work mode it is routed through the existing scheduler and never creates an unplanned hidden task.',
+      inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, targetAgentId: { type: 'string' }, reason: { type: 'string' }, sourceAgentId: { type: 'string' } }, required: ['threadId', 'targetAgentId', 'reason'], additionalProperties: false },
+    },
+    { name: 'frakio_knowledge_status', description: 'Read governed status, configuration, activity and pending counts for a Frakio vault.', inputSchema: { type: 'object', properties: { vaultId: { type: 'string' } }, required: ['vaultId'], additionalProperties: false } },
+    { name: 'frakio_knowledge_search', description: 'Search a Frakio vault with confidence and citation metadata.', inputSchema: { type: 'object', properties: { vaultId: { type: 'string' }, query: { type: 'string' }, limit: { type: 'number' } }, required: ['vaultId', 'query'], additionalProperties: false } },
+    { name: 'frakio_knowledge_read', description: 'Read one vault Markdown file with frontmatter, links and backlinks.', inputSchema: { type: 'object', properties: { vaultId: { type: 'string' }, path: { type: 'string' } }, required: ['vaultId', 'path'], additionalProperties: false } },
+    { name: 'frakio_knowledge_source_propose', description: 'Propose a source for user confirmation. This never admits the source automatically.', inputSchema: { type: 'object', properties: { vaultId: { type: 'string' }, title: { type: 'string' }, content: { type: 'string' }, origin: { type: 'string' }, kind: { type: 'string' } }, required: ['vaultId', 'title', 'content'], additionalProperties: false } },
+    { name: 'frakio_knowledge_changes_propose', description: 'Propose a governed multi-file knowledge change set. Runtime applies autonomy and review policy.', inputSchema: { type: 'object', properties: { vaultId: { type: 'string' }, summary: { type: 'string' }, changes: { type: 'array', items: { type: 'object', properties: { relativePath: { type: 'string' }, content: { type: 'string' }, action: { type: 'string', enum: ['write', 'delete'] }, baseHash: { type: 'string' } }, required: ['relativePath'], additionalProperties: false } } }, required: ['vaultId', 'summary', 'changes'], additionalProperties: false } },
+    { name: 'frakio_knowledge_rules_propose', description: 'Propose a rule change. Rule changes always wait for user review.', inputSchema: { type: 'object', properties: { vaultId: { type: 'string' }, summary: { type: 'string' }, changes: { type: 'array', items: { type: 'object', properties: { relativePath: { type: 'string' }, content: { type: 'string' }, action: { type: 'string', enum: ['write', 'delete'] }, baseHash: { type: 'string' } }, required: ['relativePath'], additionalProperties: false } } }, required: ['vaultId', 'summary', 'changes'], additionalProperties: false } },
+    { name: 'frakio_knowledge_lint', description: 'Run governed vault lint and return recorded issues.', inputSchema: { type: 'object', properties: { vaultId: { type: 'string' } }, required: ['vaultId'], additionalProperties: false } },
     { name: 'hermes_workbench_use_threads_list', description: 'List Frakio Work project and direct conversation threads.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     {
       name: 'hermes_workbench_use_thread_get',
@@ -268,7 +280,34 @@ async function listThreads() {
 }
 
 async function callTool(name, args = {}) {
-  if (name === 'hermes_workbench_protocol_get') return { protocolVersion, toolset, capabilities: { collaborationPlans: true, planMode: true, structuredPlanQuestions: true, planRevision: true, steerQueue: true } };
+  if (name === 'hermes_workbench_protocol_get') return { protocolVersion, toolset, capabilities: { collaborationPlans: true, planMode: true, structuredPlanQuestions: true, planRevision: true, steerQueue: true, structuredHandoffs: true } };
+  if (name === 'frakio_agent_handoff') {
+    const { threadId, ...body } = args;
+    return requestJson(`/api/threads/${encodeURIComponent(String(threadId || ''))}/handoffs`, { method: 'POST', body });
+  }
+  if (name === 'frakio_knowledge_status') return requestJson(`/api/vaults/${encodeURIComponent(String(args.vaultId || ''))}`);
+  if (name === 'frakio_knowledge_search') {
+    const params = new URLSearchParams({ q: String(args.query || '') });
+    if (args.limit) params.set('limit', String(args.limit));
+    return requestJson(`/api/vaults/${encodeURIComponent(String(args.vaultId || ''))}/search?${params.toString()}`);
+  }
+  if (name === 'frakio_knowledge_read') {
+    const params = new URLSearchParams({ path: String(args.path || '') });
+    return requestJson(`/api/vaults/${encodeURIComponent(String(args.vaultId || ''))}/file?${params.toString()}`);
+  }
+  if (name === 'frakio_knowledge_source_propose') {
+    const { vaultId, ...body } = args;
+    return requestJson(`/api/vaults/${encodeURIComponent(String(vaultId || ''))}/sources`, { method: 'POST', body });
+  }
+  if (name === 'frakio_knowledge_changes_propose') {
+    const { vaultId, ...body } = args;
+    return requestJson(`/api/vaults/${encodeURIComponent(String(vaultId || ''))}/operations`, { method: 'POST', body });
+  }
+  if (name === 'frakio_knowledge_rules_propose') {
+    const { vaultId, ...body } = args;
+    return requestJson(`/api/vaults/${encodeURIComponent(String(vaultId || ''))}/rule-proposals`, { method: 'POST', body });
+  }
+  if (name === 'frakio_knowledge_lint') return requestJson(`/api/vaults/${encodeURIComponent(String(args.vaultId || ''))}/lint`, { method: 'POST', body: {} });
   if (name === 'hermes_workbench_api_catalog_get') return { profile, workbenchUrl, routes: apiCatalog };
   if (name === 'hermes_workbench_api_request') return requestJson(assertAllowedPath(args.path || ''));
   if (name === 'hermes_workbench_use_threads_list') return listThreads();

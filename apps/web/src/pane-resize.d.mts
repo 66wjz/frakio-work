@@ -32,3 +32,13 @@ export function paneWidthFromKey(options: {
   minWidth: number;
   maxWidth: number;
 }): number;
+
+export function createLatestFrameScheduler<T>(options: {
+  requestFrame: (callback: FrameRequestCallback) => number;
+  cancelFrame: (frame: number) => void;
+  apply: (value: T) => void;
+}): {
+  schedule(value: T): void;
+  flush(): void;
+  cancel(): void;
+};

@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "runtimeId": "codex",
+  "generatedAt": "2026-08-02T00:00:00.000Z",
+  "versions": [
+    {
+      "version": "0.146.0",
+      "packageVersion": "0.146.0",
+      "integrity": "sha512-yG3sPWNda/2YAIQIDq9MrrjoCTIQ7rxYM5IasrG3VBcuhCLTkgeg/JzqmJq1V98RE4MJ5jCxDXXQlOjrditFRw==",
+      "adapterProtocolVersion": 1,
+      "minimumFrakioVersion": "1.1.1",
+      "node": ">=16",
+      "verifiedAt": "2026-08-02T00:00:00.000Z"
+    }
+  ]
+}

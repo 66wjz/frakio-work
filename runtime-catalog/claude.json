@@ -1,0 +1,16 @@
+{
+  "schema": 1,
+  "runtimeId": "claude",
+  "generatedAt": "2026-08-02T00:00:00.000Z",
+  "versions": [
+    {
+      "version": "2.1.220",
+      "packageVersion": "0.3.220",
+      "integrity": "sha512-glc7SdwPkOkLw8oxwLo9PKTdLJGqW/PIR4urWXFoRtX9YllwozsEVc5Tc1+EvLSkfrsxPJqQWqOgpjUOQXf1oA==",
+      "adapterProtocolVersion": 1,
+      "minimumFrakioVersion": "1.1.1",
+      "node": ">=18.0.0",
+      "verifiedAt": "2026-08-02T00:00:00.000Z"
+    }
+  ]
+}

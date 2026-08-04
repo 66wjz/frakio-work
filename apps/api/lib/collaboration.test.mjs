@@ -17,6 +17,14 @@ test('normalization keeps a valid active workflow and caps idempotency records',
   assert.equal(Object.keys(collaboration.idempotency).length, 200);
 });
 
+test('normalization does not revive terminal workflows', () => {
+  const collaboration = normalizeThreadCollaboration({
+    activeWorkflowId: 'finished',
+    workflows: [{ id: 'finished', status: 'completed' }, { id: 'cancelled', status: 'cancelled' }],
+  });
+  assert.equal(collaboration.activeWorkflowId, '');
+});
+
 test('task status projection emits only high-signal transitions', () => {
   assert.equal(taskStatusEvent({ status: 'running' }, { id: 'a', status: 'blocked', title: 'A' })?.type, 'task.waiting');
   assert.equal(taskStatusEvent({ status: 'blocked' }, { id: 'a', status: 'ready', title: 'A' })?.type, 'task.resumed');

@@ -1,8 +1,19 @@
 const QUOTED_MESSAGE_BLOCK_RE = /<quoted_message(?:\s[^>]*)?>[\s\S]*?<\/quoted_message>/gi;
+const FENCED_CODE_BLOCK_RE = /```[\s\S]*?```|~~~[\s\S]*?~~~/g;
+const INLINE_CODE_RE = /`[^`\n]+`/g;
+const MARKDOWN_QUOTE_RE = /^\s*>.*$/gm;
 const ASCII_WORD_RE = /[A-Za-z0-9_]/;
 
 function maskQuotedMessageBlocks(content) {
-  return String(content || '').replace(QUOTED_MESSAGE_BLOCK_RE, (block) => block.replace(/[^\n]/g, ' '));
+  return String(content || '')
+    .replace(QUOTED_MESSAGE_BLOCK_RE, (block) => block.replace(/[^\n]/g, ' '))
+    .replace(FENCED_CODE_BLOCK_RE, (block) => block.replace(/[^\n]/g, ' '))
+    .replace(INLINE_CODE_RE, (block) => ' '.repeat(block.length))
+    .replace(MARKDOWN_QUOTE_RE, (block) => block.replace(/[^\n]/g, ' '));
+}
+
+export function mentionRouteId(turnId, sourceMessageId, targetAgentId) {
+  return `${String(turnId || '')}:${String(sourceMessageId || '')}:${String(targetAgentId || '')}`;
 }
 
 export function normalizeAgentMentionMaxDepth(value, fallback = 2) {

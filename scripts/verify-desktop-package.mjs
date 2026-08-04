@@ -1,6 +1,6 @@
 import { spawn } from 'node:child_process';
 import assert from 'node:assert/strict';
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { access, mkdtemp, readFile, realpath, rm } from 'node:fs/promises';
 import net from 'node:net';
 import os from 'node:os';
 import path from 'node:path';
@@ -22,17 +22,29 @@ export function desktopPackagePaths(appPath) {
     piWorker: path.join(appRoot, 'apps', 'api', 'runtime', 'workers', 'pi-worker.mjs'),
     codexAdapter: path.join(appRoot, 'apps', 'api', 'runtime', 'codex-app-server.mjs'),
     claudeAdapter: path.join(appRoot, 'apps', 'api', 'runtime', 'claude-agent-sdk.mjs'),
-    geminiAdapter: path.join(appRoot, 'apps', 'api', 'runtime', 'gemini-acp.mjs'),
-    piCorePackage: path.join(appRoot, 'node_modules', '@earendil-works', 'pi-agent-core', 'package.json'),
-    piCodingPackage: path.join(appRoot, 'node_modules', '@earendil-works', 'pi-coding-agent', 'package.json'),
+    runtimePlatform: path.join(appRoot, 'apps', 'api', 'runtime', 'platform.mjs'),
+    adapterContract: path.join(appRoot, 'apps', 'api', 'runtime', 'adapter-contract.mjs'),
+    sessionManager: path.join(appRoot, 'apps', 'api', 'runtime', 'session-manager.mjs'),
+    contextCompiler: path.join(appRoot, 'apps', 'api', 'runtime', 'context-compiler.mjs'),
+    skillProjector: path.join(appRoot, 'apps', 'api', 'runtime', 'skill-projector.mjs'),
+    permissionBroker: path.join(appRoot, 'apps', 'api', 'runtime', 'permission-broker.mjs'),
+    eventJournal: path.join(appRoot, 'apps', 'api', 'runtime', 'event-journal.mjs'),
+    runtimePackageManager: path.join(appRoot, 'apps', 'api', 'runtime', 'package-manager.mjs'),
+    piPackageProvider: path.join(appRoot, 'apps', 'api', 'runtime', 'pi-package-provider.mjs'),
+    cliPackageProvider: path.join(appRoot, 'apps', 'api', 'runtime', 'cli-package-provider.mjs'),
+    hostController: path.join(appRoot, 'apps', 'api', 'runtime', 'host-controller.mjs'),
+    modelGateway: path.join(appRoot, 'apps', 'api', 'runtime', 'model-gateway.mjs'),
+    piRuntimeCatalog: path.join(appRoot, 'runtime-catalog', 'pi.json'),
     claudeSdkPackage: path.join(appRoot, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'),
+    claudePlatformPackage: path.join(appRoot, 'node_modules', '@anthropic-ai', `claude-agent-sdk-${process.platform}-${process.arch}`, 'package.json'),
+    piPackageScope: path.join(appRoot, 'node_modules', '@earendil-works'),
     acpSdkPackage: path.join(appRoot, 'node_modules', '@agentclientprotocol', 'sdk', 'package.json'),
     braceExpansionPackage: path.join(appRoot, 'node_modules', 'brace-expansion', 'package.json'),
   };
 }
 
 export async function assertDesktopPackageLayout(appPath) {
-  const paths = desktopPackagePaths(appPath);
+  const paths = desktopPackagePaths(await realpath(appPath));
   await Promise.all([
     access(paths.executable),
     access(paths.serverEntry),
@@ -41,15 +53,27 @@ export async function assertDesktopPackageLayout(appPath) {
     access(paths.piWorker),
     access(paths.codexAdapter),
     access(paths.claudeAdapter),
-    access(paths.geminiAdapter),
-    access(paths.piCorePackage),
-    access(paths.piCodingPackage),
+    access(paths.runtimePlatform),
+    access(paths.adapterContract),
+    access(paths.sessionManager),
+    access(paths.contextCompiler),
+    access(paths.skillProjector),
+    access(paths.permissionBroker),
+    access(paths.eventJournal),
+    access(paths.runtimePackageManager),
+    access(paths.piPackageProvider),
+    access(paths.cliPackageProvider),
+    access(paths.hostController),
+    access(paths.modelGateway),
+    access(paths.piRuntimeCatalog),
     access(paths.claudeSdkPackage),
-    access(paths.acpSdkPackage),
     access(paths.braceExpansionPackage),
   ]);
   const braceExpansion = JSON.parse(await readFile(paths.braceExpansionPackage, 'utf8'));
-  assert.equal(braceExpansion.version, '5.0.8', 'Packaged Pi dependency must include the patched brace-expansion version.');
+  assert.equal(braceExpansion.version, '5.0.8');
+  await assert.rejects(() => access(paths.piPackageScope), 'Desktop package must not bundle Pi SDK packages.');
+  await assert.rejects(() => access(paths.acpSdkPackage), 'Desktop package must not bundle Gemini ACP SDK.');
+  await assert.rejects(() => access(paths.claudePlatformPackage), 'Desktop package must not bundle Claude Code platform binaries.');
   return paths;
 }
 
@@ -75,6 +99,22 @@ async function waitForHealth(url, child, output) {
     await new Promise((resolve) => setTimeout(resolve, 250));
   }
   throw new Error(`Packaged API did not become healthy within ${timeoutMs / 1000} seconds.\n${output()}`);
+}
+
+async function verifyPackagedRuntimeInventory(url) {
+  const response = await fetch(`${url}/api/runtimes`);
+  assert.equal(response.ok, true, `Packaged Runtime inventory failed with ${response.status}.`);
+  const payload = await response.json();
+  assert.deepEqual(payload.runtimes.map((runtime) => runtime.id), ['hermes', 'pi', 'codex', 'claude']);
+
+  const hermes = payload.runtimes.find((runtime) => runtime.id === 'hermes');
+  assert.equal(hermes?.bundled, true, 'The base package must include Hermes.');
+  for (const runtimeId of ['pi', 'codex', 'claude']) {
+    const runtime = payload.runtimes.find((item) => item.id === runtimeId);
+    assert.equal(runtime?.bundled, false, `${runtimeId} must remain an optional Runtime.`);
+    assert.equal(runtime?.activeBinding, null, `${runtimeId} must not be bound on a fresh install.`);
+  }
+  return payload.runtimes;
 }
 
 async function stop(child) {
@@ -114,7 +154,8 @@ export async function verifyDesktopPackage(appPath) {
   child.stderr.on('data', append);
   try {
     await waitForHealth(url, child, () => output.join('').slice(-12_000));
-    console.log(`Verified packaged Frakio Work API at ${url}.`);
+    await verifyPackagedRuntimeInventory(url);
+    console.log(`Verified packaged Frakio Work API and optional Runtime inventory at ${url}.`);
   } finally {
     await stop(child);
     await rm(tempRoot, { recursive: true, force: true });

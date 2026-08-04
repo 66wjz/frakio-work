@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { chmod, mkdir, mkdtemp, writeFile } from 'node:fs/promises';
+import { chmod, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -47,6 +47,7 @@ if (command === 'reclaim') { store.tasks[rest[0]].status = 'ready'; save(); proc
 if (command === 'archive') { store.tasks[rest[0]].status = 'archived'; save(); process.exit(0); }
 if (command === 'dispatch') { console.log(JSON.stringify({ dispatched: [] })); process.exit(0); }
 if (command === 'comment') { (store.comments[rest[0]] ||= []).push({ id: Date.now(), author: 'user', body: rest[1], created_at: Math.floor(Date.now() / 1000) }); save(); process.exit(0); }
+if (command === 'attach') { (store.attachments ||= {})[rest[0]] = [...(store.attachments?.[rest[0]] || []), rest[1]]; save(); process.exit(0); }
 if (command === 'complete') { store.tasks[rest[0]].status = 'done'; store.tasks[rest[0]].result = rest[rest.indexOf('--summary') + 1]; save(); process.exit(0); }
 console.error('unsupported fake Hermes command: ' + args.join(' ')); process.exit(2);
 `;
@@ -355,6 +356,178 @@ test('a structured plan creates visible tasks and dependencies with revision con
 
   const conflict = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/collaboration/plans`, { method: 'POST', headers: ctx.headers, body: JSON.stringify({ workflowId: switched.workflow.id, rootTaskId: root.task.id, baseRevision: 0, summary: 'stale', idempotencyKey: 'plan-stale', tasks: [{ key: 'copy', title: 'Write', assigneeAgentId: 'copy-test' }] }) });
   assert.equal(conflict.status, 409);
+});
+
+test('new projects preserve the entered folder name instead of falling back to default', async t => {
+  const ctx = await startTestApp(t);
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'frakio-project-name-'));
+  const english = await fetch(`${ctx.baseUrl}/api/workspaces`, {
+    method: 'POST', headers: ctx.headers,
+    body: JSON.stringify({ mode: 'create', name: 'Frakio Works', parentPath: parent }),
+  });
+  const englishBody = await english.json();
+  assert.equal(english.status, 200, JSON.stringify(englishBody));
+  assert.equal(englishBody.workspace.rootPath, path.join(parent, 'Frakio Works'));
+  assert.equal(englishBody.workspace.name, 'Frakio Works');
+  assert.equal(englishBody.workspace.vaultId, null);
+  assert.equal(englishBody.vault, null);
+  for (const legacyEntry of ['AGENTS.md', 'sources', 'wiki', 'drafts']) {
+    assert.equal(await readFile(path.join(englishBody.workspace.rootPath, legacyEntry), 'utf8').catch(() => ''), '');
+  }
+
+  const chinese = await fetch(`${ctx.baseUrl}/api/workspaces`, {
+    method: 'POST', headers: ctx.headers,
+    body: JSON.stringify({ mode: 'create', name: '宣传稿项目', parentPath: parent }),
+  });
+  const chineseBody = await chinese.json();
+  assert.equal(chinese.status, 200, JSON.stringify(chineseBody));
+  assert.equal(chineseBody.workspace.rootPath, path.join(parent, '宣传稿项目'));
+
+  const work = await fetch(`${ctx.baseUrl}/api/threads/${englishBody.thread.id}/mode`, {
+    method: 'PATCH', headers: ctx.headers, body: JSON.stringify({ mode: 'work' }),
+  }).then(res => res.json());
+  const root = await fetch(`${ctx.baseUrl}/api/threads/${englishBody.thread.id}/collaboration/roots`, {
+    method: 'POST', headers: ctx.headers,
+    body: JSON.stringify({ workflowId: work.workflow.id, title: '文件交付', idempotencyKey: 'artifact-root' }),
+  }).then(res => res.json());
+  const artifactPath = path.join(englishBody.workspace.rootPath, 'result.md');
+  await writeFile(artifactPath, '# Result\n');
+  const artifactResponse = await fetch(`${ctx.baseUrl}/api/threads/${englishBody.thread.id}/collaboration/tasks/${root.task.id}/artifacts`, {
+    method: 'POST', headers: ctx.headers,
+    body: JSON.stringify({ workflowId: work.workflow.id, name: '最终结果', path: artifactPath, summary: '已生成最终文档' }),
+  });
+  const artifactBody = await artifactResponse.json();
+  assert.equal(artifactResponse.status, 200, JSON.stringify(artifactBody));
+  assert.equal(artifactBody.artifact.relativePath, 'result.md');
+
+  const invalid = await fetch(`${ctx.baseUrl}/api/workspaces`, {
+    method: 'POST', headers: ctx.headers,
+    body: JSON.stringify({ mode: 'create', name: 'bad/name', parentPath: parent }),
+  });
+  assert.equal(invalid.status, 400);
+});
+
+test('project libraries are opt-in, trusted rules are scoped to the connected thread, and personal libraries stay global', async t => {
+  const ctx = await startTestApp(t, { agents: [{ id: 'iris-test', name: 'Iris', role: 'Coordinator', profileName: 'iris-test', source: 'hermes-profile' }] });
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'frakio-library-scope-'));
+  const projectRoot = path.join(parent, '项目资料库');
+  const projectResponse = await fetch(`${ctx.baseUrl}/api/vaults`, { method: 'POST', headers: ctx.headers, body: JSON.stringify({ kind: 'project', path: projectRoot, name: '项目规则库' }) });
+  const project = await projectResponse.json();
+  assert.equal(projectResponse.status, 200, JSON.stringify(project));
+  assert.equal(project.vault.kind, 'project');
+  assert.match(await readFile(path.join(projectRoot, '.frakio', 'vault.json'), 'utf8'), /"type": "project"/);
+  await writeFile(path.join(projectRoot, 'FRAKIO.md'), '# 规则\n\n交付路径固定为 `交付物/`。\n');
+
+  const personalRoot = path.join(parent, '个人资料库');
+  const personalResponse = await fetch(`${ctx.baseUrl}/api/vaults`, { method: 'POST', headers: ctx.headers, body: JSON.stringify({ kind: 'personal', path: personalRoot }) });
+  const personal = await personalResponse.json();
+  assert.equal(personalResponse.status, 200, JSON.stringify(personal));
+  assert.equal(personal.vault.kind, 'personal');
+
+  const thread = await fetch(`${ctx.baseUrl}/api/conversations`, { method: 'POST', headers: ctx.headers, body: JSON.stringify({ title: '规则隔离', mode: 'direct', selectedAgents: ['iris-test'] }) }).then(res => res.json());
+  const connectedResponse = await fetch(`${ctx.baseUrl}/api/threads/${thread.thread.id}`, { method: 'PATCH', headers: ctx.headers, body: JSON.stringify({ vaultId: project.vault.id }) });
+  const connected = await connectedResponse.json();
+  assert.equal(connectedResponse.status, 200, JSON.stringify(connected));
+  const preview = await fetch(`${ctx.baseUrl}/api/threads/${thread.thread.id}/context-preview?agentId=iris-test`, { headers: ctx.headers }).then(res => res.json());
+  assert.deepEqual(preview.projectRulePaths, ['FRAKIO.md']);
+  assert.ok(preview.sources.some(source => source.kind === 'personal_vault'));
+
+  const disconnected = await fetch(`${ctx.baseUrl}/api/threads/${thread.thread.id}`, { method: 'PATCH', headers: ctx.headers, body: JSON.stringify({ vaultId: null }) }).then(res => res.json());
+  assert.equal(disconnected.thread.vaultId, null);
+  const disconnectedPreview = await fetch(`${ctx.baseUrl}/api/threads/${thread.thread.id}/context-preview?agentId=iris-test`, { headers: ctx.headers }).then(res => res.json());
+  assert.deepEqual(disconnectedPreview.projectRulePaths, []);
+});
+
+test('project Work tasks automatically write a durable delivery into the project folder', async t => {
+  const agents = [{ id: 'delivery-coord', name: 'Delivery Coordinator', role: 'Coordinator', profileName: 'delivery-coord', source: 'hermes-profile' }];
+  const ctx = await startTestApp(t, { agents });
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'frakio-work-delivery-'));
+  const created = await fetch(`${ctx.baseUrl}/api/workspaces`, {
+    method: 'POST', headers: ctx.headers,
+    body: JSON.stringify({ mode: 'create', name: '交付项目', parentPath: parent, primaryAgentId: 'delivery-coord' }),
+  }).then(res => res.json());
+  const work = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/mode`, {
+    method: 'PATCH', headers: ctx.headers, body: JSON.stringify({ mode: 'work', agentId: 'delivery-coord' }),
+  }).then(res => res.json());
+  const root = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/collaboration/roots`, {
+    method: 'POST', headers: ctx.headers,
+    body: JSON.stringify({ workflowId: work.workflow.id, title: '项目根任务', assigneeAgentId: 'delivery-coord', idempotencyKey: 'delivery-root' }),
+  }).then(res => res.json());
+  const plan = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/collaboration/plans`, {
+    method: 'POST', headers: ctx.headers,
+    body: JSON.stringify({
+      workflowId: work.workflow.id, rootTaskId: root.task.id, baseRevision: 0, idempotencyKey: 'delivery-plan',
+      tasks: [{ key: 'research', title: '整理研究资料', assigneeAgentId: 'delivery-coord', dependsOnKeys: [] }],
+    }),
+  }).then(res => res.json());
+  const taskId = plan.plan.tasks[0].taskId;
+  const completed = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/collaboration/tasks/${taskId}/complete`, {
+    method: 'POST', headers: ctx.headers,
+    body: JSON.stringify({ workflowId: work.workflow.id, title: '整理研究资料', summary: '已整理三条研究结论。' }),
+  }).then(res => res.json());
+  assert.equal(completed.ok, true);
+  assert.equal(completed.artifact.source, 'auto_summary');
+  assert.match(completed.artifact.relativePath, /^交付物\//);
+  assert.equal(path.resolve(completed.artifact.path).startsWith(path.resolve(created.workspace.rootPath)), true);
+  assert.match(await readFile(completed.artifact.path, 'utf8'), /已整理三条研究结论/);
+});
+
+test('startup migrates a legacy default project directory without losing its files', async t => {
+  const parent = await mkdtemp(path.join(os.tmpdir(), 'frakio-default-migration-'));
+  const home = path.join(parent, '.frakio-work');
+  const legacyRoot = path.join(parent, 'Desktop', 'default');
+  await mkdir(path.join(home, 'data'), { recursive: true });
+  await mkdir(legacyRoot, { recursive: true });
+  await writeFile(path.join(legacyRoot, 'index.md'), '# preserved\n');
+  await writeFile(path.join(home, 'data', 'workbench-state.json'), JSON.stringify({
+    agents: [], spaces: [{ id: 'space_default', name: 'Frakio Work' }],
+    workspaces: [{ id: 'workspace-legacy', spaceId: 'space_default', name: 'Frakio Works', rootPath: legacyRoot, vaultId: 'vault-legacy', activeThreadId: null }],
+    vaults: [{ id: 'vault-legacy', name: 'Frakio Works', path: legacyRoot, status: 'not_indexed', documentCount: 0, productCount: 0, lastIndexedAt: null, index: null }],
+    threads: [],
+  }));
+  const previous = { home: process.env.FRAKIO_WORK_HOME, hermesHome: process.env.HERMES_HOME, port: process.env.PORT, disabled: process.env.FRAKIO_WORK_DISABLE_AUTOSTART };
+  process.env.FRAKIO_WORK_HOME = home;
+  process.env.HERMES_HOME = path.join(parent, '.hermes');
+  process.env.FRAKIO_WORK_DISABLE_AUTOSTART = '1';
+  process.env.PORT = '0';
+  t.after(() => {
+    for (const [key, value] of Object.entries({ FRAKIO_WORK_HOME: previous.home, HERMES_HOME: previous.hermesHome, PORT: previous.port, FRAKIO_WORK_DISABLE_AUTOSTART: previous.disabled })) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  });
+  const module = await import(`./server.mjs?legacy-default-migration=${Date.now()}-${Math.random()}`);
+  await module.createApp();
+  const migrated = JSON.parse(await readFile(path.join(home, 'data', 'workbench-state.json'), 'utf8'));
+  const nextRoot = path.join(parent, 'Desktop', 'Frakio Works');
+  assert.equal(migrated.workspaces.find((item) => item.id === 'workspace-legacy').rootPath, nextRoot);
+  assert.equal(migrated.vaults.find((item) => item.id === 'vault-legacy').path, nextRoot);
+  assert.equal(await readFile(path.join(nextRoot, 'index.md'), 'utf8'), '# preserved\n');
+});
+
+test('completed Work tasks wait for one coordinator final response instead of completing silently', async t => {
+  const agents = [{ id: 'coord-final', name: 'Final Coordinator', role: 'Coordinator', profileName: 'coord-final', source: 'hermes-profile' }];
+  const ctx = await startTestApp(t, { agents });
+  const created = await fetch(`${ctx.baseUrl}/api/conversations`, { method: 'POST', headers: ctx.headers, body: JSON.stringify({ title: 'Final response', primaryAgentId: 'coord-final' }) }).then(res => res.json());
+  const switched = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/mode`, { method: 'PATCH', headers: ctx.headers, body: JSON.stringify({ mode: 'work', agentId: 'coord-final' }) }).then(res => res.json());
+  const root = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/collaboration/roots`, { method: 'POST', headers: ctx.headers, body: JSON.stringify({ workflowId: switched.workflow.id, title: 'Root', idempotencyKey: 'final-root' }) }).then(res => res.json());
+  const plan = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/collaboration/plans`, { method: 'POST', headers: ctx.headers, body: JSON.stringify({
+    workflowId: switched.workflow.id, rootTaskId: root.task.id, baseRevision: 0, idempotencyKey: 'final-plan',
+    tasks: [{ key: 'worker', title: 'Worker', assigneeAgentId: 'coord-final', dependsOnKeys: [] }],
+  }) }).then(res => res.json());
+  const workerTaskId = plan.plan.tasks[0].taskId;
+  const completed = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/collaboration/tasks/${workerTaskId}/complete`, {
+    method: 'POST', headers: ctx.headers,
+    body: JSON.stringify({ workflowId: switched.workflow.id, title: 'Worker', summary: '工作已完成' }),
+  });
+  assert.equal(completed.status, 200);
+
+  const first = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/collaboration`).then(res => res.json());
+  const workflow = first.snapshot.workflows[0];
+  assert.equal(workflow.status, 'active');
+  assert.equal(workflow.finalization.state, 'requested');
+  assert.ok(first.snapshot.events.some(event => event.title === '正在生成最终回应'));
+  const second = await fetch(`${ctx.baseUrl}/api/threads/${created.thread.id}/collaboration`).then(res => res.json());
+  assert.equal(second.snapshot.events.filter(event => event.title === '正在生成最终回应').length, 1);
 });
 
 test('collaboration workflow, dependency request, and cursor replay are durable and idempotent', async t => {

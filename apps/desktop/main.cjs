@@ -13,6 +13,8 @@ const { closeActionForState, closeNoticeForPlatform, restoreWindow } = require('
 const { applyAppearance, appearanceState } = require('./appearance.cjs');
 const { desktopRuntimeTarget } = require('./dev-runtime.cjs');
 const { createDesktopUpdateService } = require('./desktop-update.cjs');
+const { guardProcessOutput } = require('./stdio-guard.cjs');
+const { installBrowserWebviewSecurity, registerBrowserWebviewIpc } = require('./browser-webview.cjs');
 
 const APP_NAME = 'Frakio Work';
 const DEFAULT_PORT = 8787;
@@ -31,6 +33,8 @@ let startupError = '';
 let startingPromise = null;
 let closeNoticeShown = false;
 let desktopUpdateService = null;
+installBrowserWebviewSecurity(() => mainWindow);
+registerBrowserWebviewIpc(ipcMain, () => mainWindow);
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) app.quit();
@@ -60,6 +64,11 @@ function appendApiLog(chunk) {
     fs.appendFileSync(apiLogPath, chunk);
   } catch {}
 }
+
+// Electron inherits the launcher's stdout/stderr. Those pipes can disappear
+// after Finder, a shell, or a test runner detaches. Keep diagnostics in the
+// desktop log instead of letting Node turn a later warning into a fatal EPIPE.
+guardProcessOutput(process, { log: writeDesktopLog });
 
 function appRoot() {
   if (!app.isPackaged) return path.resolve(__dirname, '../..');
@@ -391,6 +400,7 @@ function createWindow() {
       nodeIntegration: false,
       contextIsolation: true,
       sandbox: true,
+      webviewTag: true,
     },
   });
 
@@ -413,9 +423,7 @@ function createWindow() {
     closeNoticeShown = true;
     void dialog.showMessageBox(closeNoticeForPlatform(process.platform)).catch(() => {});
   });
-  mainWindow.on('closed', () => {
-    mainWindow = null;
-  });
+  mainWindow.on('closed', () => { mainWindow = null; });
 }
 
 async function loadApp() {
@@ -629,6 +637,15 @@ ipcMain.handle('frakio:show-item-in-folder', async (_event, targetPath) => {
   const relative = path.relative(os.homedir(), path.resolve(cleanPath || '.'));
   if (!cleanPath || relative.startsWith('..') || path.isAbsolute(relative) || !fs.existsSync(cleanPath)) return { ok: false };
   shell.showItemInFolder(cleanPath);
+  return { ok: true };
+});
+
+ipcMain.handle('frakio:open-obsidian-vault', async (_event, targetPath) => {
+  const cleanPath = String(targetPath || '').trim();
+  const resolved = path.resolve(cleanPath || '.');
+  const relative = path.relative(os.homedir(), resolved);
+  if (!cleanPath || relative.startsWith('..') || path.isAbsolute(relative) || !fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) return { ok: false };
+  await shell.openExternal(`obsidian://open?path=${encodeURIComponent(resolved)}`);
   return { ok: true };
 });
 

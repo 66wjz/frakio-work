@@ -253,6 +253,10 @@ class BridgeBroker:
             profile = self._normalize_profile(req.get("profile"))
             return self._forward(profile, req, self._normalize_worker_key(profile, req.get("worker_key")))
 
+        if action in {"memory_review", "context_compact"}:
+            profile = self._normalize_profile(req.get("profile"))
+            return self._forward(profile, req, self._normalize_worker_key(profile, req.get("worker_key")))
+
         if action in {"mcp_list", "mcp_server_add", "mcp_server_update", "mcp_server_remove", "mcp_server_test", "mcp_tools_list", "mcp_reload", "network_status"}:
             profile = self._normalize_profile(req.get("profile"))
             return self._forward(profile, req, self._normalize_worker_key(profile, req.get("worker_key")))

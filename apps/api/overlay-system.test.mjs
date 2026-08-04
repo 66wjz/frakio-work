@@ -51,8 +51,12 @@ test('high-frequency menus use stable interaction primitives', () => {
   assert.match(modelPicker, /section === 'speed' && speedPanel/);
   assert.match(modelPicker, /async function commitChoice/);
   assert.match(modelPicker, /disabled=\{saving\}/);
+  assert.match(mainSource, /const rootPanelWidth = 232;/);
   assert.match(stylesSource, /\.provider-model-menu\.advanced \.provider-model-subpanel \{[\s\S]*?position: absolute;/);
   assert.match(stylesSource, /\.provider-model-menu\.advanced\.submenu-left \.provider-model-subpanel/);
+  assert.match(stylesSource, /\.provider-model-root-panel \{ width: 232px; \}/);
+  assert.match(stylesSource, /body:has\(\.mac-desktop-shell\) \.provider-model-menu\.advanced\s*\{[\s\S]*?background:\s*transparent;[\s\S]*?box-shadow:\s*none;[\s\S]*?backdrop-filter:\s*none;/);
+  assert.match(stylesSource, /body:has\(\.mac-desktop-shell\) \.provider-model-menu\.advanced :is\(\.provider-model-root-panel, \.provider-model-subpanel\)\s*\{[\s\S]*?border:\s*0;[\s\S]*?background:\s*var\(--overlay-surface-solid\);[\s\S]*?box-shadow:\s*var\(--overlay-shadow\);/);
 });
 
 test('profile editor owns its scroll, focus, and unsaved-change boundary', () => {

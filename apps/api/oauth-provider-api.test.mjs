@@ -90,7 +90,7 @@ test('OAuth presets hide models before auth and Codex loads its account catalog 
   for (const providerKey of ['ikuncode', 'fun-codex', 'fun-claude']) {
     assert.equal(initial.providers.some((provider) => provider.value === providerKey), false);
   }
-  for (const providerKey of ['openai-codex', 'claude-oauth', 'google-gemini-cli']) {
+  for (const providerKey of ['openai-codex', 'claude-oauth', 'google-gemini-oauth']) {
     const preset = initial.providers.find((provider) => provider.value === providerKey);
     assert.equal(preset.authenticated, false);
     assert.deepEqual(preset.models, []);
@@ -101,7 +101,7 @@ test('OAuth presets hide models before auth and Codex loads its account catalog 
     providers: {
       'openai-codex': { tokens: { access_token: accountToken } },
       'claude-oauth': { tokens: { access_token: 'claude-token' } },
-      'google-gemini-cli': { access_token: 'gemini-token' },
+      'google-gemini-oauth': { access_token: 'gemini-token' },
     },
   })}\n`);
 
@@ -109,7 +109,7 @@ test('OAuth presets hide models before auth and Codex loads its account catalog 
   assert.deepEqual(authorized.providers.find((provider) => provider.value === 'openai-codex').models, ['gpt-first', 'gpt-second']);
   assert.ok(authorized.providers.find((provider) => provider.value === 'claude-oauth').models.length > 0);
   assert.equal(authorized.providers.find((provider) => provider.value === 'claude-oauth').catalog.source, 'frakio_builtin');
-  assert.ok(authorized.providers.find((provider) => provider.value === 'google-gemini-cli').models.length > 0);
+  assert.ok(authorized.providers.find((provider) => provider.value === 'google-gemini-oauth').models.length > 0);
 
   const accountsResponse = await fetch(`${baseUrl}/api/oauth-accounts`, { headers });
   assert.equal(accountsResponse.status, 200);
@@ -122,8 +122,10 @@ test('OAuth presets hide models before auth and Codex loads its account catalog 
 
   const modelsAfterMigration = await fetch(`${baseUrl}/api/models`, { headers }).then((response) => response.json());
   const migratedCodexModel = modelsAfterMigration.models.find((model) => model.id === 'model-codex');
+  const migratedGeminiModel = modelsAfterMigration.models.find((model) => model.id === 'model-gemini');
   assert.equal(migratedCodexModel.oauthAccountId, codexAccount.id);
   assert.equal(migratedCodexModel.oauthAccountBindingRequired, false);
+  assert.equal(migratedGeminiModel.providerKey, 'google-gemini-oauth');
 
   const refreshedResponse = await fetch(`${baseUrl}/api/auth/codex/catalog`, { method: 'POST', headers, body: '{}' });
   assert.equal(refreshedResponse.status, 200);
@@ -170,7 +172,7 @@ test('OAuth presets hide models before auth and Codex loads its account catalog 
   assert.equal(unsafeClaude.status, 400);
   assert.equal(nativeRequests.length, requestCountBeforeUnsafeDraft);
 
-  const geminiConfig = configurationFor({ name: 'Google Gemini OAuth', provider: 'Google Gemini OAuth', protocol: 'OpenAI Compatible', providerKey: 'google-gemini-cli', apiMode: 'chat_completions', baseUrl: 'cloudcode-pa://google', model: 'gemini-3-flash-preview', models: ['gemini-3-flash-preview'] });
+  const geminiConfig = configurationFor({ name: 'Google Gemini OAuth', provider: 'Google Gemini OAuth', protocol: 'OpenAI Compatible', providerKey: 'google-gemini-oauth', apiMode: 'chat_completions', baseUrl: 'cloudcode-pa://google', model: 'gemini-3-flash-preview', models: ['gemini-3-flash-preview'] });
   const geminiVerify = await fetch(`${baseUrl}/api/models/model-gemini/verify`, { method: 'POST', headers, body: JSON.stringify({ configuration: geminiConfig, saveOnSuccess: true }) });
   assert.equal(geminiVerify.status, 200);
   assert.equal((await geminiVerify.json()).verificationKind, 'gemini_code_assist');
@@ -180,5 +182,5 @@ test('OAuth presets hide models before auth and Codex loads its account catalog 
   assert.equal(generateRequest.body.model, 'gemini-3-flash-preview');
   assert.equal(generateRequest.body.project, 'project-test');
   const authAfterGemini = JSON.parse(await readFile(path.join(hermesHome, 'auth.json'), 'utf8'));
-  assert.equal(authAfterGemini.providers['google-gemini-cli'].code_assist.projectId, 'project-test');
+  assert.equal(authAfterGemini.providers['google-gemini-oauth'].code_assist.projectId, 'project-test');
 });

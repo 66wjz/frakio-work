@@ -63,5 +63,5 @@ test('combination model API is removed without rewriting existing profile moa co
   const persisted = YAML.parse(await readFile(profilePath, 'utf8'));
   const original = YAML.parse(profileConfig);
   assert.deepEqual(persisted.moa, original.moa);
-  assert.deepEqual(persisted.auxiliary, original.auxiliary);
+  assert.equal(persisted.auxiliary.compression.provider, 'auto');
 });

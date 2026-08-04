@@ -1,0 +1,4 @@
+interface:
+  display_name: "Frakio LLM Wiki"
+  short_description: "Govern and maintain Frakio knowledge vaults."
+  default_prompt: "Maintain the connected Frakio vault through governed Knowledge Runtime tools."

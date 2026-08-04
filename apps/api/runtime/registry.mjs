@@ -8,6 +8,8 @@ const coreCapabilities = {
   customModels: true,
   managedCredentials: true,
   workTasks: true,
+  contextUsage: true,
+  compaction: true,
 };
 
 const definitions = [
@@ -16,7 +18,7 @@ const definitions = [
     id: 'pi',
     name: 'Pi',
     kind: 'core',
-    bundled: true,
+    bundled: false,
     capabilities: { ...coreCapabilities, approvals: false },
   },
   {
@@ -25,7 +27,7 @@ const definitions = [
     kind: 'channel',
     bundled: false,
     command: 'codex',
-    capabilities: { ...coreCapabilities, customModels: false, managedCredentials: false },
+    capabilities: coreCapabilities,
   },
   {
     id: 'claude',
@@ -33,15 +35,7 @@ const definitions = [
     kind: 'channel',
     bundled: false,
     command: 'claude',
-    capabilities: { ...coreCapabilities, steering: false, customModels: false, managedCredentials: false },
-  },
-  {
-    id: 'gemini',
-    name: 'Gemini CLI',
-    kind: 'channel',
-    bundled: false,
-    command: 'gemini',
-    capabilities: { ...coreCapabilities, steering: false, customModels: false, managedCredentials: false },
+    capabilities: { ...coreCapabilities, steering: false },
   },
 ];
 
@@ -59,7 +53,7 @@ async function commandVersion(commandPath, execFile) {
   return '';
 }
 
-export function createRuntimeRegistry({ resolveCommand, execFile, piVersion = '', hermesStatus }) {
+export function createRuntimeRegistry({ bindingStatus = null, hermesStatus }) {
   const installations = new Map();
   const checking = new Map();
   const pendingInstallation = (definition) => ({
@@ -69,13 +63,13 @@ export function createRuntimeRegistry({ resolveCommand, execFile, piVersion = ''
     installed: false,
     version: '',
     command: definition.command,
-    authMode: definition.kind === 'core' ? 'frakio-managed' : 'native',
+    authMode: 'frakio-managed',
     detail: '正在检测运行时。',
     checkedAt: '',
   });
   const serialize = (definition) => ({
     ...definition,
-    enabled: definition.kind === 'core' || installations.get(definition.id)?.installed === true,
+    enabled: definition.id === 'hermes' || installations.get(definition.id)?.installed === true,
     capabilities: { ...definition.capabilities },
     installation: installations.get(definition.id) || pendingInstallation(definition),
   });
@@ -93,15 +87,18 @@ export function createRuntimeRegistry({ resolveCommand, execFile, piVersion = ''
       if (checking.has(runtimeId)) return checking.get(runtimeId);
       const detection = (async () => {
       const checkedAt = new Date().toISOString();
-      if (runtimeId === 'pi') {
+      if (runtimeId !== 'hermes') {
+        const managed = typeof bindingStatus === 'function' ? await bindingStatus(runtimeId).catch(() => null) : null;
+        const active = managed?.activeBinding || null;
         return {
           runtimeId,
           kind: definition.kind,
-          status: piVersion ? 'ready' : 'missing',
-          installed: Boolean(piVersion),
-          version: piVersion,
+          status: active?.availability === 'broken' ? 'broken' : active ? 'ready' : 'missing',
+          installed: Boolean(active && active.availability !== 'broken'),
+          version: active?.runtimeVersion || '',
+          command: active?.executablePath || '',
           authMode: 'frakio-managed',
-          detail: piVersion ? 'Frakio Work 内置 Pi Worker 已就绪。' : 'Pi SDK 未包含在当前安装包中。',
+          detail: active ? `${active.source === 'managed' ? 'Frakio 托管安装' : '已确认系统二进制'}，模型由 Frakio Model Center 提供。` : '尚未安装或确认绑定。',
           checkedAt,
         };
       }
@@ -119,19 +116,6 @@ export function createRuntimeRegistry({ resolveCommand, execFile, piVersion = ''
           checkedAt,
         };
       }
-      const commandPath = await resolveCommand(definition.command);
-      const version = await commandVersion(commandPath, execFile);
-      return {
-        runtimeId,
-        kind: definition.kind,
-        status: commandPath ? 'ready' : 'missing',
-        installed: Boolean(commandPath),
-        version,
-        command: commandPath || definition.command,
-        authMode: 'native',
-        detail: commandPath ? '已检测到本机 CLI；登录状态会在首次运行时验证。' : `未检测到 ${definition.command} CLI。`,
-        checkedAt,
-      };
       })();
       checking.set(runtimeId, detection);
       try {
@@ -164,7 +148,7 @@ export function normalizeRuntimePolicy(policy = {}, { hasHermesProfile = true } 
   const known = new Set(definitions.map((item) => item.id));
   const defaultRuntimeId = known.has(policy.defaultRuntimeId)
     ? policy.defaultRuntimeId
-    : hasHermesProfile ? 'hermes' : 'pi';
+    : 'hermes';
   const allowedRuntimeIds = Array.from(new Set([
     ...(Array.isArray(policy.allowedRuntimeIds) ? policy.allowedRuntimeIds : []),
     defaultRuntimeId,

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mentionDepthAllows, normalizeAgentMentionMaxDepth, registerMentionEdge, resolveMentionedAgents } from './mention-routing.mjs';
+import { mentionDepthAllows, mentionRouteId, normalizeAgentMentionMaxDepth, registerMentionEdge, resolveMentionedAgents } from './mention-routing.mjs';
 
 const agents = [
   { id: 'director', name: '设计总监', profileName: 'design-director' },
@@ -52,4 +52,13 @@ test('mentions inside quoted message blocks do not trigger routing', () => {
 
 test('mentions are case-insensitive and remain intact beside emoji and punctuation', () => {
   assert.deepEqual(resolveMentionedAgents('👋@mAx，please join @设计总监。', agents).map((agent) => agent.id), ['max', 'director']);
+});
+
+test('mentions in code, inline code, and Markdown quotes are inert', () => {
+  assert.deepEqual(resolveMentionedAgents('```md\n@Max example\n```\n`@设计总监`\n> @Max old quote', agents), []);
+});
+
+test('route ids are scoped to the source message and target', () => {
+  assert.notEqual(mentionRouteId('turn-1', 'message-1', 'max'), mentionRouteId('turn-1', 'message-2', 'max'));
+  assert.equal(mentionRouteId('turn-1', 'message-1', 'max'), mentionRouteId('turn-1', 'message-1', 'max'));
 });

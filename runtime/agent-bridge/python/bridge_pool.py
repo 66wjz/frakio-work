@@ -1160,6 +1160,12 @@ class AgentPool:
             allow_permanent: bool = True,
             smart_denied: bool = False,
         ) -> str:
+            with self._lock:
+                sessions = getattr(self, "_sessions", {})
+                session = sessions.get(session_id)
+                approval_mode = str(session.config.get("run_approval_mode") if session else "smart")
+            if approval_mode == "off":
+                return "once"
             approval_id = uuid.uuid4().hex
             response_queue: queue.Queue[str] = queue.Queue(maxsize=1)
             choices = (
@@ -1263,6 +1269,17 @@ class AgentPool:
 
     def _gateway_approval_notify(self, session_id: str):
         def callback(approval_data: dict[str, Any]) -> None:
+            with self._lock:
+                sessions = getattr(self, "_sessions", {})
+                session = sessions.get(session_id)
+                approval_mode = str(session.config.get("run_approval_mode") if session else "smart")
+            if approval_mode == "off":
+                try:
+                    from tools.approval import resolve_gateway_approval
+                    resolve_gateway_approval(session_id, "once")
+                except Exception:
+                    pass
+                return
             approval_id = uuid.uuid4().hex
             smart_denied = bool(approval_data.get("smart_denied"))
             allow_permanent = bool(approval_data.get("allow_permanent", not smart_denied)) and not smart_denied
@@ -1552,12 +1569,15 @@ class AgentPool:
         speed_provider_mode: str | None = None,
         runtime_overrides: dict[str, Any] | None = None,
         ephemeral: bool = False,
+        host_run_id: str | None = None,
     ) -> RunRecord:
         session = self.get_or_create(session_id, profile=profile, model=model, provider=provider, runtime_revision=runtime_revision)
         with session.lock:
             if session.running:
                 raise RuntimeError(f"session {session_id} is already running")
-            run_id = uuid.uuid4().hex
+            run_id = str(host_run_id or '').strip() or uuid.uuid4().hex
+            if run_id in self._runs:
+                raise RuntimeError(f"run {run_id} already exists")
             record = RunRecord(run_id=run_id, session_id=session_id)
             with self._lock:
                 self._runs[run_id] = record
@@ -1610,7 +1630,16 @@ class AgentPool:
             db_count_after_prepersist: int | None = None
             result_for_tail_sync: dict[str, Any] | None = None
             tail_synced = False
+            previous_memory_nudge_interval: Any = None
+            frakio_owns_memory_review = (runtime_overrides or {}).get("frakio_memory_review_owner") is True
             try:
+                if frakio_owns_memory_review:
+                    previous_memory_nudge_interval = getattr(session.agent, "_memory_nudge_interval", None)
+                    # Frakio runs one cross-runtime review after the whole turn.
+                    # Disable only this session's Hermes background review; the
+                    # foreground memory tool and the user's global profile stay intact.
+                    session.agent._memory_nudge_interval = 0
+                session.config["run_approval_mode"] = str((runtime_overrides or {}).get("approval_mode") or "smart")
                 session_cwd_bound = _bind_session_workspace_cwd(session.session_id, workspace)
                 if (runtime_overrides or {}).get("plan_mode") is True:
                     with self._lock:
@@ -1766,6 +1795,11 @@ class AgentPool:
                     session.last_used_at = time.time()
                 self._apply_pending_session_model_switch(session)
             finally:
+                if frakio_owns_memory_review:
+                    try:
+                        session.agent._memory_nudge_interval = previous_memory_nudge_interval
+                    except Exception:
+                        pass
                 with self._lock:
                     self._approval_handlers.pop(session.session_id, None)
                     self._plan_mode_sessions.discard(session.session_id)
@@ -1921,6 +1955,78 @@ class AgentPool:
                 timeout=max(1.0, min(float(timeout or 30.0), 60.0)),
             )
         return {"title": str(title or "").strip()}
+
+    def review_memory(
+        self,
+        instructions: str,
+        user_input: str,
+        profile: str | None = None,
+        timeout: float = 60.0,
+        main_runtime: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not str(user_input or "").strip():
+            raise ValueError("memory review input is required")
+        with _profile_env(profile):
+            _refresh_worker_profile_env()
+            from agent.auxiliary_client import call_llm, extract_content_or_reasoning
+
+            runtime = dict(main_runtime or {})
+            extra_body = runtime.pop("request_overrides", {})
+            response = call_llm(
+                task="memory_review",
+                provider=runtime.get("provider"),
+                model=runtime.get("model"),
+                base_url=runtime.get("base_url"),
+                api_key=runtime.get("api_key"),
+                api_mode=runtime.get("api_mode"),
+                messages=[
+                    {"role": "system", "content": str(instructions or "")},
+                    {"role": "user", "content": str(user_input or "")[-16000:]},
+                ],
+                max_tokens=1200,
+                temperature=0.1,
+                timeout=max(5.0, min(float(timeout or 60.0), 300.0)),
+                extra_body=extra_body if isinstance(extra_body, dict) else {},
+                main_runtime=runtime,
+            )
+            output = extract_content_or_reasoning(response)
+        return {"output": str(output or "").strip()}
+
+    def compact_context(
+        self,
+        instructions: str,
+        user_input: str,
+        profile: str | None = None,
+        timeout: float = 120.0,
+        main_runtime: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        if not str(user_input or "").strip():
+            raise ValueError("context compaction input is required")
+        with _profile_env(profile):
+            _refresh_worker_profile_env()
+            from agent.auxiliary_client import call_llm, extract_content_or_reasoning
+
+            runtime = dict(main_runtime or {})
+            extra_body = runtime.pop("request_overrides", {})
+            response = call_llm(
+                task="compression",
+                provider=runtime.get("provider"),
+                model=runtime.get("model"),
+                base_url=runtime.get("base_url"),
+                api_key=runtime.get("api_key"),
+                api_mode=runtime.get("api_mode"),
+                messages=[
+                    {"role": "system", "content": str(instructions or "")},
+                    {"role": "user", "content": str(user_input or "")[-500000:]},
+                ],
+                max_tokens=4000,
+                temperature=0.1,
+                timeout=max(5.0, min(float(timeout or 120.0), 300.0)),
+                extra_body=extra_body if isinstance(extra_body, dict) else {},
+                main_runtime=runtime,
+            )
+            output = extract_content_or_reasoning(response)
+        return {"output": str(output or "").strip()}
 
     def dispatch_command(self, session_id: str, command: str, profile: str | None = None) -> dict[str, Any]:
         raw = str(command or "").strip()

@@ -2,14 +2,19 @@ import React, { useCallback, useEffect, useId, useLayoutEffect, useMemo, useRef,
 import type {
   AppUpdateStatus,
   Attachment,
+  BrowserAnnotation,
   CollaborationMode,
+  ConversationOverview,
   HermesAgentTurn,
   HermesNetworkStatus,
+  MessageContext,
   PlanDraft,
   PlanQuestionBatch,
   PlanSession,
+  ReviewComment,
   RunActivityGroup,
   RunActivityItem,
+  RunChangeSet,
   RunTranscript,
 } from '@frakio/contracts';
 import { createPortal } from 'react-dom';
@@ -24,7 +29,8 @@ import {
   SIDEBAR_WIDTH_BOUNDS,
   SIDEBAR_WIDTH_VERSION,
 } from '../../api/lib/sidebar-width.mjs';
-import { availablePaneMax, normalizePaneWidth, paneWidthFromKey, paneWidthFromPointer } from './pane-resize.mjs';
+import { availablePaneMax, createLatestFrameScheduler, normalizePaneWidth, paneWidthFromKey, paneWidthFromPointer } from './pane-resize.mjs';
+import { browserWebviewPool, normalizeBrowserUrl, type BrowserGuest } from './browser-webview-pool';
 import {
   activityElapsedMs,
   activityGroupPreview,
@@ -111,6 +117,7 @@ import {
   Copy,
   Cpu,
   Database,
+  Download,
   ExternalLink,
   File,
   FileText,
@@ -118,16 +125,21 @@ import {
   FolderOpen,
   Gauge,
   GitBranch,
+  GitCompareArrows,
+  Globe2,
   Hand,
   Image,
   Library,
+  Link2,
   Lightbulb,
   LoaderCircle,
   Maximize2,
   MessageSquare,
+  MessageSquarePlus,
   Monitor,
   MoreHorizontal,
   Minus,
+  MousePointer2,
   Network,
   PanelLeftClose,
   PanelLeftOpen,
@@ -142,6 +154,7 @@ import {
   Plus,
   RefreshCw,
   Search,
+  Scan,
   Send,
   ShieldAlert,
   Settings,
@@ -160,11 +173,11 @@ import {
   Zap as ZapIcon,
 } from 'lucide-react';
 import frakioBrandLogoUrl from './assets/frakio-brand-logo.png';
+import launchDinoUrl from './assets/launch-dino.png';
 import hermesRuntimeLogoUrl from './assets/runtime-logos/hermes.svg';
 import piRuntimeLogoUrl from './assets/runtime-logos/pi.svg';
 import codexRuntimeLogoUrl from './assets/runtime-logos/codex.svg';
 import claudeRuntimeLogoUrl from './assets/runtime-logos/claude.svg';
-import geminiRuntimeLogoUrl from './assets/runtime-logos/gemini.svg';
 import { installLocalApiFetchGuard } from './api/fetch-guard';
 import {
   LaunchLoadingScreen,
@@ -185,6 +198,8 @@ import './settings.css';
 
 installLocalApiFetchGuard();
 
+const LazyPatchDiff = React.lazy(() => import('@pierre/diffs/react').then((module) => ({ default: module.PatchDiff })));
+
 declare global {
   interface Window {
     frakioDesktop?: {
@@ -199,6 +214,7 @@ declare global {
       selectFolder?: () => Promise<{ canceled?: boolean; path?: string; filePaths?: string[] }>;
       windowControl?: (action: 'close' | 'minimize' | 'zoom') => Promise<unknown>;
       showItemInFolder?: (targetPath: string) => Promise<unknown>;
+      openObsidianVault?: (targetPath: string) => Promise<{ ok?: boolean }>;
       openRelease?: (targetUrl: string) => Promise<{ ok?: boolean }>;
       openExternal?: (targetUrl: string) => Promise<{ ok?: boolean }>;
       getUpdateState?: () => Promise<DesktopUpdateState>;
@@ -207,8 +223,38 @@ declare global {
       cancelUpdateDownload?: () => Promise<DesktopUpdateState>;
       openDownloadedUpdate?: () => Promise<DesktopUpdateState>;
       onUpdateStateChanged?: (listener: (state: DesktopUpdateState) => void) => () => void;
+      browser?: {
+        onAnnotationCreated: (listener: (value: { annotation: Omit<BrowserAnnotation, 'id' | 'threadId' | 'createdAt'>; evidenceDataUrl?: string }) => void) => () => void;
+        onError: (listener: (value: { error?: string }) => void) => () => void;
+      };
     };
   }
+}
+
+type BrowserAnnotationMode = 'none' | 'element' | 'region';
+type BrowserViewState = {
+  url: string;
+  title?: string;
+  loading: boolean;
+  canGoBack: boolean;
+  canGoForward: boolean;
+  visible: boolean;
+  annotationMode: BrowserAnnotationMode;
+  error?: string;
+};
+type RightRailTab = 'collaboration' | 'sources' | 'browser' | 'files' | 'review';
+const rightRailTabMeta: Record<RightRailTab, { title: string; detail: string }> = {
+  browser: { title: '浏览器', detail: '打开网页预览' },
+  files: { title: '文件', detail: '查看项目文件' },
+  review: { title: '审阅', detail: '查看代码改动' },
+  sources: { title: '资料库', detail: '查看会话来源' },
+  collaboration: { title: '协作', detail: '查看任务进展' },
+};
+const rightRailTabs: RightRailTab[] = ['browser', 'files', 'review', 'sources', 'collaboration'];
+
+function RightRailTabIcon({ tab, size = 14 }: { tab: RightRailTab; size?: number }) {
+  const Icon = tab === 'browser' ? Globe2 : tab === 'files' ? FolderOpen : tab === 'review' ? GitCompareArrows : tab === 'sources' ? Database : Network;
+  return <Icon size={size} aria-hidden="true" />;
 }
 
 type ProfileModuleUsage = { useCount?: number; viewCount?: number; patchCount?: number; state?: string; lastUsedAt?: string | null };
@@ -244,7 +290,7 @@ type ManagedHermesModulesPayload = {
   global: ManagedHermesModule[];
   profile: ManagedHermesModule[];
 };
-type RuntimeId = 'hermes' | 'pi' | 'codex' | 'claude' | 'gemini' | string;
+type RuntimeId = 'hermes' | 'pi' | 'codex' | 'claude' | string;
 type AgentRuntimePolicy = { defaultRuntimeId: RuntimeId; allowedRuntimeIds: RuntimeId[]; permissionProfileId: string };
 type RuntimeModelCompatibility = { status: 'ready' | 'partial' | 'unsupported' | 'missing_credentials'; credentialStatus: 'ready' | 'missing' | 'not_required'; usableModelIds: string[]; unsupportedModelIds: string[]; reason: string };
 type RuntimeModelCatalogEntry = { id: string; name: string; provider?: string; defaultModelId?: string; models: string[]; compatibility: RuntimeModelCompatibility };
@@ -256,22 +302,22 @@ type RuntimeDefinition = {
   bundled: boolean;
   enabled: boolean;
   capabilities: Record<string, boolean>;
+  capabilitySnapshot?: { capabilities: Record<string, 'supported' | 'partial' | 'unsupported' | 'unknown'>; source: string; runtimeVersion: string; runtimeBuildId?: string; runtimeSource?: string; checkedAt: string; expiresAt: string } | null;
+  verificationState?: 'verified' | 'unverified';
   installation?: { status: string; installed: boolean; version: string; command?: string; authMode?: string; detail?: string; checkedAt: string };
 };
-const runtimeLabels: Record<string, string> = { hermes: 'Hermes', pi: 'Pi', codex: 'Codex', claude: 'Claude', gemini: 'Gemini' };
+const runtimeLabels: Record<string, string> = { hermes: 'Hermes', pi: 'Pi', codex: 'Codex', claude: 'Claude' };
 const runtimeVisuals: Record<string, { iconUrl: string; label: string }> = {
   hermes: { iconUrl: hermesRuntimeLogoUrl, label: 'Hermes' },
   pi: { iconUrl: piRuntimeLogoUrl, label: 'Pi' },
   codex: { iconUrl: codexRuntimeLogoUrl, label: 'Codex' },
   claude: { iconUrl: claudeRuntimeLogoUrl, label: 'Claude Code' },
-  gemini: { iconUrl: geminiRuntimeLogoUrl, label: 'Gemini CLI' },
 };
 const runtimeSeed: RuntimeDefinition[] = [
   { id: 'hermes', name: 'Hermes Agent', kind: 'core', bundled: true, enabled: true, capabilities: {}, installation: { status: 'checking', installed: false, version: '', authMode: 'frakio-managed', detail: '正在检测运行时。', checkedAt: '' } },
-  { id: 'pi', name: 'Pi', kind: 'core', bundled: true, enabled: true, capabilities: {}, installation: { status: 'checking', installed: false, version: '', authMode: 'frakio-managed', detail: '正在检测运行时。', checkedAt: '' } },
-  { id: 'codex', name: 'Codex', kind: 'channel', bundled: false, enabled: false, capabilities: {}, installation: { status: 'checking', installed: false, version: '', authMode: 'native', detail: '正在检测运行时。', checkedAt: '' } },
-  { id: 'claude', name: 'Claude Code', kind: 'channel', bundled: false, enabled: false, capabilities: {}, installation: { status: 'checking', installed: false, version: '', authMode: 'native', detail: '正在检测运行时。', checkedAt: '' } },
-  { id: 'gemini', name: 'Gemini CLI', kind: 'channel', bundled: false, enabled: false, capabilities: {}, installation: { status: 'checking', installed: false, version: '', authMode: 'native', detail: '正在检测运行时。', checkedAt: '' } },
+  { id: 'pi', name: 'Pi', kind: 'core', bundled: false, enabled: false, capabilities: {}, installation: { status: 'checking', installed: false, version: '', authMode: 'frakio-managed', detail: '正在检测运行时。', checkedAt: '' } },
+  { id: 'codex', name: 'Codex', kind: 'channel', bundled: false, enabled: false, capabilities: {}, installation: { status: 'checking', installed: false, version: '', authMode: 'frakio-managed', detail: '正在检测运行时。', checkedAt: '' } },
+  { id: 'claude', name: 'Claude Code', kind: 'channel', bundled: false, enabled: false, capabilities: {}, installation: { status: 'checking', installed: false, version: '', authMode: 'frakio-managed', detail: '正在检测运行时。', checkedAt: '' } },
 ];
 
 function mergeRuntimeDefinitions(current: RuntimeDefinition[], updates: RuntimeDefinition[]) {
@@ -292,16 +338,27 @@ function RuntimeLabel({ runtimeId, showName = true, className = '' }: { runtimeI
 }
 type MemoryLedgerEntry = {
   id: string;
-  scope: 'user' | 'agent' | 'workspace';
+  scope: 'user' | 'agent' | 'vault' | 'thread' | 'workspace';
   subjectId: string;
+  kind?: 'personal_fact' | 'preference' | 'agent_experience' | 'project_fact' | 'project_decision' | 'project_rule' | 'fact';
+  origin?: string;
+  sourceAgentId?: string;
+  threadId?: string;
+  vaultId?: string;
   fact: string;
+  reason?: string;
+  statusReason?: string;
   confidence: number;
-  status: 'candidate' | 'accepted' | 'superseded' | 'rejected';
-  provenance: Array<{ source?: string; runtimeId?: string; runId?: string; createdAt?: string }>;
+  status: 'candidate' | 'accepted' | 'paused' | 'superseded' | 'rejected';
+  provenance: Array<{ source?: string; runtimeId?: string; runId?: string; messageId?: string; quote?: string; createdAt?: string }>;
   validFrom?: string | null;
   validUntil?: string | null;
+  pausedAt?: string | null;
+  sync?: { vaultId?: string; relativePath?: string; blockHash?: string; state?: string; syncedAt?: string | null };
+  createdAt: string;
   updatedAt: string;
 };
+type MemoryReviewConfig = { enabled: boolean; provider: string; model: string; timeout: number; extraBody?: Record<string, unknown> };
 type Agent = { id: string; name: string; role: string; model: string; color: string; soul: string; scope: string; profileName?: string; gatewayStatus?: string; source?: string; soulExcerpt?: string; userProfileExcerpt?: string; memoryExcerpt?: string; userProfile?: string; memory?: string; providerSummary?: HermesProviderSummary[]; skills?: ProfileModuleEntry[]; plugins?: ProfileModuleEntry[]; avatarUrl?: string; runtimePolicy?: AgentRuntimePolicy; profileRevision?: string };
 type ModelKind = 'official' | 'relay' | 'local';
 type ModelProtocol = 'OpenAI Compatible' | 'Anthropic Compatible' | 'Custom';
@@ -367,7 +424,23 @@ type Vault = {
   productCount: number;
   lastIndexedAt: string | null;
   needsRefresh: boolean;
+  kind: 'personal' | 'project';
+  manifestPath?: string;
+  trustedRulePaths?: string[];
+  indexVersion?: number;
+  obsidianAvailable?: boolean;
+  legacyWorkspaceBinding?: boolean;
+  legacyBindingResolved?: boolean;
+  managementMode?: 'managed' | 'read_only';
+  autonomy?: 'fully_autonomous' | 'tiered' | 'all_review';
+  onboardingStatus?: string;
 };
+type KnowledgeOperation = { id: string; status: string; summary: string; kind: string; risk: string; requiresReview: boolean; files: Array<{ relativePath: string; action: string; beforeContent?: string | null; afterContent?: string | null }>; createdAt: string; publishedAt?: string | null; rolledBackAt?: string | null };
+type KnowledgeSource = { id: string; title: string; kind: string; origin: string; relativePath: string; status: string; createdAt: string; acceptedAt?: string | null };
+type KnowledgeIssue = { id: string; code: string; severity: 'error' | 'warning' | 'info'; relativePath: string; message: string };
+type KnowledgeJob = { id: string; kind: string; status: string; attempts: number; error: string; createdAt: string; updatedAt: string };
+type CuratorInfo = { actorId: 'frakio-knowledge-curator'; displayName: string; avatarUrl: string; runtime: 'hermes'; modelLabel: string; modelSource: 'vault_model' | 'reference_agent' | 'global_curator' | 'default_agent'; referenceAgentId: string; referenceAgentName: string };
+type VaultDetail = { vault: Vault; config: { managementMode: 'managed' | 'read_only'; autonomy: 'fully_autonomous' | 'tiered' | 'all_review'; onboardingStatus: string; trustedRulePaths: string[]; maintenanceRulePaths: string[]; immutableRoots: string[]; curatorPresentation: { displayName: string; avatarAssetPath: string }; curatorExecution: { mode: 'auto' | 'explicit_model' | 'follow_agent'; provider: string; model: string; timeout: number; source: string }; curatorReferenceAgentId: string }; curator?: CuratorInfo; stats: { documents: number; sources: number; pending: number; issues: number }; recentOperations: KnowledgeOperation[]; recentJobs: KnowledgeJob[]; sources: KnowledgeSource[]; issues: KnowledgeIssue[] };
 type VaultSummary = {
   vaultRoot: string;
   vaultExists: boolean;
@@ -381,7 +454,9 @@ type VaultSummary = {
   lastIndexedAt?: string;
   needsRefresh: boolean;
 };
-type ChatEvent = { id: string; agentId: string; agentName: string; role: string; content: string; attachments?: Attachment[]; reasoning?: string; externalRunId?: string; turnId?: string; mentionDepth?: number; parentMessageId?: string; routeReason?: string; runtimeId?: string; runtimeName?: string; modelId?: string; profileRevision?: string; contentType?: 'plan' | 'plan_feedback' | string; planId?: string; planRevision?: number; processingDurationMs?: number; feedback?: 'up' | 'down' | null; createdAt?: string };
+type WorkMessageArtifact = { id: string; name: string; kind?: string; path: string; relativePath?: string; size?: number };
+type ChatEvent = { id: string; agentId: string; agentName: string; role: string; content: string; attachments?: Attachment[]; context?: MessageContext; changeSetId?: string; changeSummary?: { fileCount: number; additions: number; deletions: number }; workArtifacts?: WorkMessageArtifact[]; workFinalWorkflowId?: string; memoryIds?: string[]; handoffs?: Array<{ routeId: string; targetAgentId: string; targetAgentName: string; status: 'pending' | 'starting' | 'running' | 'completed' | 'failed' | 'recorded'; error?: string }>; reasoning?: string; externalRunId?: string; turnId?: string; mentionDepth?: number; parentMessageId?: string; routeReason?: string; runtimeId?: string; runtimeName?: string; modelId?: string; profileRevision?: string; resumeStrategy?: 'native_resumed' | 'handoff_resumed' | 'new_session' | 'unsupported' | 'failed' | ''; permissionCoverage?: 'host_enforced' | 'native_enforced' | 'partial' | 'unobservable' | ''; appliedSkillCount?: number; contentType?: 'plan' | 'plan_feedback' | string; planId?: string; planRevision?: number; processingDurationMs?: number; feedback?: 'up' | 'down' | null; createdAt?: string };
+type RuntimeSessionSummary = { id: string; runtimeId: RuntimeId; laneType: 'chat' | 'work_task'; laneId: string; lifecycleState: 'opening' | 'active' | 'parked' | 'restoring' | 'recovering' | 'stale' | 'closed' | 'failed'; nativeSessionId?: string; resumeStrategy?: string; lastError?: string };
 type AttachmentDraft = { localId: string; file: File; previewUrl: string; status: 'uploading' | 'ready' | 'error'; attachment?: Attachment; error?: string };
 const attachmentAcceptValue = [
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.heic', '.svg', '.ico',
@@ -401,7 +476,7 @@ type FollowMode = 'default' | 'conversation';
 type CollaborationPlanTask = { key: string; taskId?: string; title: string; description?: string; assigneeAgentId: string; expectedResult?: string; dependsOnKeys: string[]; cancelled?: boolean };
 type CollaborationPlan = { revision: number; goal?: string; summary?: string; tasks: CollaborationPlanTask[]; publishedAt?: string };
 type CollaborationWorkflowControl = { operationId: string; idempotencyKey: string; action: 'pause' | 'resume' | 'cancel' | ''; state: 'idle' | 'pausing' | 'paused' | 'resuming' | 'cancelling' | 'cancelled' | 'pause_failed'; affectedTaskIds: string[]; stoppedRuns: number; blockedTasks: number; preservedWaitingTasks: number; failedTaskIds: string[]; heldInterventionCount: number; startedAt: string | null; completedAt: string | null; error: string };
-type CollaborationWorkflow = { id: string; name: string; boardSlug: string; status: 'active' | 'paused' | 'completed' | 'cancelled' | 'archived'; coordinatorAgentId: string; fallbackDecisionAgentId: string; rootTaskIds: string[]; currentRootTaskId?: string; planRevision?: number; plan?: CollaborationPlan | null; interventionQueue?: Array<{ id: string; status: string }>; control?: CollaborationWorkflowControl; capability?: { status: string; protocolVersion?: number; error?: string }; createdAt: string; updatedAt: string; completedAt?: string | null; pausedAt?: string | null; cancelledAt?: string | null; archivedAt?: string | null };
+type CollaborationWorkflow = { id: string; name: string; boardSlug: string; status: 'active' | 'paused' | 'completed' | 'cancelled' | 'archived'; coordinatorAgentId: string; fallbackDecisionAgentId: string; rootTaskIds: string[]; currentRootTaskId?: string; planRevision?: number; plan?: CollaborationPlan | null; interventionQueue?: Array<{ id: string; status: string }>; control?: CollaborationWorkflowControl; capability?: { status: string; protocolVersion?: number; error?: string }; finalization?: { state: 'idle' | 'requested' | 'delivered'; requestedAt?: string | null; deliveryMessageId?: string }; createdAt: string; updatedAt: string; completedAt?: string | null; pausedAt?: string | null; cancelledAt?: string | null; archivedAt?: string | null };
 type CollaborationEvent = { id: string; cursor: number; type: string; workflowId: string; taskId?: string; actorAgentId?: string; title: string; detail?: string; payload?: Record<string, any>; createdAt: string };
 type CollaborationWorkflowSnapshot = CollaborationWorkflow & { tasks: KanbanTask[]; error?: string };
 type CollaborationSnapshot = { threadId: string; mode?: 'chat' | 'work'; workerOutputMode?: 'summary' | 'all'; activeWorkflowId: string; cursor: number; workflows: CollaborationWorkflowSnapshot[]; events: CollaborationEvent[]; fallbackDecisionAgentId: string };
@@ -449,6 +524,8 @@ type Thread = {
   artifacts?: WorkArtifact[];
   contextPacket: ContextPacket | null;
   messages: ChatEvent[];
+  draftContext?: MessageContext;
+  changeSets?: RunChangeSet[];
   engine?: 'simulate' | 'hermes-studio' | 'model-provider' | 'workspace-group' | 'hermes-agent';
   collaboration?: ThreadCollaboration;
   externalSessionId?: string | null;
@@ -492,6 +569,9 @@ type RunUiState = {
   clarificationError: string;
   error: string;
   stopping: boolean;
+  changeSet: RunChangeSet | null;
+  compaction: { operationId: string; status: 'running' | 'completed' | 'failed'; tokensBefore?: number; tokensAfterEstimate?: number; error?: string; originalContextPreserved?: boolean } | null;
+  compactionRecords: Array<{ operationId: string; status: 'running' | 'completed' | 'failed'; tokensBefore?: number; tokensAfterEstimate?: number; error?: string; originalContextPreserved?: boolean }>;
 };
 
 function createRunUiState(overrides: Partial<RunUiState> = {}): RunUiState {
@@ -512,8 +592,31 @@ function createRunUiState(overrides: Partial<RunUiState> = {}): RunUiState {
     clarificationError: '',
     error: '',
     stopping: false,
+    changeSet: null,
+    compaction: null,
+    compactionRecords: [],
     ...overrides,
   };
+}
+
+function threadDraftStorageKey(thread: Pick<Thread, 'id' | 'workspaceId'> | null | undefined) {
+  if (!thread?.id) return '';
+  return `frakio:draft:${thread.workspaceId || 'no-workspace'}:${thread.id}`;
+}
+
+function readThreadDraft(thread: Pick<Thread, 'id' | 'workspaceId'> | null | undefined) {
+  const key = threadDraftStorageKey(thread);
+  if (!key) return '';
+  try { return window.localStorage.getItem(key) || ''; } catch { return ''; }
+}
+
+function writeThreadDraft(thread: Pick<Thread, 'id' | 'workspaceId'> | null | undefined, value: string) {
+  const key = threadDraftStorageKey(thread);
+  if (!key) return;
+  try {
+    if (value) window.localStorage.setItem(key, value);
+    else window.localStorage.removeItem(key);
+  } catch { /* Storage may be unavailable in a restricted desktop profile. */ }
 }
 
 function mergeRunActivityEvent(groups: RunActivityGroup[], data: any): RunActivityGroup[] {
@@ -591,6 +694,8 @@ type WorkbenchUiSettings = {
   macSidebarWidth?: number;
   macSidebarWidthVersion?: number;
   contextWidth?: number;
+  contextCompactWidth?: number;
+  contextWorkWidth?: number;
   activeSpaceId?: string;
   collapsedWorkspaceIds?: string[];
   pinnedNav?: PinnedNav;
@@ -736,6 +841,57 @@ type UpdatesStatus = {
   frakioWork: UpdateModuleStatus;
   backups?: HermesBackup[];
   backupRoot?: string;
+};
+type RuntimePackageBinding = {
+  runtimeId: string;
+  runtimeVersion: string;
+  runtimeBuildId: string;
+  source: 'bundled' | 'managed' | 'override' | 'native' | string;
+  runtimeDir: string;
+  executablePath?: string;
+  packageRoot?: string;
+  fingerprint?: string;
+  availability?: 'ready' | 'broken' | 'unavailable' | string;
+  platform: string;
+  arch: string;
+  adapterProtocolVersion: number;
+  activationRevision: string;
+  verificationState: 'verified' | 'incompatible' | 'failed' | 'unverified' | string;
+};
+type RuntimePackageRecord = RuntimePackageBinding & {
+  artifactDigest?: string;
+  installationState: string;
+  verificationReceipt?: { error?: string; checkedAt?: string; [key: string]: unknown };
+  installedAt?: string;
+  verifiedAt?: string | null;
+  updatedAt?: string;
+};
+type PiRuntimePackageStatus = {
+  runtimeId: RuntimeId;
+  activation: { activeBuildId: string; previousBuildId?: string; activationRevision: string; updatedAt?: string } | null;
+  activeBinding: RuntimePackageBinding | null;
+  previousBinding: RuntimePackageBinding | null;
+  bundledBinding: RuntimePackageBinding | null;
+  packages: RuntimePackageRecord[];
+  releases: {
+    verified: Array<{ version: string; verifiedAt?: string; node?: string; integrity?: string }>;
+    upstreamLatest?: { version: string; publishedAt?: string } | null;
+    checkedAt?: string;
+    source?: string;
+    catalogSource?: string;
+  };
+};
+type RuntimeDiscoveryCandidate = {
+  runtimeId: RuntimeId;
+  path: string;
+  realPath: string;
+  packageRoot?: string;
+  version: string;
+  platform: string;
+  arch: string;
+  fingerprint: string;
+  compatibility: 'compatible' | 'incompatible' | 'unknown';
+  detail: string;
 };
 type UpdateActionResult = {
   ok?: boolean;
@@ -913,12 +1069,11 @@ const defaultContextWidth = 344;
 // These are viewport breakpoints, not a sum of pane widths. The old summed
 // value put visually roomy desktop windows into the compact-layout path.
 const autoCollapseSidebarWidth = 980;
-const autoCollapseSidebarWithRightRailWidth = 1220;
 const sidebarWidthBounds = SIDEBAR_WIDTH_BOUNDS;
 const macSidebarWidthBounds = MAC_SIDEBAR_WIDTH_BOUNDS;
-const contextWidthBounds = { min: 280, max: 520 };
-const macConversationMinMainWidth = 520;
-const macConversationChromeWidth = 72;
+const contextWidthBounds = { min: 320, max: Number.MAX_SAFE_INTEGER };
+const macConversationMinMainWidth = 360;
+const conversationSafetyWidth = 24;
 const threadFollowThreshold = 96;
 const launchUserAvatarSnapshotKey = 'frakio-work.launchUserAvatarSnapshot';
 const launchMaterialSnapshotKey = 'frakio-work.launchMaterialSnapshot';
@@ -1064,6 +1219,8 @@ function App() {
   const fileInputRef = useRef<HTMLInputElement | null>(null);
   const attachmentDragDepthRef = useRef(0);
   const threadScrollRef = useRef<HTMLDivElement | null>(null);
+  const mainPanelRef = useRef<HTMLElement | null>(null);
+  const [conversationMainCompact, setConversationMainCompact] = useState(false);
   const threadContentRef = useRef<HTMLDivElement | null>(null);
   const threadBottomRef = useRef<HTMLDivElement | null>(null);
   const threadScrollFrameRef = useRef<number | null>(null);
@@ -1101,7 +1258,11 @@ function App() {
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('workbench');
   const [libraryCollapsed, setLibraryCollapsed] = useState(false);
-  const [rightRailTab, setRightRailTab] = useState<'collaboration' | 'resources'>('resources');
+  const [rightRailTab, setRightRailTab] = useState<RightRailTab>('collaboration');
+  const [openRightRailTabs, setOpenRightRailTabs] = useState<RightRailTab[]>([]);
+  const [newTabMenuOpen, setNewTabMenuOpen] = useState(false);
+  const [draftContext, setDraftContext] = useState<MessageContext>({ browserAnnotations: [], reviewComments: [] });
+  const [overviewOpen, setOverviewOpen] = useState(false);
   const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
   const [macSidebarOverlayOpen, setMacSidebarOverlayOpen] = useState(false);
   const [macSidebarOverlayClosing, setMacSidebarOverlayClosing] = useState(false);
@@ -1132,7 +1293,7 @@ function App() {
   const [isImportingHermes, setIsImportingHermes] = useState(false);
   const [vaultPathInput, setVaultPathInput] = useState('');
   const [vaultError, setVaultError] = useState('');
-  const [vaultBusy, setVaultBusy] = useState<Record<string, 'index' | 'delete'>>({});
+  const [vaultBusy, setVaultBusy] = useState<Record<string, 'index' | 'delete' | 'keep' | 'detach'>>({});
   const [modelError, setModelError] = useState('');
   const [runUiByThreadId, setRunUiByThreadId] = useState<Record<string, RunUiState>>({});
   const [newChatStarting, setNewChatStarting] = useState(false);
@@ -1198,6 +1359,73 @@ function App() {
     window.addEventListener('frakio:thread-refresh-request', refresh);
     return () => window.removeEventListener('frakio:thread-refresh-request', refresh);
   }, [activeThread?.id]);
+
+  const refreshDraftContext = useCallback(async (threadId = activeThread?.id || '') => {
+    if (!threadId) {
+      setDraftContext({ browserAnnotations: [], reviewComments: [] });
+      return;
+    }
+    try {
+      const data = await requestJson<{ draftContext: MessageContext }>(`/api/threads/${threadId}/draft-context`);
+      setDraftContext(data.draftContext || { browserAnnotations: [], reviewComments: [] });
+    } catch {
+      setDraftContext({ browserAnnotations: [], reviewComments: [] });
+    }
+  }, [activeThread?.id]);
+
+  useEffect(() => {
+    setOverviewOpen(false);
+    void refreshDraftContext(activeThread?.id || '');
+  }, [activeThread?.id, refreshDraftContext]);
+
+  const draftSaveTimerRef = useRef<number | null>(null);
+  const draftHydratingRef = useRef(false);
+  useEffect(() => {
+    const thread = activeThread;
+    if (!thread?.id) return undefined;
+    draftHydratingRef.current = true;
+    setInput(readThreadDraft(thread));
+    return undefined;
+  }, [activeThread?.id, activeThread?.workspaceId]);
+
+  useEffect(() => {
+    const thread = activeThread;
+    if (!thread?.id) return undefined;
+    if (draftHydratingRef.current) {
+      draftHydratingRef.current = false;
+      return undefined;
+    }
+    if (draftSaveTimerRef.current !== null) window.clearTimeout(draftSaveTimerRef.current);
+    draftSaveTimerRef.current = window.setTimeout(() => {
+      writeThreadDraft(thread, input);
+      draftSaveTimerRef.current = null;
+    }, 200);
+    return () => {
+      writeThreadDraft(thread, input);
+      if (draftSaveTimerRef.current !== null) {
+        window.clearTimeout(draftSaveTimerRef.current);
+        draftSaveTimerRef.current = null;
+      }
+    };
+  }, [activeThread?.id, activeThread?.workspaceId, input]);
+
+  useEffect(() => {
+    const thread = activeThread;
+    if (!thread?.id) return undefined;
+    const flush = () => writeThreadDraft(thread, input);
+    window.addEventListener('pagehide', flush);
+    window.addEventListener('blur', flush);
+    return () => {
+      window.removeEventListener('pagehide', flush);
+      window.removeEventListener('blur', flush);
+    };
+  }, [activeThread?.id, activeThread?.workspaceId, input]);
+
+  async function removeDraftContextItem(kind: 'browser' | 'review', itemId: string) {
+    if (!activeThread?.id) return;
+    await requestJson(`/api/threads/${activeThread.id}/draft-context/${kind}/${itemId}`, { method: 'DELETE' });
+    await refreshDraftContext(activeThread.id);
+  }
 
   useEffect(() => {
     const update = (event: Event) => {
@@ -1478,6 +1706,21 @@ function App() {
   const rightRailKind: 'resources' | null = resourceRailAvailable ? 'resources' : null;
   const rightRailOpen = Boolean(rightRailKind && !libraryCollapsed);
   const isMacConversationShell = !isSettingsNav && (activeView === 'new-chat' || (!isManagementSection && Boolean(activeThread)));
+  useLayoutEffect(() => {
+    const main = mainPanelRef.current;
+    if (!main || !isMacConversationShell) {
+      setConversationMainCompact(false);
+      return undefined;
+    }
+    const update = () => {
+      const compact = main.getBoundingClientRect().width < 440;
+      setConversationMainCompact((current) => current === compact ? current : compact);
+    };
+    const observer = new ResizeObserver(update);
+    observer.observe(main);
+    update();
+    return () => observer.disconnect();
+  }, [isMacConversationShell]);
   const desktopUpdateBadgeVisible = Boolean(
     desktopUpdateState?.supported
     && ['available', 'downloading', 'downloaded', 'error'].includes(desktopUpdateState.phase)
@@ -1494,8 +1737,15 @@ function App() {
     close: () => closeProfileInspector(),
     discard: () => closeProfileInspector(true),
   };
-  const autoCollapseWidth = rightRailOpen ? autoCollapseSidebarWithRightRailWidth : autoCollapseSidebarWidth;
-  const autoSidebarCollapsed = isDesktopShell && !isSettingsNav && viewportWidth < autoCollapseWidth;
+  const rightRailNeedsSidebarDrawer = rightRailOpen
+    && !sidebarCollapsed
+    && viewportWidth <= sidebarWidth + contextWidth + macConversationMinMainWidth + conversationSafetyWidth;
+  const rightRailOverlaysMain = rightRailOpen
+    && viewportWidth < contextWidthBounds.min + macConversationMinMainWidth + conversationSafetyWidth;
+  const browserFullWorkspace = rightRailOpen && rightRailTab === 'browser' && viewportWidth <= 768;
+  const autoSidebarCollapsed = isDesktopShell
+    && !isSettingsNav
+    && (viewportWidth < autoCollapseSidebarWidth || rightRailNeedsSidebarDrawer);
   const effectiveSidebarCollapsed = sidebarCollapsed || autoSidebarCollapsed;
   // In a macOS conversation the responsive layout is a temporary drawer,
   // not the persisted user preference. Keep the two CSS states separate.
@@ -1539,11 +1789,11 @@ function App() {
     leftVisible: !effectiveSidebarCollapsed,
     rightVisible: rightRailOpen,
     minMainWidth: macConversationMinMainWidth,
-    chromeWidth: macConversationChromeWidth,
+    chromeWidth: conversationSafetyWidth,
     minWidth: activeSidebarWidthBounds.min,
     maxWidth: activeSidebarWidthBounds.max,
   });
-  const macContextResizeMax = availablePaneMax({
+  const contextResizeMax = availablePaneMax({
     side: 'right',
     viewportWidth,
     sidebarWidth,
@@ -1551,10 +1801,27 @@ function App() {
     leftVisible: !effectiveSidebarCollapsed,
     rightVisible: rightRailOpen,
     minMainWidth: macConversationMinMainWidth,
-    chromeWidth: macConversationChromeWidth,
+    chromeWidth: conversationSafetyWidth,
     minWidth: contextWidthBounds.min,
     maxWidth: contextWidthBounds.max,
   });
+  const contextOpenResizeMax = availablePaneMax({
+    side: 'right',
+    viewportWidth,
+    sidebarWidth,
+    contextWidth,
+    leftVisible: !(sidebarCollapsed || rightRailNeedsSidebarDrawer),
+    rightVisible: true,
+    minMainWidth: macConversationMinMainWidth,
+    chromeWidth: conversationSafetyWidth,
+    minWidth: contextWidthBounds.min,
+    maxWidth: contextWidthBounds.max,
+  });
+  const renderedContextWidth = normalizePaneWidth(
+    contextWidth,
+    contextWidthBounds.min,
+    rightRailOpen ? contextResizeMax : contextOpenResizeMax,
+  );
 
   useEffect(() => {
     if (!macSidebarUsesOverlay) closeMacSidebarOverlay(true);
@@ -1607,7 +1874,8 @@ function App() {
   }, [macSpaceEditorOpen]);
 
   useEffect(() => {
-    setRightRailTab((activeThread?.executionMode || 'chat') === 'work' ? 'collaboration' : 'resources');
+    const nextTab = (activeThread?.executionMode || 'chat') === 'work' ? 'collaboration' : 'files';
+    setRightRailTab(nextTab);
   }, [activeThread?.id, activeThread?.executionMode]);
 
   useEffect(() => {
@@ -1660,7 +1928,7 @@ function App() {
   const workspaceUsesNativeMaterial = isMacDesktop && workspaceMaterialTheme.colorMode === 'native';
   const workspaceMaterialStyle = {
     '--sidebar-width': `${sidebarWidth}px`,
-    '--context-width': `${contextWidth}px`,
+    '--context-width': `${renderedContextWidth}px`,
     '--space-accent': workspaceMaterialTheme.accentColor,
     '--space-sidebar-bg': workspaceMaterialTheme.sidebarBg,
     '--space-sidebar-rgb': workspaceMaterialRgb,
@@ -1769,6 +2037,13 @@ function App() {
     setModels(modelData?.models || []);
     setModelCapabilities(capabilityData?.capabilities || {});
     setLibraryCollapsed(Boolean(stateData?.ui?.libraryCollapsed));
+    const restoredContextWidth = normalizePaneWidth(
+      stateData?.ui?.contextWidth ?? stateData?.ui?.contextWorkWidth ?? stateData?.ui?.contextCompactWidth ?? defaultContextWidth,
+      contextWidthBounds.min,
+      contextWidthBounds.max,
+    );
+    const needsContextWidthMigration = typeof stateData?.ui?.contextWidth !== 'number'
+      && (typeof stateData?.ui?.contextWorkWidth === 'number' || typeof stateData?.ui?.contextCompactWidth === 'number');
     if (userProfileData?.userProfile) {
       setUserProfile(userProfileData.userProfile);
       setUserProfileLoaded(true);
@@ -1796,7 +2071,7 @@ function App() {
       sidebarWidth: normalizePaneWidth(stateData?.ui?.sidebarWidth ?? defaultSidebarWidth, sidebarWidthBounds.min, sidebarWidthBounds.max),
       macSidebarWidth: normalizePaneWidth(stateData?.ui?.macSidebarWidth ?? defaultMacSidebarWidth, macSidebarWidthBounds.min, macSidebarWidthBounds.max),
       macSidebarWidthVersion: Number(stateData?.ui?.macSidebarWidthVersion || SIDEBAR_WIDTH_VERSION),
-      contextWidth: normalizePaneWidth(stateData?.ui?.contextWidth || defaultContextWidth, contextWidthBounds.min, contextWidthBounds.max),
+      contextWidth: restoredContextWidth,
       activeSpaceId: stateData?.ui?.activeSpaceId || spaceData?.activeSpaceId || spaceData?.spaces?.[0]?.id || 'space_default',
       collapsedWorkspaceIds: Array.isArray(stateData?.ui?.collapsedWorkspaceIds) ? stateData?.ui?.collapsedWorkspaceIds : [],
       telemetryEnabled: stateData?.ui?.telemetryEnabled === true,
@@ -1810,7 +2085,14 @@ function App() {
       activeSidebarWidthBounds.min,
       activeSidebarWidthBounds.max,
     ));
-    setContextWidth(normalizePaneWidth(stateData?.ui?.contextWidth || defaultContextWidth, contextWidthBounds.min, contextWidthBounds.max));
+    setContextWidth(restoredContextWidth);
+    if (needsContextWidthMigration) {
+      void fetch('/api/state/ui', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ contextWidth: restoredContextWidth }),
+      });
+    }
     if (hermesData || hermesBootstrapData || hermesRuntimeData) setHermesApiAvailability('online');
     else {
       setHermesApiAvailability('offline');
@@ -2618,14 +2900,48 @@ function App() {
     void persistUi({ sidebarCollapsed: nextCollapsed });
   }
 
-  function toggleRightRailTab(tab: 'collaboration' | 'resources') {
+  function openRightRailTab(tab: RightRailTab) {
     if (!rightRailKind) return;
-    if (rightRailOpen && rightRailTab === tab) {
-      void persistUi({ libraryCollapsed: true });
+    setOpenRightRailTabs((current) => current.includes(tab) ? current : [...current, tab]);
+    setRightRailTab(tab);
+    setNewTabMenuOpen(false);
+    void persistUi({
+      libraryCollapsed: false,
+      contextWidth,
+    });
+  }
+
+  function closeRightRailTab(tab: RightRailTab) {
+    const index = openRightRailTabs.indexOf(tab);
+    if (index < 0) return;
+    const remaining = openRightRailTabs.filter((item) => item !== tab);
+    setOpenRightRailTabs(remaining);
+    if (rightRailTab !== tab) return;
+    const next = remaining[index] || remaining[index - 1];
+    if (next) {
+      setRightRailTab(next);
       return;
     }
-    setRightRailTab(tab);
-    if (!rightRailOpen) void persistUi({ libraryCollapsed: false });
+    setRightRailTab('collaboration');
+  }
+
+  function toggleRightRail() {
+    if (!rightRailKind) return;
+    setNewTabMenuOpen(false);
+    void persistUi({ libraryCollapsed: rightRailOpen });
+  }
+
+  useEffect(() => {
+    setOpenRightRailTabs([]);
+    setLibraryCollapsed(true);
+  }, [activeThread?.id]);
+
+  function resizeContextWidth(width: number) {
+    setContextWidth(normalizePaneWidth(width, contextWidthBounds.min, contextResizeMax));
+  }
+
+  function commitContextWidth(width: number) {
+    void persistUi({ contextWidth: normalizePaneWidth(width, contextWidthBounds.min, contextResizeMax) });
   }
 
   function toggleWorkspaceCollapsed(workspaceId: string) {
@@ -2709,7 +3025,7 @@ function App() {
     setProjectMode(mode);
     setProjectName(purpose === 'convert' && activeThread?.mode === 'direct' ? activeThread.title : '');
     setProjectRootPath('');
-    setProjectParentPath(defaultProjectParentPath);
+    setProjectParentPath('');
     setProjectError('');
     setProjectModalOpen(true);
   }
@@ -3155,19 +3471,23 @@ function App() {
     target: ChatRunTarget | null,
     runAttachments: Attachment[] = [],
     onAccepted?: () => void,
-    options: { suppressUserMessage?: boolean; planExecutionId?: string } = {},
+    options: { suppressUserMessage?: boolean; planExecutionId?: string; messageContext?: MessageContext } = {},
   ): Promise<Thread | null> {
     resetRunUi(threadId, { isRunning: true, startedAt, target });
-    const userDraftMessage: ChatEvent = { id: `local-user-${startedAt}`, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments };
+    const messageContext = options.messageContext || { browserAnnotations: [], reviewComments: [] };
+    const hasMessageContext = Boolean(messageContext.browserAnnotations.length || messageContext.reviewComments.length);
+    const userDraftMessage: ChatEvent = { id: `local-user-${startedAt}`, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments, ...(hasMessageContext ? { context: messageContext } : {}) };
     let completedThread: Thread | null = null;
     let planDraftRun = false;
     const appendMissingRunMessages = (thread: Thread, runId: string, assistantDraft = '') => {
       let nextMessages = [...thread.messages];
       const attachmentIds = runAttachments.map((attachment) => attachment.id).sort().join(',');
+      const contextIds = [...messageContext.browserAnnotations, ...messageContext.reviewComments].map((item) => item.id).sort().join(',');
       const hasUserMessage = nextMessages.some((message) => (
         message.agentId === 'user'
         && message.content.trim() === text.trim()
         && (message.attachments || []).map((attachment) => attachment.id).sort().join(',') === attachmentIds
+        && [...(message.context?.browserAnnotations || []), ...(message.context?.reviewComments || [])].map((item) => item.id).sort().join(',') === contextIds
       ));
       if (!options.suppressUserMessage && !hasUserMessage) nextMessages = [...nextMessages, userDraftMessage];
       const finalDraft = assistantDraft.trim();
@@ -3199,6 +3519,8 @@ function App() {
       body: JSON.stringify({
         message: text,
         attachmentIds: runAttachments.map((attachment) => attachment.id),
+        browserAnnotationIds: messageContext.browserAnnotations.map((item) => item.id),
+        reviewCommentIds: messageContext.reviewComments.map((item) => item.id),
         selectedAgents: selectedAgentsForRun,
         targetAgentId: target?.kind === 'agent' ? target.agent.id : '',
         turnId: `turn-${startedAt}`,
@@ -3293,6 +3615,36 @@ function App() {
           });
           return;
         }
+        if (data.event === 'context.compaction.started') {
+          const operationId = String(data.operationId || `compaction:${data.runId || activeStreamRunId}`);
+          updateRunUi(threadId, (current) => {
+            const record = { operationId, status: 'running' as const, tokensBefore: Number(data.tokensBefore) || undefined };
+            const records = current.compactionRecords.some((item) => item.operationId === operationId)
+              ? current.compactionRecords.map((item) => item.operationId === operationId ? { ...item, ...record } : item)
+              : [...current.compactionRecords, record];
+            return { ...current, compaction: record, compactionRecords: records, presentationPhase: 'activity' };
+          });
+          return;
+        }
+        if (data.event === 'context.compaction.completed' || data.event === 'context.compaction.failed') {
+          const operationId = String(data.operationId || `compaction:${data.runId || activeStreamRunId}`);
+          const failed = data.event === 'context.compaction.failed';
+          updateRunUi(threadId, (current) => {
+            const record = {
+              operationId,
+              status: failed ? 'failed' as const : 'completed' as const,
+              tokensBefore: Number(data.tokensBefore) || undefined,
+              tokensAfterEstimate: Number(data.tokensAfterEstimate) || undefined,
+              error: failed ? String(data.error || '上下文压缩失败。') : undefined,
+              originalContextPreserved: failed ? data.originalContextPreserved !== false : undefined,
+            };
+            const records = current.compactionRecords.some((item) => item.operationId === operationId)
+              ? current.compactionRecords.map((item) => item.operationId === operationId ? { ...item, ...record } : item)
+              : [...current.compactionRecords, record];
+            return { ...current, compaction: record, compactionRecords: records, presentationPhase: failed ? 'activity' : current.presentationPhase };
+          });
+          return;
+        }
         if (data.event === 'message.delta') {
           const delta = String(data.delta || '');
           if (data.runId && data.runId !== activeStreamRunId) {
@@ -3322,6 +3674,10 @@ function App() {
             activityGroups: mergeRunActivityEvent(current.activityGroups, data),
             presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event),
           }));
+          return;
+        }
+        if (data.event === 'changes.updated' && data.changeSet) {
+          updateRunUi(threadId, { changeSet: data.changeSet as RunChangeSet });
           return;
         }
         if (data.event === 'approval.request') {
@@ -3734,6 +4090,17 @@ function App() {
     if (data.thread.mode === 'workspace') await loadThreads(data.thread.workspaceId, data.thread.id);
   }
 
+  async function retryHandoff(routeId: string) {
+    if (!activeThread) return;
+    const response = await fetch(`/api/threads/${activeThread.id}/handoffs/${encodeURIComponent(routeId)}/retry`, { method: 'POST' });
+    const data = await response.json();
+    if (!response.ok) {
+      setHermesError(data.error || '转交重试失败。');
+      return;
+    }
+    if (data.thread) setActiveThread(data.thread);
+  }
+
   async function updateThreadPermissionMode(permissionMode: PermissionMode) {
     if (!activeThread) return;
     const previousThread = activeThread;
@@ -3951,17 +4318,17 @@ function App() {
     }
   }
 
-  async function addVault() {
+  async function addVault(kind: 'personal' | 'project' = 'project', useDefault = false) {
     setVaultError('');
     const value = vaultPathInput.trim();
-    if (!value) {
-      setVaultError('请输入 Obsidian 仓库路径。');
+    if (!value && !(kind === 'personal' && useDefault)) {
+      setVaultError('请选择资料库目录。');
       return;
     }
     const res = await fetch('/api/vaults', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ path: value }),
+      body: JSON.stringify({ path: useDefault ? '' : value, kind }),
     });
     const data = await res.json();
     if (!res.ok) {
@@ -3971,8 +4338,8 @@ function App() {
     setVaultPathInput('');
     const vaultData = await fetch('/api/vaults').then((r) => r.json());
     setVaults(vaultData.vaults);
-    setDefaultVaultId(vaultData.defaultVaultId || data.vault.id);
-    if (activeThread) await updateThreadVault(data.vault.id);
+    setDefaultVaultId(vaultData.defaultVaultId || null);
+    if (kind === 'project' && activeThread) await updateThreadVault(data.vault.id);
   }
 
   async function reindexVault(vaultId: string) {
@@ -4018,6 +4385,30 @@ function App() {
       await refreshLeftRail();
     } catch (error) {
       setVaultError(error instanceof Error ? error.message : '仓库移除失败。');
+    } finally {
+      setVaultBusy((current) => {
+        const next = { ...current };
+        delete next[vault.id];
+        return next;
+      });
+    }
+  }
+
+  async function resolveLegacyVaultBinding(vault: Vault, action: 'keep' | 'detach') {
+    if (action === 'detach' && !window.confirm(`解除「${vault.name}」与旧项目的连接？\n\n不会移动或删除资料库里的文件。`)) return;
+    setVaultError('');
+    setVaultBusy((current) => ({ ...current, [vault.id]: action }));
+    try {
+      const response = await fetch(`/api/vaults/${vault.id}/legacy-binding`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action }) });
+      const data = await response.json();
+      if (!response.ok) throw new Error(data.error || '旧版绑定处理失败。');
+      const vaultData = await fetch('/api/vaults').then((item) => item.json());
+      setVaults(vaultData.vaults || []);
+      setDefaultVaultId(vaultData.defaultVaultId || null);
+      if (action === 'detach') setActiveThread((current) => current?.vaultId === vault.id ? { ...current, vaultId: null, vaultName: '未连接资料库' } : current);
+      await refreshLeftRail();
+    } catch (error) {
+      setVaultError(error instanceof Error ? error.message : '旧版绑定处理失败。');
     } finally {
       setVaultBusy((current) => {
         const next = { ...current };
@@ -4115,16 +4506,17 @@ function App() {
   async function sendMessage() {
     const text = input.trim();
     const runAttachments = attachments.flatMap((item) => item.status === 'ready' && item.attachment ? [item.attachment] : []);
-    if (isRunning || !activeThread || attachments.some((item) => item.status !== 'ready') || (!text && !runAttachments.length)) return;
+    const runContext = draftContext;
+    const hasRunContext = Boolean(runContext.browserAnnotations.length || runContext.reviewComments.length);
+    if (isRunning || !activeThread || attachments.some((item) => item.status !== 'ready') || (!text && !runAttachments.length && !hasRunContext)) return;
     const startedAt = Date.now();
     const threadId = activeThread.id;
-    setInput('');
     setThreadFollowState(true);
     const target = resolveRunTarget(text, agents, activeComposerAgent);
     resetRunUi(threadId, { isRunning: true, startedAt, target });
     const optimisticThread = {
       ...activeThread,
-      messages: [...activeThread.messages, { id: `local-user-${startedAt}`, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments }],
+      messages: [...activeThread.messages, { id: `local-user-${startedAt}`, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments, ...(hasRunContext ? { context: runContext } : {}) }],
     };
     setActiveThread(optimisticThread);
     let runAccepted = false;
@@ -4132,8 +4524,11 @@ function App() {
       try {
         const routedThread = await runHermesAgentThread(threadId, text, [...selectedAgentIds], startedAt, target, runAttachments, () => {
           runAccepted = true;
+          setInput('');
+          writeThreadDraft(activeThread, '');
           clearAttachmentDrafts();
-        });
+          setDraftContext({ browserAnnotations: [], reviewComments: [] });
+        }, { messageContext: runContext });
         if (routedThread) setActiveThread(routedThread);
       } catch (error) {
         if (!runAccepted) setInput((current) => current || text);
@@ -4319,13 +4714,16 @@ function App() {
     const defaultRuntimeId = agents.find((agent) => agent.id === agentId)?.runtimePolicy?.defaultRuntimeId || 'hermes';
     if (runtimeId && runtimeId !== defaultRuntimeId) next[agentId] = runtimeId;
     else delete next[agentId];
-    const response = await fetch(`/api/threads/${activeThread.id}`, {
-      method: 'PATCH',
+    const response = await fetch(`/api/threads/${activeThread.id}/agents/${agentId}/runtime-switch`, {
+      method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ agentRuntimeOverrides: next }),
+      body: JSON.stringify({ runtimeId }),
     });
-    const data = await response.json();
-    if (response.ok) setActiveThread(data.thread);
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || '运行时切换失败');
+    setActiveThread((current) => current ? { ...current, runtimeId, agentRuntimeOverrides: next } : current);
+    await refreshLeftRail();
+    return data as { message?: string; resumeCandidate?: boolean };
   }
 
   function updateNewChatModelOverride(value: string) {
@@ -4466,46 +4864,69 @@ function App() {
       <header
         className={`mac-window-toolbar mac-global-window-toolbar ${isSettingsNav ? 'is-settings' : ''} ${cleanShell ? 'is-launching' : ''}`}
         data-appearance={effectiveAppDark ? 'dark' : 'light'}
+        style={workspaceMaterialStyle}
       >
         <div className="mac-window-drag-region" aria-hidden="true" />
         {!cleanShell && !isSettingsNav && (
           <>
             {desktopLeftActions}
             {rightRailKind && (
-              <div className="mac-window-rail-actions">
+              <>
+              {rightRailOpen && openRightRailTabs.length > 0 && <div className="mac-window-workspace-tabs" role="tablist" aria-label="已打开工具">
+                {openRightRailTabs.map((tab) => <div className={rightRailTab === tab ? 'mac-window-workspace-tab active' : 'mac-window-workspace-tab'} key={tab} title={rightRailTabMeta[tab].detail}>
+                  <button type="button" role="tab" aria-selected={rightRailTab === tab} onClick={() => openRightRailTab(tab)}><RightRailTabIcon tab={tab} /><span>{rightRailTabMeta[tab].title}</span></button>
+                  <button type="button" aria-label={`关闭 ${rightRailTabMeta[tab].title}`} onClick={() => closeRightRailTab(tab)}><X size={12} /></button>
+                </div>)}
+              </div>}
+              {rightRailOpen && openRightRailTabs.length > 0 && <div className="mac-window-add-tab">
                 <IconTooltipButton
-                  active={rightRailOpen && rightRailTab === 'collaboration'}
-                  ariaLabel="协作"
-                  className="desktop-window-control mac-window-rail-button"
-                  onClick={() => toggleRightRailTab('collaboration')}
-                  tooltip="协作"
+                  active={newTabMenuOpen}
+                  ariaLabel="添加工具标签"
+                  className="desktop-window-control"
+                  onClick={() => setNewTabMenuOpen((open) => !open)}
+                  tooltip="添加工具标签"
                 >
-                  <Network size={15} />
+                  <Plus size={15} />
                 </IconTooltipButton>
-                <IconTooltipButton
-                  active={rightRailOpen && rightRailTab === 'resources'}
-                  ariaLabel="资源"
+                {newTabMenuOpen && <div className="mac-window-add-tab-menu" role="menu">
+                  {rightRailTabs.map((tab) => <button type="button" key={tab} onClick={() => openRightRailTab(tab)}><RightRailTabIcon tab={tab} size={15} /><span>{rightRailTabMeta[tab].title}</span></button>)}
+                </div>}
+              </div>}
+              <div className="mac-window-rail-actions">
+                {rightRailOpen && activeThread && <IconTooltipButton
+                  active={overviewOpen}
+                  ariaLabel="会话摘要"
                   className="desktop-window-control mac-window-rail-button"
-                  onClick={() => toggleRightRailTab('resources')}
-                  tooltip="资源"
+                  onClick={() => setOverviewOpen((open) => !open)}
+                  tooltip="会话摘要"
                 >
-                  <FolderOpen size={15} />
+                  <Library size={15} />
+                </IconTooltipButton>}
+                <IconTooltipButton
+                  active={rightRailOpen}
+                  ariaLabel={rightRailOpen ? '收起右侧栏' : '展开右侧栏'}
+                  className="desktop-window-control mac-window-rail-button"
+                  onClick={toggleRightRail}
+                  tooltip={rightRailOpen ? '收起右侧栏' : '展开右侧栏'}
+                >
+                  {rightRailOpen ? <PanelRightOpen size={15} /> : <PanelRight size={15} />}
                 </IconTooltipButton>
               </div>
+              </>
             )}
           </>
         )}
       </header>
     )}
     {!cleanShell && (
-    <div data-appearance={effectiveAppDark ? 'dark' : 'light'} data-space-color-mode={activeSpaceTheme.colorMode || 'custom'} className={`app ${isWorkbenchShell ? 'workbench-shell desktop-shell mac-desktop-shell' : ''} ${isDesktopShell ? 'native-desktop-shell' : 'managed-web-shell'} ${isWindowsDesktop ? 'windows-shell' : ''} ${isMacConversationShell ? 'workbench-conversation-shell mac-conversation-shell' : ''} ${['org', 'settings', 'models', 'channels', 'plugins', 'kanban', 'jobs', 'monitoring'].includes(activeNav) || activeView === 'new-chat' || spaceEditorReplacesPage ? 'management-mode' : ''} ${isSettingsNav ? 'settings-mode' : ''} ${spaceEditorReplacesPage ? 'workspace-create-mode' : ''} ${macSpaceEditorOpen ? 'mac-space-editor-open' : ''} ${rightRailKind ? 'has-right-rail' : ''} ${rightRailOpen ? 'right-rail-open' : ''} ${activeView === 'new-chat' && !spaceEditorReplacesPage ? 'new-chat-mode' : ''} ${libraryCollapsed ? 'library-collapsed' : ''} ${autoSidebarCollapsed && !spaceEditorReplacesPage ? 'sidebar-auto-collapsed' : ''} ${(isWorkbenchShell || isSettingsNav) && sidebarUsesCollapsedLayout && !spaceEditorReplacesPage ? 'sidebar-collapsed' : ''} ${macSidebarOverlayVisible ? 'mac-sidebar-overlay-visible' : ''} ${macSidebarOverlayOpen ? 'mac-sidebar-overlay-open' : ''} ${macSidebarOverlayClosing ? 'mac-sidebar-overlay-closing' : ''} ${uiSettings.density === 'compact' ? 'compact-density' : ''}`} style={workspaceMaterialStyle}>
+    <div data-appearance={effectiveAppDark ? 'dark' : 'light'} data-space-color-mode={activeSpaceTheme.colorMode || 'custom'} className={`app ${isWorkbenchShell ? 'workbench-shell desktop-shell mac-desktop-shell' : ''} ${isDesktopShell ? 'native-desktop-shell' : 'managed-web-shell'} ${isWindowsDesktop ? 'windows-shell' : ''} ${isMacConversationShell ? 'workbench-conversation-shell mac-conversation-shell' : ''} ${['org', 'settings', 'models', 'channels', 'plugins', 'kanban', 'jobs', 'monitoring'].includes(activeNav) || activeView === 'new-chat' || spaceEditorReplacesPage ? 'management-mode' : ''} ${isSettingsNav ? 'settings-mode' : ''} ${spaceEditorReplacesPage ? 'workspace-create-mode' : ''} ${macSpaceEditorOpen ? 'mac-space-editor-open' : ''} ${rightRailKind ? 'has-right-rail' : ''} ${rightRailOpen ? 'right-rail-open' : ''} ${rightRailOverlaysMain ? 'right-rail-overlay' : ''} ${browserFullWorkspace ? 'browser-full-workspace' : ''} ${activeView === 'new-chat' && !spaceEditorReplacesPage ? 'new-chat-mode' : ''} ${libraryCollapsed ? 'library-collapsed' : ''} ${autoSidebarCollapsed && !spaceEditorReplacesPage ? 'sidebar-auto-collapsed' : ''} ${(isWorkbenchShell || isSettingsNav) && sidebarUsesCollapsedLayout && !spaceEditorReplacesPage ? 'sidebar-collapsed' : ''} ${macSidebarOverlayVisible ? 'mac-sidebar-overlay-visible' : ''} ${macSidebarOverlayOpen ? 'mac-sidebar-overlay-open' : ''} ${macSidebarOverlayClosing ? 'mac-sidebar-overlay-closing' : ''} ${uiSettings.density === 'compact' ? 'compact-density' : ''}`} style={workspaceMaterialStyle}>
       {isDesktopShell && !isSettingsNav && (
         <>
           {!isMacConversationShell && desktopLeftActions}
-          {rightRailKind && !isMacConversationShell && (
+          {rightRailKind && (!isMacConversationShell || !isMacDesktop) && (
             <IconTooltipButton
               className={rightRailOpen ? 'desktop-window-control desktop-right-rail-toggle active' : 'desktop-window-control desktop-right-rail-toggle'}
-              onClick={() => void persistUi({ libraryCollapsed: rightRailOpen })}
+              onClick={toggleRightRail}
               ariaLabel={rightRailOpen ? '收起资源' : '展开资源'}
               tooltip={rightRailOpen ? '收起资源' : '展开资源'}
             >
@@ -4526,6 +4947,16 @@ function App() {
             </div>
           )}
         </>
+      )}
+      {!isDesktopShell && !isSettingsNav && rightRailKind && (
+        <IconTooltipButton
+          className={rightRailOpen ? 'desktop-window-control desktop-right-rail-toggle active' : 'desktop-window-control desktop-right-rail-toggle'}
+          onClick={toggleRightRail}
+          ariaLabel={rightRailOpen ? '收起资源' : '展开资源'}
+          tooltip={rightRailOpen ? '收起资源' : '展开资源'}
+        >
+          {rightRailOpen ? <PanelRightOpen size={15} /> : <PanelRight size={15} />}
+        </IconTooltipButton>
       )}
       {isSettingsNav ? (
         <SettingsRail
@@ -4946,7 +5377,7 @@ function App() {
         />
       )}
 
-      <main className="main">
+      <main ref={mainPanelRef} className={conversationMainCompact ? 'main compact-conversation-main' : 'main'}>
         {isMacConversationShell && !effectiveSidebarCollapsed && !macSidebarUsesOverlay && !macSpaceEditorOpen && (
           <ResizeHandle
             side="left"
@@ -4958,15 +5389,15 @@ function App() {
             onCommit={(width) => void persistUi({ macSidebarWidth: width, macSidebarWidthVersion: SIDEBAR_WIDTH_VERSION })}
           />
         )}
-        {isMacConversationShell && rightRailOpen && !macSpaceEditorOpen && (
+        {isMacConversationShell && rightRailOpen && !macSpaceEditorOpen && !browserFullWorkspace && (
           <ResizeHandle
             side="right"
             edgeAligned
-            currentWidth={contextWidth}
+            currentWidth={renderedContextWidth}
             minWidth={contextWidthBounds.min}
-            maxWidth={macContextResizeMax}
-            onResize={setContextWidth}
-            onCommit={(width) => void persistUi({ contextWidth: width })}
+            maxWidth={contextResizeMax}
+            onResize={resizeContextWidth}
+            onCommit={commitContextWidth}
           />
         )}
         {activeView !== 'new-chat' && !isSettingsNav && !spaceEditorReplacesPage && !isMacConversationShell && <header className="topbar">
@@ -4983,6 +5414,7 @@ function App() {
                 onRuntimeChange={updateThreadAgentRuntimeOverride}
                 onOpenRuntimeCenter={() => openSettingsSection('runtimes')}
               />
+              <button className={overviewOpen ? 'top-icon-btn active' : 'top-icon-btn'} type="button" onClick={() => setOverviewOpen((open) => !open)} aria-label="会话摘要" title="会话摘要"><Library size={16} /></button>
               <ThreadActionsMenu
                 thread={activeThread}
                 workspace={activeWorkspace}
@@ -5000,7 +5432,7 @@ function App() {
               {!isDesktopShell && rightRailKind && (
                 <button
                   className={rightRailOpen ? 'top-icon-btn active' : 'top-icon-btn'}
-                  onClick={() => void persistUi({ libraryCollapsed: rightRailOpen })}
+                  onClick={toggleRightRail}
                   aria-label={rightRailOpen ? '收起资源' : '展开资源'}
                   title={rightRailOpen ? '收起资源' : '展开资源'}
                 >
@@ -5190,15 +5622,14 @@ function App() {
                       onEnablePlan={() => setNewChatPlanEnabled(true)}
                     />
                     <input ref={fileInputRef} className="file-input" type="file" multiple accept={attachmentAcceptValue} onChange={(event) => handleAttachmentChange(event.target.files)} />
-                    <PermissionModeControl value={newChatPermissionMode} onChange={setNewChatPermissionMode} />
+                    <PermissionModeControl compact={conversationMainCompact} value={newChatPermissionMode} onChange={setNewChatPermissionMode} />
                     <ExecutionModeControl value={newChatExecutionMode} disabled={newChatStarting || newChatPlanEnabled} onChange={(mode) => { setNewChatExecutionMode(mode); setCollaborationModeError(null); }} />
                     {newChatPlanEnabled && <PlanModeIndicator busy={newChatStarting} onClose={() => setNewChatPlanEnabled(false)} />}
                   </div>
                   <div className="composer-right-tools">
-                    {['codex', 'claude', 'gemini'].includes(newChatRuntimeId) ? (
-                      <span className="composer-native-runtime-model" title="模型由本机 CLI 或 CC Switch 管理">{runtimeLabels[newChatRuntimeId]} · 原生模型</span>
-                    ) : <ProviderModelPicker
+                    <ProviderModelPicker
                       className="composer-model composer-agent-model"
+                      runtimeId={newChatRuntimeId}
                       agentName={newChatAgent?.name || ''}
                       value={newChatProfileModelValue}
                       models={hermesProfileModelOptions}
@@ -5211,7 +5642,7 @@ function App() {
                       runOverride={newChatRunOverride}
                       onRunOverrideChange={setNewChatRunOverride}
                       onChange={updateNewChatModelOverride}
-                    />}
+                    />
                     <ComposerRunButton
                       isRunning={newChatStarting}
                       hasActiveRun={false}
@@ -5291,6 +5722,7 @@ function App() {
             addVault={addVault}
             reindexVault={reindexVault}
             deleteVault={deleteVault}
+            resolveLegacyVaultBinding={resolveLegacyVaultBinding}
             onImportHermes={importHermesProfiles}
             onRunFirstUseGuide={() => runFirstUseGuide({ manual: true })}
             firstUseGuideRunning={launchPhase !== 'done' && launchOriginRef.current === 'manual'}
@@ -5329,6 +5761,10 @@ function App() {
             onUpdateDefaultAgent={(agentId) => {
               setNewChatAgentId(agentId);
               void persistUi({ defaultAgentId: agentId });
+            }}
+            onOpenMemorySource={(threadId, messageId) => {
+              setActiveNav('council');
+              void openThread(threadId).then(() => setTimeout(() => document.querySelector(`[data-message-id="${CSS.escape(messageId || '')}"]`)?.scrollIntoView({ block: 'center' }), 80));
             }}
           />
         ) : activeNav === 'models' ? (
@@ -5396,6 +5832,14 @@ function App() {
                   />}
                 </header>
               )}
+              {activeThread && overviewOpen && (
+                <ConversationOverviewPopover
+                  threadId={activeThread.id}
+                  onClose={() => setOverviewOpen(false)}
+                  onOpenSources={() => { setOverviewOpen(false); openRightRailTab('sources'); }}
+                  onOpenReview={() => { setOverviewOpen(false); openRightRailTab('review'); }}
+                />
+              )}
               <div className="thread" ref={threadScrollRef}>
                 <div className="thread-content" ref={threadContentRef}>
                 {visibleMessages.map((message) => {
@@ -5422,8 +5866,16 @@ function App() {
                           <strong>{message.agentName}</strong>
                           {message.runtimeName && <span>{message.runtimeName}</span>}
                           {message.modelId && <span title={message.modelId}>{message.modelId}</span>}
+                          {message.resumeStrategy === 'native_resumed' && <span title="已恢复该 Agent 在这套运行时中的原生 Session">原生续接</span>}
+                          {message.resumeStrategy === 'handoff_resumed' && <span title="原生 Session 无法恢复，已通过 Frakio 交接包继续">交接续接</span>}
+                          {message.permissionCoverage === 'partial' && <span title="该运行时只暴露了部分可裁决操作">部分权限覆盖</span>}
+                          {Boolean(message.appliedSkillCount) && <span>{message.appliedSkillCount} 个 Skill 已生效</span>}
                         </div>}
                         {message.attachments && message.attachments.length > 0 && <MessageAttachments attachments={message.attachments} />}
+                        {message.context && (message.context.browserAnnotations.length > 0 || message.context.reviewComments.length > 0) && (
+                          <MessageContextSummary context={message.context} />
+                        )}
+                        {message.workArtifacts && message.workArtifacts.length > 0 && <WorkMessageArtifacts artifacts={message.workArtifacts} workspaceId={activeWorkspace?.id || activeThread?.workspaceId || ''} />}
                         {message.agentId === 'user' ? (
                           message.content ? <p className="message-text">{message.content}</p> : null
                         ) : message.contentType === 'plan' && messagePlan && messagePlanDraft ? (
@@ -5449,6 +5901,15 @@ function App() {
                             ? <RunTranscriptContent content={message.content} groups={transcript.groups} runFinished={transcript.status !== 'running'} threadId={activeThread?.id} workspaceId={activeThread?.workspaceId} />
                             : <MarkdownMessage content={message.content} threadId={activeThread?.id} workspaceId={activeThread?.workspaceId} />
                         )}
+                        {message.handoffs && message.handoffs.length > 0 && <div className="message-handoffs" aria-label="Agent 转交状态">{message.handoffs.map((handoff) => <span className={`message-handoff ${handoff.status}`} key={handoff.routeId}><Network size={13} />{handoff.status === 'pending' ? `已转交 ${handoff.targetAgentName}` : handoff.status === 'starting' || handoff.status === 'running' ? `${handoff.targetAgentName} 执行中` : handoff.status === 'completed' ? `${handoff.targetAgentName} 已回复` : handoff.status === 'recorded' ? `已通知协调 Agent：建议 ${handoff.targetAgentName} 接手` : `转交 ${handoff.targetAgentName} 失败`}{handoff.status === 'failed' && <button onClick={() => void retryHandoff(handoff.routeId)}>重试</button>}</span>)}</div>}
+                        {message.changeSetId && message.changeSummary && message.changeSummary.fileCount > 0 && (
+                          <button className="message-change-summary" type="button" onClick={() => openRightRailTab('review')}>
+                            <GitCompareArrows size={14} />
+                            <span>{message.changeSummary.fileCount} 个文件</span>
+                            <em>+{message.changeSummary.additions}</em>
+                            <del>-{message.changeSummary.deletions}</del>
+                          </button>
+                        )}
                         {showMessageActions && (
                           <MessageActions
                             message={message}
@@ -5468,6 +5929,9 @@ function App() {
                 })}
                 <ChatCollaborationEvents thread={activeThread} />
                 {!isRunning && <PersistedInterruptedRuns thread={activeThread} agents={agents} />}
+                {activeRunUi?.compactionRecords?.map((record) => (
+                  <ContextCompactionRecord key={record.operationId} record={record} />
+                ))}
                 {isRunning && !activeRunUi?.hideStatus && (
                     <ChatRunStatus
                     target={runTarget || (activeComposerAgent ? { kind: 'agent', agent: activeComposerAgent } : null)}
@@ -5525,6 +5989,14 @@ function App() {
                     onDrop={handleAttachmentDrop}
                   >
                   <AttachmentTray attachments={attachments} notice={attachmentNotice} onRemove={removeAttachment} onRetry={retryAttachment} />
+                  <DraftContextTray context={draftContext} onRemove={(kind, id) => void removeDraftContextItem(kind, id)} />
+                  {activeRunUi?.changeSet && activeRunUi.changeSet.fileCount > 0 && (
+                    <button className="composer-change-summary" type="button" onClick={() => openRightRailTab('review')}>
+                      <LoaderCircle className={activeRunUi.changeSet.status === 'running' ? 'spin' : ''} size={13} />
+                      <span>{activeRunUi.changeSet.status === 'running' ? '正在修改' : '上一轮改动'} · {activeRunUi.changeSet.fileCount} 个文件</span>
+                      <em>+{activeRunUi.changeSet.additions}</em><del>-{activeRunUi.changeSet.deletions}</del>
+                    </button>
+                  )}
                   {attachmentDragActive && <div className="attachment-drop-overlay"><ArrowDownToLine size={22} /><strong>松开即可添加附件</strong></div>}
                   {activePlan
                     ? <div className="work-mode-hint plan-mode-hint"><Lightbulb size={14} /><span>先调查并整理计划，批准前不会修改项目或启动任务</span></div>
@@ -5547,15 +6019,14 @@ function App() {
 	                        onEnablePlan={() => void setThreadPlanMode(true)}
 	                      />
 	                      <input ref={fileInputRef} className="file-input" type="file" multiple accept={attachmentAcceptValue} onChange={(event) => handleAttachmentChange(event.target.files)} />
-	                      <PermissionModeControl value={permissionMode} onChange={(mode) => void updateThreadPermissionMode(mode)} />
+	                      <PermissionModeControl compact={conversationMainCompact} value={permissionMode} onChange={(mode) => void updateThreadPermissionMode(mode)} />
 	                      <ExecutionModeControl value={activeThread?.executionMode || 'chat'} disabled={isRunning || Boolean(activePlan)} switching={modeSwitching} onChange={(mode) => void updateThreadExecutionMode(mode)} />
 	                      {activePlan && <PlanModeIndicator busy={Boolean(planAction)} onClose={() => void setThreadPlanMode(false)} />}
 	                    </div>
 	                    <div className="composer-right-tools">
-	                      {['codex', 'claude', 'gemini'].includes(activeComposerRuntimeId) ? (
-	                        <span className="composer-native-runtime-model" title="模型由本机 CLI 或 CC Switch 管理">{runtimeLabels[activeComposerRuntimeId]} · 原生模型</span>
-	                      ) : <ProviderModelPicker
+	                      <ProviderModelPicker
 	                        className="composer-model composer-agent-model"
+	                        runtimeId={activeComposerRuntimeId}
 	                        agentName={activeComposerAgent?.name || ''}
 	                        value={activeComposerProfileModelValue}
 	                        models={hermesProfileModelOptions}
@@ -5568,12 +6039,12 @@ function App() {
 	                        runOverride={activeThreadRunOverride}
 	                        onRunOverrideChange={(override) => activeComposerAgent ? updateThreadAgentRunOverride(activeComposerAgent.id, override) : undefined}
 	                        onChange={(value) => activeComposerAgent ? updateThreadAgentModelOverride(activeComposerAgent.id, value) : undefined}
-	                      />}
+	                      />
 	                      <ComposerRunButton
 	                        isRunning={isRunning}
 	                        hasActiveRun={Boolean(activeHermesRun)}
 	                        isStopping={runStopping}
-	                        canSend={!workflowControlInProgress && attachments.every((item) => item.status === 'ready') && Boolean(input.trim() || attachments.length)}
+	                        canSend={!workflowControlInProgress && attachments.every((item) => item.status === 'ready') && Boolean(input.trim() || attachments.length || draftContext.browserAnnotations.length || draftContext.reviewComments.length)}
 	                        runningLabel={(activeThread?.executionMode || 'chat') === 'work' ? '停止当前协调运行，不会暂停全部任务' : undefined}
 	                        onSend={() => void sendMessage()}
 	                        onStop={() => void stopActiveRun()}
@@ -5591,18 +6062,19 @@ function App() {
 
       {rightRailKind && (
         <>
-          {!isMacConversationShell && (
+          {!isMacConversationShell && !browserFullWorkspace && (
             <ResizeHandle
               side="right"
-              currentWidth={contextWidth}
+              currentWidth={renderedContextWidth}
               minWidth={contextWidthBounds.min}
-              maxWidth={contextWidthBounds.max}
+              maxWidth={contextResizeMax}
               disabled={!rightRailOpen}
-              onResize={setContextWidth}
-              onCommit={(width) => void persistUi({ contextWidth: width })}
+              onResize={resizeContextWidth}
+              onCommit={commitContextWidth}
             />
           )}
           <aside className="context" aria-hidden={!rightRailOpen}>
+            {rightRailOpen && (
             <CollaborationContextPanel
             contextPacket={activeThread?.contextPacket || null}
             proposals={activeThread?.proposals || []}
@@ -5610,18 +6082,25 @@ function App() {
             thread={activeThread}
             agents={agents}
             workspace={activeWorkspace}
+            activeVault={activeVault}
             isRunning={isRunning}
             runApproval={runApproval}
             runClarification={runClarification}
             runError={runError}
             runDraft={runDraft}
+            liveChangeSet={activeRunUi?.changeSet || null}
+            onDraftContextChanged={refreshDraftContext}
+            onOpenVaultSettings={() => openSettingsSection('vaults')}
             fallbackDecisionAgentId={uiSettings.fallbackDecisionAgentId || globalDefaultAgentId}
             collaborationModeError={collaborationModeError}
             collaborationModeLoading={modeSwitching}
             onRetryCollaboration={() => void updateThreadExecutionMode('work')}
             panelTab={rightRailTab}
-            onPanelTabChange={setRightRailTab}
+            hasOpenTabs={openRightRailTabs.length > 0}
+            onOpenTab={openRightRailTab}
+            onCloseTab={closeRightRailTab}
             />
+            )}
           </aside>
         </>
       )}
@@ -5708,17 +6187,17 @@ function App() {
               </div>
               {projectMode === 'create' ? (
                 <>
-                  <label className="form-row">
-                    <span>项目名称</span>
-                    <input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder={projectModalPurpose === 'convert' ? '留空则使用当前对话标题' : '例如 Frakio Blog Ops'} />
-                  </label>
                   <div className="project-location-row">
                     <span>保存位置</span>
                     <button className="secondary-btn" onClick={() => void chooseProjectParentFolder()}><FolderOpen size={14} />选择位置</button>
                   </div>
-                  <div className="project-path-preview">{projectParentPath || defaultProjectParentPath}</div>
+                  <div className="project-path-preview">{projectParentPath || '请先选择保存位置'}</div>
+                  <label className="form-row">
+                    <span>项目名称</span>
+                    <input value={projectName} onChange={(event) => setProjectName(event.target.value)} placeholder={projectModalPurpose === 'convert' ? '留空则使用当前对话标题' : '例如 Frakio Works'} disabled={!projectParentPath.trim()} />
+                  </label>
                   {projectName.trim() && (
-                    <div className="project-path-preview target">{projectParentPath || defaultProjectParentPath}/{slugText(projectName)}</div>
+                    <div className="project-path-preview target">{projectParentPath}/{workspaceDirectoryPreview(projectName)}</div>
                   )}
                 </>
               ) : (
@@ -5733,7 +6212,7 @@ function App() {
               <div className="modal-actions">
                 <button className="secondary-btn" onClick={() => setProjectModalOpen(false)}>取消</button>
                 {projectMode === 'create' ? (
-                  <button className="send-btn" onClick={() => projectModalPurpose === 'convert' ? void convertActiveConversationToProject() : void createWorkspaceProject()}>{projectModalPurpose === 'convert' ? '转为项目' : '创建项目'}</button>
+                  <button className="send-btn" disabled={!projectParentPath.trim() || !projectName.trim()} onClick={() => projectModalPurpose === 'convert' ? void convertActiveConversationToProject() : void createWorkspaceProject()}>{projectModalPurpose === 'convert' ? '转为项目' : '创建项目'}</button>
                 ) : !canSelectFolder ? (
                   <button className="send-btn" onClick={() => projectModalPurpose === 'convert' ? void convertActiveConversationToProject() : void createWorkspaceProject()}>选择项目</button>
                 ) : null}
@@ -6923,15 +7402,17 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
 }
 
 function RuntimeSwitcher({ thread, activeAgent, currentRuntimeId: runtimeIdOverride, isRunning, onRuntimeChange, onOpenRuntimeCenter }: {
-  thread?: Pick<Thread, 'agentRuntimeOverrides'> | null;
+  thread?: Pick<Thread, 'id' | 'agentRuntimeOverrides'> | null;
   activeAgent: Agent | null;
   currentRuntimeId?: RuntimeId;
   isRunning: boolean;
-  onRuntimeChange: (agentId: string, runtimeId: RuntimeId) => Promise<void>;
+  onRuntimeChange: (agentId: string, runtimeId: RuntimeId) => Promise<{ message?: string; resumeCandidate?: boolean } | void>;
   onOpenRuntimeCenter: () => void;
 }) {
   const [open, setOpen] = useState(false);
+  const [notice, setNotice] = useState('');
   const [runtimes, setRuntimes] = useState<RuntimeDefinition[]>(runtimeSeed);
+  const [sessions, setSessions] = useState<RuntimeSessionSummary[]>([]);
   const policy = activeAgent?.runtimePolicy || { defaultRuntimeId: 'hermes', allowedRuntimeIds: ['hermes'], permissionProfileId: 'default' };
   const allowedRuntimeIdsKey = policy.allowedRuntimeIds.join('|');
   const currentRuntimeId = activeAgent ? runtimeIdOverride || thread?.agentRuntimeOverrides?.[activeAgent.id] || policy.defaultRuntimeId : 'hermes';
@@ -6944,14 +7425,18 @@ function RuntimeSwitcher({ thread, activeAgent, currentRuntimeId: runtimeIdOverr
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || cancelled) return;
       setRuntimes((current) => mergeRuntimeDefinitions(current, payload.runtimes || []));
-      await Promise.all(allowedRuntimeIdsKey.split('|').filter(Boolean).map(async (runtimeId) => {
+      if (thread?.id && activeAgent?.id) {
+        const sessionPayload = await fetch(`/api/runtime-sessions?threadId=${encodeURIComponent(thread.id)}&agentId=${encodeURIComponent(activeAgent.id)}&laneType=chat`).then((item) => item.json()).catch(() => ({}));
+        if (!cancelled) setSessions(Array.isArray(sessionPayload.sessions) ? sessionPayload.sessions : []);
+      }
+      await Promise.all(runtimeSeed.map(async ({ id: runtimeId }) => {
         const detected = await fetch(`/api/runtimes/${runtimeId}/detect`, { method: 'POST' }).then((item) => item.json()).catch(() => null);
         if (!cancelled && detected?.runtime) setRuntimes((current) => mergeRuntimeDefinitions(current, [detected.runtime]));
       }));
     };
     void refresh();
     return () => { cancelled = true; };
-  }, [open, allowedRuntimeIdsKey]);
+  }, [open, allowedRuntimeIdsKey, thread?.id, activeAgent?.id]);
 
   const currentLabel = runtimeVisuals[currentRuntimeId]?.label || runtimeLabels[currentRuntimeId] || currentRuntimeId;
   const buttonLabel = activeAgent ? `切换 ${activeAgent.name} 的执行内核，当前为 ${currentLabel}` : '当前对话未选择 Agent';
@@ -6969,21 +7454,32 @@ function RuntimeSwitcher({ thread, activeAgent, currentRuntimeId: runtimeIdOverr
     </div>
     <AppMenuContent className="runtime-switcher-popover" aria-label="切换执行内核" side="bottom" align="end">
       <div className="runtime-switcher-summary"><span>{activeAgent ? `${activeAgent.name} 的执行内核` : '执行内核'}</span></div>
-      {activeAgent ? policy.allowedRuntimeIds.map((runtimeId) => {
+      {activeAgent ? runtimeSeed.map(({ id: runtimeId }) => {
         const runtime = runtimes.find((item) => item.id === runtimeId);
         const ready = isRuntimeReady(runtime);
+        const allowed = policy.allowedRuntimeIds.includes(runtimeId);
         const selected = currentRuntimeId === runtimeId;
-        return <AppMenuItem key={runtimeId} className={selected ? 'runtime-switcher-option selected' : 'runtime-switcher-option'} disabled={!ready} onSelect={() => {
-          if (!ready || selected) return;
-          void onRuntimeChange(activeAgent.id, runtimeId).then(() => setOpen(false));
+        const runtimeSession = sessions.find((session) => session.runtimeId === runtimeId && session.laneId === thread?.id);
+        const sessionLabel = runtimeSession?.lifecycleState === 'active' ? 'Session 活跃'
+          : runtimeSession?.lifecycleState === 'recovering' || runtimeSession?.lifecycleState === 'restoring' ? '等待恢复'
+            : runtimeSession?.lifecycleState === 'parked' ? '已停泊'
+              : runtimeSession?.lifecycleState === 'stale' ? '需交接恢复'
+                : '';
+        return <AppMenuItem key={runtimeId} className={selected ? 'runtime-switcher-option selected' : 'runtime-switcher-option'} disabled={!ready || !allowed} onSelect={() => {
+          if (!ready || !allowed || selected) return;
+          void onRuntimeChange(activeAgent.id, runtimeId).then((result) => {
+            setNotice(result?.message || '已切换执行内核。');
+            setOpen(false);
+          });
         }} title={ready ? `切换到 ${runtimeLabels[runtimeId] || runtimeId}` : runtime?.installation?.detail || '请前往 Runtime Center 完成修复'}>
           <RuntimeLabel runtimeId={runtimeId} />
-          {!ready && <em>{runtime?.installation?.status === 'checking' ? '检测中' : '不可用'}</em>}
+          {!allowed ? <em>Agent 未启用</em> : !ready && <em>{runtime?.installation?.status === 'checking' ? '检测中' : '不可用'}</em>}
+          {ready && sessionLabel && <em>{sessionLabel}</em>}
           {ready && selected && <Check size={14} aria-hidden="true" />}
         </AppMenuItem>;
       }) : <span className="provider-model-empty">当前对话没有可切换的 Agent。</span>}
       <div className="runtime-switcher-footer">
-        <small>切换会创建独立原生 Session，Frakio 对话保持连续。</small>
+        <small>{notice || '切换后优先恢复该 Agent 的原生 Session，失败时通过 Frakio 交接包继续。'}</small>
         <button onClick={() => { setOpen(false); onOpenRuntimeCenter(); }}>打开 Runtime Center</button>
       </div>
     </AppMenuContent>
@@ -7009,6 +7505,7 @@ function ThreadActionsMenu({ thread, workspace, vaults, activeVault, activeAgent
   const [open, setOpen] = useState(false);
   const [titleBusy, setTitleBusy] = useState(false);
   const [titleError, setTitleError] = useState('');
+  const [contextPreview, setContextPreview] = useState<{ sources: Array<{ kind: string; label: string; count: number }>; projectRulePaths: string[] } | null>(null);
   const threadIdRef = useRef(thread.id);
   const popoverId = `thread-actions-popover-${thread.id}`;
   const followLabel = thread.followMode === 'conversation' ? '对话跟随' : '默认跟随';
@@ -7075,12 +7572,17 @@ function ThreadActionsMenu({ thread, workspace, vaults, activeVault, activeAgent
             )}
           </div>
           <label className="thread-menu-select">
-            <span>资料库</span>
+            <span>项目资料库</span>
             <select value={thread.vaultId || ''} onChange={(event) => { closeMenu(false); void onVaultChange(event.target.value || null); }}>
               <option value="">不连接资料库</option>
-              {vaults.map((vault) => <option key={vault.id} value={vault.id}>{vault.name}</option>)}
+              {vaults.filter((vault) => vault.kind === 'project').map((vault) => <option key={vault.id} value={vault.id}>{vault.name}</option>)}
             </select>
           </label>
+          <div className="thread-menu-section">
+            <span>本轮上下文</span>
+            <button onClick={() => void requestJson<{ sources: Array<{ kind: string; label: string; count: number }>; projectRulePaths: string[] }>(`/api/threads/${thread.id}/context-preview?agentId=${encodeURIComponent(activeAgent?.id || '')}`).then(setContextPreview)}><span>查看实际注入来源</span></button>
+            {contextPreview && <div className="thread-context-preview">{contextPreview.sources.map((source) => <small key={source.kind}>{source.label} · {source.count}</small>)}{contextPreview.projectRulePaths.map((rulePath) => <code key={rulePath}>{rulePath}</code>)}</div>}
+          </div>
           <button className="thread-menu-wide" onClick={() => { closeMenu(false); onOpenAgents(); }}><UserPlus size={15} />团队成员</button>
       </AppMenuContent>
     </AppMenu>
@@ -7094,11 +7596,15 @@ type ContextPanelProps = {
   thread: Thread | null;
   agents: Agent[];
   workspace: Workspace | null;
+  activeVault: Vault | null;
   isRunning: boolean;
   runApproval: HermesRunApproval | null;
   runClarification: HermesRunClarification | null;
   runError: string;
   runDraft: string;
+  liveChangeSet: RunChangeSet | null;
+  onDraftContextChanged: () => void;
+  onOpenVaultSettings: () => void;
 };
 
 function collaborationEventLabel(type: string) {
@@ -7302,13 +7808,26 @@ function CollaborationRuntimeErrorCard({ error, loading, onRetry }: {
   </div>;
 }
 
+function RightRailLauncher({ onOpen }: { onOpen: (tab: RightRailTab) => void }) {
+  return <div className="right-rail-launcher" aria-label="选择工具">
+    <div><small>右侧工作区</small><strong>打开工具</strong></div>
+    <section>{rightRailTabs.map((tab) => <button type="button" key={tab} onClick={() => onOpen(tab)}>
+      <RightRailTabIcon tab={tab} size={17} />
+      <span><strong>{rightRailTabMeta[tab].title}</strong><small>{rightRailTabMeta[tab].detail}</small></span>
+      <ChevronRight size={15} />
+    </button>)}</section>
+  </div>;
+}
+
 function CollaborationContextPanel(props: ContextPanelProps & {
   fallbackDecisionAgentId: string;
   collaborationModeError: { message: string; code?: string; details?: Record<string, any> } | null;
   collaborationModeLoading: boolean;
   onRetryCollaboration: () => void;
-  panelTab: 'collaboration' | 'resources';
-  onPanelTabChange: (tab: 'collaboration' | 'resources') => void;
+  panelTab: RightRailTab;
+  hasOpenTabs: boolean;
+  onOpenTab: (tab: RightRailTab) => void;
+  onCloseTab: (tab: RightRailTab) => void;
 }) {
   const { thread, agents } = props;
   const panelTab = props.panelTab;
@@ -7326,6 +7845,7 @@ function CollaborationContextPanel(props: ContextPanelProps & {
   const [cancelConfirmOpen, setCancelConfirmOpen] = useState(false);
   const [workflowControlBusy, setWorkflowControlBusy] = useState<'pause' | 'resume' | 'cancel' | ''>('');
   const [workflowControlError, setWorkflowControlError] = useState('');
+  const [deliveryExporting, setDeliveryExporting] = useState(false);
   const [workerOutputMode, setWorkerOutputMode] = useState<'summary' | 'all'>(thread?.workerOutputMode === 'all' ? 'all' : 'summary');
   const cursorRef = useRef(0);
   const activeWorkflow = snapshot?.workflows.find((item) => item.id === snapshot.activeWorkflowId) || snapshot?.workflows[0] || null;
@@ -7358,7 +7878,7 @@ function CollaborationContextPanel(props: ContextPanelProps & {
   }, [thread?.id, thread?.executionMode]);
 
   useEffect(() => {
-    if (props.collaborationModeLoading || props.collaborationModeError) props.onPanelTabChange('collaboration');
+    if (props.collaborationModeLoading || props.collaborationModeError) props.onOpenTab('collaboration');
   }, [props.collaborationModeLoading, props.collaborationModeError]);
 
   useEffect(() => {
@@ -7500,6 +8020,20 @@ function CollaborationContextPanel(props: ContextPanelProps & {
     }
   }
 
+  async function exportWorkDelivery() {
+    if (!thread || !activeWorkflow || deliveryExporting) return;
+    setDeliveryExporting(true);
+    setError('');
+    try {
+      await requestJson(`/api/threads/${thread.id}/work-delivery/export`, { method: 'POST', body: JSON.stringify({ workflowId: activeWorkflow.id }) });
+      await loadSnapshot();
+    } catch (err: any) {
+      setError(err.message || '导出项目交付物失败');
+    } finally {
+      setDeliveryExporting(false);
+    }
+  }
+
   const activeTasks = activeWorkflow?.tasks.filter((task) => task.status !== 'archived') || [];
   const activeTaskCount = activeTasks.filter((task) => !['done', 'archived'].includes(task.status)).length;
   const doneCount = activeTasks.filter((task) => task.status === 'done').length;
@@ -7515,28 +8049,11 @@ function CollaborationContextPanel(props: ContextPanelProps & {
 
   return (
     <div className="context-inner collaboration-context-panel">
-      <div className="context-panel-tabs">
-        <IconTooltipButton
-          active={panelTab === 'collaboration'}
-          ariaLabel="协作"
-          badge={activeTaskCount}
-          className="context-panel-tab"
-          onClick={() => props.onPanelTabChange('collaboration')}
-          tooltip="协作"
-        >
-          <Network size={15} />
-        </IconTooltipButton>
-        <IconTooltipButton
-          active={panelTab === 'resources'}
-          ariaLabel="资源"
-          className="context-panel-tab"
-          onClick={() => props.onPanelTabChange('resources')}
-          tooltip="资源"
-        >
-          <FolderOpen size={15} />
-        </IconTooltipButton>
-      </div>
-      {panelTab === 'resources' ? <CodexResourcePanel {...props} /> : (
+      {!props.hasOpenTabs ? <RightRailLauncher onOpen={props.onOpenTab} />
+        : panelTab === 'browser' ? <BrowserPanel thread={thread} onDraftContextChanged={props.onDraftContextChanged} />
+        : panelTab === 'files' ? <ProjectFilesPanel workspace={props.workspace} />
+          : panelTab === 'sources' ? <SourcesPanel threadId={thread?.id || ''} vault={props.activeVault} onOpenVaultSettings={props.onOpenVaultSettings} onClose={() => props.onCloseTab('sources')} />
+            : panelTab === 'review' ? <ReviewPanel thread={thread} workspace={props.workspace} liveChangeSet={props.liveChangeSet} onDraftContextChanged={props.onDraftContextChanged} /> : (
         <div className="collaboration-panel-body">
           <div className="collaboration-panel-head">
             <div><small>{(thread?.executionMode || 'chat') === 'work' ? '协作执行' : activeWorkflow ? '后台 Work' : 'Chat 模式'}</small><strong>{activeWorkflow?.name || ((thread?.executionMode || 'chat') === 'work' ? '正在准备工作流' : '当前不接入任务看板')}</strong></div>
@@ -7556,6 +8073,7 @@ function CollaborationContextPanel(props: ContextPanelProps & {
                 <button className="collaboration-workflow-control" disabled={workflowControlPending} onClick={() => setControlMenuOpen((open) => !open)} aria-label="更多工作流操作" title="更多工作流操作"><MoreHorizontal size={16} /></button>
                 {controlMenuOpen && <div className="collaboration-workflow-menu"><button onClick={() => { setControlMenuOpen(false); setCancelConfirmOpen(true); }}>结束协作</button></div>}
               </div>}
+              {activeWorkflow && workflowCompleted && <button className="worker-output-toggle" disabled={deliveryExporting} onClick={() => void exportWorkDelivery()} title="将本次结果写入项目交付物目录">{deliveryExporting ? '导出中' : '导出结果'}</button>}
             </div>
           ) : (
             <div className="collaboration-empty-start">
@@ -7645,6 +8163,387 @@ function CollaborationContextPanel(props: ContextPanelProps & {
         </div>, document.body)}
     </div>
   );
+}
+
+function MessageContextSummary({ context }: { context: MessageContext }) {
+  return <div className="message-context-summary" aria-label="消息批注">
+    {context.browserAnnotations.map((item) => <span key={item.id}><Globe2 size={12} />{item.target === 'region' ? '区域批注' : item.accessibleName || item.text || '网页批注'}</span>)}
+    {context.reviewComments.map((item) => <span key={item.id}><GitCompareArrows size={12} />{item.filePath}:{item.line}</span>)}
+  </div>;
+}
+
+function DraftContextTray({ context, onRemove }: { context: MessageContext; onRemove: (kind: 'browser' | 'review', id: string) => void }) {
+  if (!context.browserAnnotations.length && !context.reviewComments.length) return null;
+  return <div className="draft-context-tray" aria-label="待发送批注">
+    {context.browserAnnotations.map((item) => <span key={item.id}><Globe2 size={13} /><strong>{item.target === 'region' ? '区域批注' : '网页批注'}</strong><small>{item.comment}</small><button type="button" onClick={() => onRemove('browser', item.id)} aria-label="移除网页批注"><X size={12} /></button></span>)}
+    {context.reviewComments.map((item) => <span key={item.id}><GitCompareArrows size={13} /><strong>审阅意见</strong><small>{item.filePath}:{item.line} · {item.comment}</small><button type="button" onClick={() => onRemove('review', item.id)} aria-label="移除审阅意见"><X size={12} /></button></span>)}
+  </div>;
+}
+
+function ConversationOverviewPopover({ threadId, onClose, onOpenSources, onOpenReview }: { threadId: string; onClose: () => void; onOpenSources: () => void; onOpenReview: () => void }) {
+  const [overview, setOverview] = useState<ConversationOverview | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    void requestJson<{ overview: ConversationOverview }>(`/api/threads/${threadId}/overview`).then((data) => {
+      if (active) setOverview(data.overview);
+    }).catch((err) => { if (active) setError(err instanceof Error ? err.message : '摘要读取失败'); });
+    return () => { active = false; };
+  }, [threadId]);
+  return <div className="conversation-overview-popover" role="dialog" aria-label="会话摘要">
+    <header><div><small>当前会话</small><strong>摘要</strong></div><button type="button" onClick={onClose} aria-label="关闭"><X size={14} /></button></header>
+    {!overview && !error && <div className="overview-loading"><LoaderCircle className="spin" size={15} />正在整理</div>}
+    {error && <div className="resource-error">{error}</div>}
+    {overview && <div className="overview-body">
+      <section><span className="overview-label">环境</span><div className="overview-fact"><Monitor size={14} /><span><strong>{overview.environment.workspaceName || '未绑定项目'}</strong><small>{overview.environment.gitBranch ? `分支 ${overview.environment.gitBranch}` : overview.environment.workspaceRoot || '当前会话没有本地目录'}</small></span></div></section>
+      {overview.plan && <section><span className="overview-label">计划</span><div className="overview-fact"><CheckCircle2 size={14} /><span><strong>{overview.plan.title}</strong><small>{overview.plan.taskCount} 个步骤 · {overview.plan.status || '进行中'}</small></span></div></section>}
+      <section><span className="overview-label">来源</span>{overview.sources.slice(0, 3).map((source) => <div className="overview-source" key={source.id}>{source.kind === 'link' ? <Link2 size={13} /> : <FileText size={13} />}<span>{source.label}</span></div>)}{!overview.sources.length && <div className="overview-empty">暂无来源</div>}<button className="overview-link" type="button" onClick={onOpenSources}>查看全部 <ChevronRight size={13} /></button></section>
+      {overview.artifacts.length > 0 && <section><span className="overview-label">产物</span>{overview.artifacts.slice(0, 3).map((artifact) => <div className="overview-source" key={artifact.id}><File size={13} /><span>{artifact.name}</span></div>)}</section>}
+      {overview.lastChangeSet && overview.lastChangeSet.fileCount > 0 && <button className="overview-change" type="button" onClick={onOpenReview}><GitCompareArrows size={15} /><span><strong>上一轮改动</strong><small>{overview.lastChangeSet.fileCount} 个文件</small></span><em>+{overview.lastChangeSet.additions}</em><del>-{overview.lastChangeSet.deletions}</del></button>}
+    </div>}
+  </div>;
+}
+
+function SourcesPanel({ threadId, vault, onOpenVaultSettings, onClose }: { threadId: string; vault: Vault | null; onOpenVaultSettings: () => void; onClose: () => void }) {
+  const [overview, setOverview] = useState<ConversationOverview | null>(null);
+  const [vaultDetail, setVaultDetail] = useState<VaultDetail | null>(null);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    setOverview(null);
+    setError('');
+    if (!threadId) return;
+    void requestJson<{ overview: ConversationOverview }>(`/api/threads/${threadId}/overview`).then((data) => setOverview(data.overview)).catch((err) => setError(err instanceof Error ? err.message : '来源读取失败'));
+  }, [threadId]);
+  useEffect(() => {
+    setVaultDetail(null);
+    if (!vault?.id) return;
+    void requestJson<VaultDetail>(`/api/vaults/${vault.id}`).then(setVaultDetail).catch(() => setVaultDetail(null));
+  }, [vault?.id]);
+  return <div className="workbench-panel sources-panel"><header className="workbench-panel-head"><div><small>会话上下文</small><strong>来源</strong></div><button type="button" onClick={onClose} aria-label="关闭"><X size={15} /></button></header>
+    {vault && <div className="sources-vault-status"><div><Database size={15} /><span><strong>{vault.name}</strong><small>{vaultDetail?.config.managementMode === 'read_only' ? '只读连接' : 'Frakio 知识维护已连接'}</small></span></div><div><span><strong>{vaultDetail?.config.trustedRulePaths.length || 0}</strong><small>实际注入规则</small></span><span><strong>{vaultDetail?.stats.pending || 0}</strong><small>待确认</small></span></div>{vaultDetail?.recentOperations[0] && <p>最近维护：{vaultDetail.recentOperations[0].summary} · {formatTime(vaultDetail.recentOperations[0].createdAt)}</p>}<button type="button" onClick={onOpenVaultSettings}>管理资料库 <ChevronRight size={13} /></button></div>}
+    <div className="sources-list">{overview?.sources.map((source) => source.kind === 'link' ? <button type="button" key={source.id} onClick={() => void openExternalUrl(source.url || source.detail)}><Link2 size={15} /><span><strong>{source.label}</strong><small>{source.detail}</small></span><ExternalLink size={13} /></button> : <a key={source.id} href={source.attachment?.contentUrl || '#'} target="_blank" rel="noreferrer"><FileText size={15} /><span><strong>{source.label}</strong><small>用户上传的资料</small></span><ExternalLink size={13} /></a>)}</div>
+    {!overview && !error && <div className="resource-empty">正在读取来源...</div>}{overview && !overview.sources.length && <div className="resource-empty">当前会话还没有上传资料或参考链接</div>}{error && <div className="resource-error">{error}</div>}
+  </div>;
+}
+
+function dataUrlToBlob(dataUrl: string) {
+  const [header, encoded = ''] = dataUrl.split(',', 2);
+  const mime = header.match(/^data:([^;]+)/)?.[1] || 'image/png';
+  const bytes = atob(encoded);
+  const values = new Uint8Array(bytes.length);
+  for (let index = 0; index < bytes.length; index += 1) values[index] = bytes.charCodeAt(index);
+  return new Blob([values], { type: mime });
+}
+
+const BROWSER_DEFAULT_URL = 'http://localhost:3000/';
+const BROWSER_MOBILE_USER_AGENT = 'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.0 Mobile/15E148 Safari/604.1';
+
+function BrowserPanel({ thread, onDraftContextChanged }: { thread: Thread | null; onDraftContextChanged: () => void }) {
+  const browserBridge = window.frakioDesktop?.browser;
+  const viewportRef = useRef<HTMLDivElement | null>(null);
+  const annotationMenuRef = useRef<HTMLDivElement | null>(null);
+  const webviewRef = useRef<BrowserGuest | null>(null);
+  const defaultUserAgentRef = useRef('');
+  const mobileModeRef = useRef(false);
+  const viewportWidthRef = useRef(0);
+  const threadIdRef = useRef(thread?.id);
+  const draftContextChangedRef = useRef(onDraftContextChanged);
+  const [saving, setSaving] = useState(false);
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState('');
+  const [annotationMenuOpen, setAnnotationMenuOpen] = useState(false);
+  const [browserState, setBrowserState] = useState<BrowserViewState>({
+    url: BROWSER_DEFAULT_URL, title: '', loading: false, canGoBack: false, canGoForward: false,
+    visible: false, annotationMode: 'none', error: '',
+  });
+  const [address, setAddress] = useState(BROWSER_DEFAULT_URL);
+  threadIdRef.current = thread?.id;
+  draftContextChangedRef.current = onDraftContextChanged;
+
+  useLayoutEffect(() => {
+    if (!browserBridge || !viewportRef.current) return undefined;
+    let disposed = false;
+    const entry = browserWebviewPool.acquire();
+    const { wrapper, webview } = entry;
+    const viewport = viewportRef.current;
+    webviewRef.current = webview;
+    viewport.appendChild(wrapper);
+
+    const refreshState = (patch: Partial<BrowserViewState> = {}) => {
+      if (disposed) return;
+      let url = BROWSER_DEFAULT_URL;
+      let title = '';
+      let canGoBack = false;
+      let canGoForward = false;
+      try {
+        url = webview.getURL() || BROWSER_DEFAULT_URL;
+        title = webview.getTitle() || '';
+        canGoBack = webview.canGoBack();
+        canGoForward = webview.canGoForward();
+      } catch {
+        // The guest is not attached until it enters the document.
+      }
+      setBrowserState((current) => ({ ...current, url, title, canGoBack, canGoForward, ...patch }));
+    };
+    const navigate = (value: string) => {
+      let url = BROWSER_DEFAULT_URL;
+      try {
+        url = normalizeBrowserUrl(value);
+      } catch (err) {
+        setError(err instanceof Error ? err.message : '无法打开这个地址');
+        return;
+      }
+      setError('');
+      setBrowserState((current) => ({ ...current, url, loading: true }));
+      void webview.loadURL(url).catch((err) => setError(err instanceof Error ? err.message : '网页打开失败。'));
+    };
+    const applyResponsiveMode = () => {
+      if (!defaultUserAgentRef.current) return;
+      const width = viewportWidthRef.current;
+      const nextMobileMode = mobileModeRef.current ? width < 800 : width <= 680;
+      if (nextMobileMode === mobileModeRef.current) return;
+      mobileModeRef.current = nextMobileMode;
+      try {
+        webview.setUserAgent(nextMobileMode ? BROWSER_MOBILE_USER_AGENT : defaultUserAgentRef.current);
+        const url = webview.getURL();
+        if (url && url !== 'about:blank') void webview.loadURL(url).catch((err) => setError(err instanceof Error ? err.message : '网页重新加载失败。'));
+      } catch {
+        // A detached guest will apply the mode after its next dom-ready event.
+      }
+    };
+    const onDomReady = () => {
+      if (!defaultUserAgentRef.current) {
+        try { defaultUserAgentRef.current = webview.getUserAgent(); } catch {}
+      }
+      setReady(true);
+      refreshState({ visible: true });
+      applyResponsiveMode();
+      try {
+        if (!webview.getURL() || webview.getURL() === 'about:blank') navigate(BROWSER_DEFAULT_URL);
+      } catch {
+        navigate(BROWSER_DEFAULT_URL);
+      }
+    };
+    const onNavigate = () => refreshState({ loading: false, error: '' });
+    const onStartLoading = () => refreshState({ loading: true, error: '' });
+    const onStopLoading = () => refreshState({ loading: false });
+    const onFailLoad = (event: Event) => {
+      const detail = event as Event & { errorCode?: number; errorDescription?: string; isMainFrame?: boolean };
+      if (detail.errorCode === -3 || detail.isMainFrame === false) return;
+      refreshState({ loading: false });
+      setError(detail.errorDescription || '网页加载失败。');
+    };
+    const onCrash = () => {
+      refreshState({ loading: false });
+      setError('网页进程已退出，请重新加载。');
+    };
+    webview.addEventListener('dom-ready', onDomReady);
+    webview.addEventListener('did-navigate', onNavigate);
+    webview.addEventListener('did-navigate-in-page', onNavigate);
+    webview.addEventListener('page-title-updated', onNavigate);
+    webview.addEventListener('did-start-loading', onStartLoading);
+    webview.addEventListener('did-stop-loading', onStopLoading);
+    webview.addEventListener('did-fail-load', onFailLoad);
+    webview.addEventListener('render-process-gone', onCrash);
+    const existingGuestFrame = window.requestAnimationFrame(() => {
+      try {
+        if (!webview.getURL() || webview.getURL() === 'about:blank') return;
+        if (!defaultUserAgentRef.current) defaultUserAgentRef.current = webview.getUserAgent();
+        setReady(true);
+        refreshState({ visible: true });
+        applyResponsiveMode();
+      } catch {
+        // The first guest will report dom-ready after its initial attach.
+      }
+    });
+    const observer = new ResizeObserver(([entry]) => {
+      viewportWidthRef.current = entry.contentRect.width;
+      applyResponsiveMode();
+    });
+    observer.observe(viewport);
+    const removeAnnotation = browserBridge.onAnnotationCreated((payload) => {
+      const threadId = threadIdRef.current;
+      if (!threadId) return;
+      setSaving(true);
+      setError('');
+      void (async () => {
+        let evidenceAttachmentId = '';
+        if (payload.evidenceDataUrl) {
+          const blob = dataUrlToBlob(payload.evidenceDataUrl);
+          const upload = await fetch(`/api/attachments?name=${encodeURIComponent(`browser-annotation-${Date.now()}.png`)}`, { method: 'POST', headers: { 'Content-Type': blob.type }, body: blob });
+          const uploaded = await upload.json().catch(() => ({}));
+          if (!upload.ok || !uploaded.attachment?.id) throw new Error(uploaded.error || '批注画面上传失败');
+          evidenceAttachmentId = uploaded.attachment.id;
+        }
+        await requestJson(`/api/threads/${threadId}/draft-context/browser`, { method: 'POST', body: JSON.stringify({ ...payload.annotation, ...(evidenceAttachmentId ? { evidenceAttachmentId } : {}) }) });
+        draftContextChangedRef.current();
+      })().catch((err) => setError(err instanceof Error ? err.message : '网页批注保存失败')).finally(() => setSaving(false));
+    });
+    const removeError = browserBridge.onError((payload) => setError(payload?.error || '网页操作失败。'));
+    return () => {
+      disposed = true;
+      observer.disconnect();
+      window.cancelAnimationFrame(existingGuestFrame);
+      removeAnnotation();
+      removeError();
+      webview.removeEventListener('dom-ready', onDomReady);
+      webview.removeEventListener('did-navigate', onNavigate);
+      webview.removeEventListener('did-navigate-in-page', onNavigate);
+      webview.removeEventListener('page-title-updated', onNavigate);
+      webview.removeEventListener('did-start-loading', onStartLoading);
+      webview.removeEventListener('did-stop-loading', onStopLoading);
+      webview.removeEventListener('did-fail-load', onFailLoad);
+      webview.removeEventListener('render-process-gone', onCrash);
+      browserWebviewPool.park(wrapper);
+      if (webviewRef.current === webview) webviewRef.current = null;
+      setReady(false);
+    };
+  }, [browserBridge]);
+
+  useEffect(() => {
+    if (document.activeElement !== document.querySelector('.browser-address-input')) setAddress(browserState.url);
+  }, [browserState.url]);
+
+  useEffect(() => {
+    if (!annotationMenuOpen) return undefined;
+    const closeOnOutsidePointer = (event: PointerEvent) => {
+      if (!annotationMenuRef.current?.contains(event.target as Node)) setAnnotationMenuOpen(false);
+    };
+    const closeOnEscape = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') setAnnotationMenuOpen(false);
+    };
+    document.addEventListener('pointerdown', closeOnOutsidePointer);
+    document.addEventListener('keydown', closeOnEscape);
+    return () => {
+      document.removeEventListener('pointerdown', closeOnOutsidePointer);
+      document.removeEventListener('keydown', closeOnEscape);
+    };
+  }, [annotationMenuOpen]);
+
+  const browserDisabled = !browserBridge || !ready || !webviewRef.current;
+  const submitAddress = (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    const webview = webviewRef.current;
+    if (!webview || browserDisabled) return;
+    try {
+      const url = normalizeBrowserUrl(address);
+      setError('');
+      setBrowserState((current) => ({ ...current, url, loading: true }));
+      void webview.loadURL(url).catch((err) => setError(err instanceof Error ? err.message : '无法打开这个地址'));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '无法打开这个地址');
+    }
+  };
+  const setAnnotationMode = (mode: BrowserAnnotationMode) => {
+    const webview = webviewRef.current;
+    if (!webview || browserDisabled) return;
+    const nextMode = browserState.annotationMode === mode ? 'none' : mode;
+    try {
+      webview.send('frakio-browser:set-mode', nextMode);
+      setBrowserState((current) => ({ ...current, annotationMode: nextMode }));
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '无法切换批注工具');
+    }
+  };
+  const selectAnnotationMode = (mode: BrowserAnnotationMode) => {
+    setAnnotationMode(mode);
+    setAnnotationMenuOpen(false);
+  };
+
+  return <div className="workbench-panel browser-panel" role="region" aria-label="浏览器">
+    <header className="browser-chrome">
+      <div className="browser-navigation-row">
+        <button type="button" className="browser-icon-button" onClick={() => webviewRef.current?.goBack()} disabled={browserDisabled || !browserState.canGoBack} aria-label="后退" title="后退"><ArrowLeft size={15} /></button>
+        <button type="button" className="browser-icon-button" onClick={() => webviewRef.current?.goForward()} disabled={browserDisabled || !browserState.canGoForward} aria-label="前进" title="前进"><ChevronRight size={15} /></button>
+        <button type="button" className="browser-icon-button" onClick={() => browserState.loading ? webviewRef.current?.stop() : webviewRef.current?.reload()} disabled={browserDisabled} aria-label={browserState.loading ? '停止' : '刷新'} title={browserState.loading ? '停止' : '刷新'}>{browserState.loading ? <Square size={14} /> : <RefreshCw size={15} />}</button>
+        <form className="browser-address-form" onSubmit={submitAddress}>
+          <Globe2 size={14} aria-hidden="true" />
+          <input className="browser-address-input" aria-label="网页地址" value={address} onChange={(event) => setAddress(event.target.value)} autoComplete="off" spellCheck={false} disabled={browserDisabled} />
+        </form>
+        <div className="browser-annotation-menu-wrap" ref={annotationMenuRef}>
+          <button type="button" className={`browser-icon-button browser-annotation-menu-trigger${annotationMenuOpen ? ' active' : ''}`} onClick={() => setAnnotationMenuOpen((open) => !open)} disabled={browserDisabled} aria-label={saving ? '正在收录批注，打开批注工具' : '打开批注工具'} aria-expanded={annotationMenuOpen} aria-haspopup="menu" title={saving ? '正在收录批注' : '批注工具'}>{saving ? <LoaderCircle className="spin" size={15} /> : <MoreHorizontal size={16} />}</button>
+          {annotationMenuOpen && <div className="browser-annotation-menu" role="menu" aria-label="批注工具">
+            <button type="button" className={browserState.annotationMode === 'element' ? 'active' : ''} onClick={() => selectAnnotationMode('element')} aria-pressed={browserState.annotationMode === 'element'} role="menuitemcheckbox"><MousePointer2 size={14} />元素</button>
+            <button type="button" className={browserState.annotationMode === 'region' ? 'active' : ''} onClick={() => selectAnnotationMode('region')} aria-pressed={browserState.annotationMode === 'region'} role="menuitemcheckbox"><Scan size={14} />区域</button>
+          </div>}
+        </div>
+      </div>
+    </header>
+    <div className="browser-viewport" ref={viewportRef} />
+    {error && <div className="browser-inline-error" role="alert">{error}</div>}
+  </div>;
+}
+
+function ProjectFilesPanel({ workspace }: { workspace: Workspace | null }) {
+  const [entriesByDir, setEntriesByDir] = useState<Record<string, WorkspaceFileEntry[]>>({});
+  const [expandedDirs, setExpandedDirs] = useState<Record<string, boolean>>({ '': true });
+  const [search, setSearch] = useState('');
+  const [preview, setPreview] = useState<WorkspaceFileContent | null>(null);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => { setEntriesByDir({}); setExpandedDirs({ '': true }); setPreview(null); setError(''); }, [workspace?.id]);
+  useEffect(() => { if (workspace?.id && !entriesByDir['']) void loadDirectory(''); }, [workspace?.id, entriesByDir]);
+  async function loadDirectory(dir: string) {
+    if (!workspace?.id) return;
+    try {
+      const data = await requestJson<{ entries: WorkspaceFileEntry[] }>(`/api/workspaces/${workspace.id}/files?${new URLSearchParams({ dir })}`);
+      setEntriesByDir((current) => ({ ...current, [dir]: data.entries || [] }));
+    } catch (err) { setError(err instanceof Error ? err.message : '文件读取失败'); }
+  }
+  async function openPreview(relativePath: string) {
+    if (!workspace?.id) return;
+    setLoading(true); setError('');
+    try {
+      const data = await requestJson<{ file: WorkspaceFileContent }>(`/api/workspaces/${workspace.id}/files/content?${new URLSearchParams({ path: relativePath })}`);
+      setPreview(data.file);
+    } catch (err) { setError(err instanceof Error ? err.message : '文件预览失败'); }
+    finally { setLoading(false); }
+  }
+  async function toggleDirectory(entry: WorkspaceFileEntry) {
+    const open = !expandedDirs[entry.relativePath];
+    setExpandedDirs((current) => ({ ...current, [entry.relativePath]: open }));
+    if (open && !entriesByDir[entry.relativePath]) await loadDirectory(entry.relativePath);
+  }
+  if (preview || loading) return <div className="workbench-panel project-files-panel"><header className="workbench-panel-head"><button type="button" onClick={() => setPreview(null)} aria-label="返回"><ArrowLeft size={15} /></button><div><small>{preview?.relativePath || '正在打开'}</small><strong>{preview?.name || '文件预览'}</strong></div></header>{loading ? <div className="resource-empty">正在载入...</div> : preview && <FilePreview file={preview} />}</div>;
+  return <div className="workbench-panel project-files-panel"><header className="workbench-panel-head"><div><small>{workspace?.rootPath || '未绑定目录'}</small><strong>项目文件</strong></div></header><label className="resource-search"><Search size={14} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="搜索文件" /></label><div className="file-tree">{workspace ? <FileTree dir="" depth={0} entriesByDir={entriesByDir} expandedDirs={expandedDirs} filter={search.trim()} onToggleDirectory={toggleDirectory} onOpenFile={openPreview} /> : <div className="resource-empty">当前会话未绑定项目目录</div>}</div>{error && <div className="resource-error">{error}</div>}</div>;
+}
+
+function ReviewPanel({ thread, workspace, liveChangeSet, onDraftContextChanged }: { thread: Thread | null; workspace: Workspace | null; liveChangeSet: RunChangeSet | null; onDraftContextChanged: () => void }) {
+  const [scope, setScope] = useState<'last-turn' | 'uncommitted'>('last-turn');
+  const [changeSet, setChangeSet] = useState<RunChangeSet | null>(null);
+  const [selectedPath, setSelectedPath] = useState('');
+  const [selection, setSelection] = useState<{ side: 'old' | 'new'; line: number; hunk: string } | null>(null);
+  const [comment, setComment] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => {
+    let active = true;
+    setChangeSet(null); setSelectedPath(''); setSelection(null); setError('');
+    if (scope === 'uncommitted') {
+      if (!workspace?.id) return;
+      void requestJson<{ changeSet: RunChangeSet }>(`/api/workspaces/${workspace.id}/diff`).then((data) => { if (active) setChangeSet(data.changeSet); }).catch((err) => { if (active) setError(err instanceof Error ? err.message : '改动读取失败'); });
+    } else if (liveChangeSet) setChangeSet(liveChangeSet);
+    else if (thread?.id) void requestJson<{ overview: ConversationOverview }>(`/api/threads/${thread.id}/overview`).then((data) => { if (active) setChangeSet(data.overview.lastChangeSet); }).catch((err) => { if (active) setError(err instanceof Error ? err.message : '上一轮改动读取失败'); });
+    return () => { active = false; };
+  }, [scope, thread?.id, workspace?.id, liveChangeSet?.id, liveChangeSet?.fileCount, liveChangeSet?.additions, liveChangeSet?.deletions]);
+  useEffect(() => { if (changeSet?.files.length && !changeSet.files.some((file) => file.path === selectedPath)) setSelectedPath(changeSet.files[0].path); }, [changeSet, selectedPath]);
+  const file = changeSet?.files.find((item) => item.path === selectedPath) || null;
+  async function saveComment() {
+    if (!thread?.id || !changeSet || !file || !selection || !comment.trim()) return;
+    setSaving(true); setError('');
+    try {
+      await requestJson(`/api/threads/${thread.id}/draft-context/review`, { method: 'POST', body: JSON.stringify({ changeSetId: changeSet.id, filePath: file.path, side: selection.side, line: selection.line, hunk: selection.hunk, comment: comment.trim() }) });
+      setSelection(null); setComment(''); onDraftContextChanged();
+    } catch (err) { setError(err instanceof Error ? err.message : '审阅意见保存失败'); }
+    finally { setSaving(false); }
+  }
+  return <div className="workbench-panel review-panel"><header className="workbench-panel-head"><div><small>只读审阅</small><strong>改动</strong></div>{changeSet && <span className="review-total"><em>+{changeSet.additions}</em><del>-{changeSet.deletions}</del></span>}</header><div className="review-scope"><button className={scope === 'last-turn' ? 'active' : ''} onClick={() => setScope('last-turn')} type="button">上一轮</button><button className={scope === 'uncommitted' ? 'active' : ''} onClick={() => setScope('uncommitted')} type="button">未提交</button></div>
+    {!changeSet && !error && <div className="resource-empty">正在读取改动...</div>}
+    {changeSet && !changeSet.files.length && <div className="resource-empty">没有可审阅的改动</div>}
+    {changeSet && changeSet.files.length > 0 && <><div className="review-file-list">{changeSet.files.map((item) => <button className={item.path === file?.path ? 'active' : ''} type="button" key={item.path} onClick={() => { setSelectedPath(item.path); setSelection(null); }}><span className={`review-status ${item.status}`}>{item.status.slice(0, 1).toUpperCase()}</span><strong>{item.path}</strong><em>+{item.additions}</em><del>-{item.deletions}</del></button>)}</div>{file && <div className="review-diff"><div className="review-diff-head"><FileText size={13} /><span>{file.path}</span></div>{file.binary || !file.patch ? <div className="resource-empty">{file.binary ? '二进制文件不支持行级审阅' : '该文件没有可显示的 Patch'}</div> : <React.Suspense fallback={<div className="resource-empty">正在渲染 Diff...</div>}><LazyPatchDiff patch={file.patch} disableWorkerPool options={{ diffStyle: 'unified', themeType: 'system', lineHoverHighlight: 'both', onLineNumberClick: (value: any) => { const line = Number(value.lineNumber || 1); const hunk = file.patch?.split('\n').find((part) => part.startsWith('@@')) || ''; setSelection({ side: value.annotationSide === 'deletions' ? 'old' : 'new', line, hunk }); } }} /></React.Suspense>}</div>}</>}
+    {selection && file && <div className="review-comment-box"><span>{file.path}:{selection.line}</span><textarea autoFocus rows={3} value={comment} onChange={(event) => setComment(event.target.value)} placeholder="添加修改意见" /><div><button type="button" onClick={() => { setSelection(null); setComment(''); }}>取消</button><button type="button" disabled={!comment.trim() || saving} onClick={() => void saveComment()}>{saving ? '正在保存' : '添加意见'}</button></div></div>}
+    {error && <div className="resource-error">{error}</div>}
+  </div>;
 }
 
 function CodexResourcePanel({ contextPacket, proposals, workspaceArtifacts, thread, agents, workspace, isRunning, runApproval, runClarification, runError, runDraft }: ContextPanelProps) {
@@ -8012,7 +8911,7 @@ function visibleWorkflowSteps(thread: Thread | null, live: { isRunning: boolean;
   return steps.map((step) => thread?.runStatus !== 'running' && step.status === 'running' ? { ...step, status: 'completed' } : step);
 }
 
-function PermissionModeControl({ value, onChange }: { value: PermissionMode; onChange: (mode: PermissionMode) => void }) {
+function PermissionModeControl({ value, compact = false, onChange }: { value: PermissionMode; compact?: boolean; onChange: (mode: PermissionMode) => void }) {
   const [open, setOpen] = useState(false);
   const menuId = useId();
   const CurrentIcon = permissionIcon(value);
@@ -8029,8 +8928,8 @@ function PermissionModeControl({ value, onChange }: { value: PermissionMode; onC
             aria-controls={open ? menuId : undefined}
           >
             <CurrentIcon size={15} />
-            <span>{permissionLabel(value)}</span>
-            <ChevronDown size={13} />
+            {!compact && <span>{permissionLabel(value)}</span>}
+            {!compact && <ChevronDown size={13} />}
           </button>
         </AppMenuTrigger>
         <AppMenuContent id={menuId} className="permission-menu-v2" side="top" align="start" aria-label="操作权限选项">
@@ -9366,7 +10265,7 @@ function ArchivedThreadsPanel({ threads, onRefresh, onRestore, onDelete }: { thr
   }
   return (
     <>
-      <div className="settings-head"><h2>归档对话</h2></div>
+      <div className="settings-head"><div><h2>归档对话</h2><p className="settings-description">归档后的对话会留在这里，需要时可恢复到原来的工作区。</p></div>{threads.length > 0 && <span className="settings-head-count">{threads.length} 个归档</span>}</div>
       <section className="studio-settings-panel archived-threads-panel">
         {threads.length ? threads.map((thread) => (
           <div className="archived-thread-row" key={thread.id}>
@@ -9375,9 +10274,12 @@ function ArchivedThreadsPanel({ threads, onRefresh, onRestore, onDelete }: { thr
               <span>{thread.workspaceRootPath ? thread.workspaceRootPath : '单聊对话'} · {thread.archivedAt ? formatTime(thread.archivedAt) : formatTime(thread.updatedAt)}</span>
             </div>
             <button className="secondary-btn compact" onClick={() => void restore(thread)}>恢复</button>
-            <button className="secondary-btn compact danger" onClick={() => void remove(thread)}>删除</button>
+            <AppMenu>
+              <AppMenuTrigger asChild><button className="icon-btn small" aria-label={`更多操作：${thread.title}`}><MoreHorizontal size={16} /></button></AppMenuTrigger>
+              <AppMenuContent align="end"><AppMenuItem variant="destructive" onSelect={() => void remove(thread)}><Trash2 size={15} />删除对话</AppMenuItem></AppMenuContent>
+            </AppMenu>
           </div>
-        )) : <p className="muted-copy">暂无归档对话。</p>}
+        )) : <div className="settings-empty-state archived-empty-state"><Archive size={24} aria-hidden="true" /><strong>还没有归档对话</strong><span>归档后的对话会显示在这里，可随时恢复。</span></div>}
       </section>
     </>
   );
@@ -10064,7 +10966,7 @@ function UpdatesPanel({ runtime, status, busy, error, result, desktopUpdateState
       <div className="updates-page-toolbar">
         <div>
           <strong>产品版本</strong>
-          <p>Frakio Work 在后台检查新版；Hermes Agent Runtime 始终由你手动安装和切换。</p>
+          <p>Frakio Work 检查桌面版本；可选执行内核统一在 Runtime Center 管理。</p>
         </div>
         <button className="secondary-btn" onClick={() => void Promise.all([onCheckDesktopUpdate(), onCheckRuntime()])} disabled={Boolean(busy) || desktopUpdateState?.phase === 'checking'}>{busy === 'runtime-check' || desktopUpdateState?.phase === 'checking' ? '检查中' : '检查更新'}</button>
       </div>
@@ -10264,12 +11166,16 @@ function shortCommit(value?: string) {
   return value ? value.slice(0, 7) : '';
 }
 
-type SettingsSection = 'localConnection' | 'runtimes' | 'memory' | 'knowledge' | 'tools' | 'hermesAgent' | 'updates' | 'appearance' | 'privacy' | 'agents' | 'skills' | 'profile' | 'workbench' | 'archivedThreads' | 'mcp' | 'models' | 'channels' | 'plugins' | 'jobs' | 'monitoring' | 'vaults';
+function runtimeBuildLabel(value?: string) {
+  return value ? value.slice(-8) : '';
+}
 
-const settingsGroups: Array<{ title: string; items: Array<{ id: SettingsSection; label: string; icon: React.ComponentType<{ size?: number }>; aliases?: string[] }> }> = [
+type SettingsSection = 'localConnection' | 'runtimes' | 'memory' | 'tools' | 'hermesAgent' | 'updates' | 'appearance' | 'privacy' | 'agents' | 'skills' | 'profile' | 'workbench' | 'archivedThreads' | 'mcp' | 'models' | 'channels' | 'plugins' | 'jobs' | 'monitoring' | 'vaults';
+
+const settingsGroups: Array<{ title: string; items: Array<{ id: SettingsSection; label: string; icon: React.ComponentType<{ size?: number }>; aliases?: string[]; beta?: boolean }> }> = [
   { title: '个人', items: [{ id: 'profile', label: '个人资料', icon: UserCircle }, { id: 'workbench', label: '工作台', icon: PanelRight }, { id: 'appearance', label: '外观', icon: Palette, aliases: ['主题', '浅色', '深色', '紧凑模式'] }, { id: 'privacy', label: '隐私', icon: ShieldCheck, aliases: ['匿名使用统计', 'Umami'] }, { id: 'archivedThreads', label: '归档对话', icon: Archive }] },
-  { title: '协作基础', items: [{ id: 'agents', label: 'Agent 配置', icon: Network }, { id: 'memory', label: 'Memory', icon: Brain, aliases: ['长期记忆', 'Memory Ledger', '候选记忆'] }, { id: 'knowledge', label: 'Knowledge', icon: Library, aliases: ['知识库', 'Workspace Vault', 'Obsidian', '草稿'] }, { id: 'vaults', label: '仓库', icon: Database }, { id: 'skills', label: '技能', icon: Sparkles, aliases: ['Skill', '全局技能', 'Agent 技能'] }, { id: 'plugins', label: '插件', icon: Boxes, aliases: ['Plugin', '全局插件', 'Agent 插件'] }, { id: 'tools', label: '工具能力', icon: Cable, aliases: ['网页搜索', '网页浏览', '浏览器', '网络能力'] }] },
-  { title: '运行时与模型', items: [{ id: 'runtimes', label: 'Runtime Center', icon: Cpu, aliases: ['Pi', 'Codex', 'Claude', 'Gemini', '运行时', '内核'] }, { id: 'models', label: '模型', icon: Bot }, { id: 'hermesAgent', label: 'Hermes 集成', icon: Sparkles, aliases: ['Hermes Agent', 'Hermes Runtime', '诊断', '备份', '回滚', 'Profile'] }] },
+  { title: '协作基础', items: [{ id: 'agents', label: 'Agent 配置', icon: Network }, { id: 'memory', label: '记忆中心', icon: Brain, aliases: ['长期记忆', 'Memory Ledger', '候选记忆'], beta: true }, { id: 'vaults', label: '资料库', icon: Database, aliases: ['Knowledge', '知识库', 'Vault', 'Obsidian', '仓库'], beta: true }, { id: 'skills', label: '技能', icon: Sparkles, aliases: ['Skill', '全局技能', 'Agent 技能'] }, { id: 'plugins', label: '插件', icon: Boxes, aliases: ['Plugin', '全局插件', 'Agent 插件'] }, { id: 'tools', label: '工具能力', icon: Cable, aliases: ['网页搜索', '网页浏览', '浏览器', '网络能力'] }] },
+  { title: '运行时与模型', items: [{ id: 'runtimes', label: 'Runtime Center', icon: Cpu, aliases: ['Pi', 'Codex', 'Claude', '运行时', '内核'] }, { id: 'models', label: '模型', icon: Bot }, { id: 'hermesAgent', label: 'Hermes 集成', icon: Sparkles, aliases: ['Hermes Agent', 'Hermes Runtime', '诊断', '备份', '回滚', 'Profile'] }] },
   { title: '集成', items: [{ id: 'mcp', label: 'MCP', icon: Boxes }, { id: 'channels', label: '频道', icon: MessageSquare }] },
   { title: '自动化', items: [{ id: 'jobs', label: '任务', icon: Clock3 }, { id: 'monitoring', label: '监控', icon: Activity }] },
   { title: '系统', items: [{ id: 'localConnection', label: '系统状态', icon: Cable, aliases: ['本地连接', '本地服务', 'Frakio Work Home', '外部兼容 API'] }, { id: 'updates', label: '版本更新', icon: RefreshCw, aliases: ['版本与更新', 'Frakio Work 更新', 'Hermes Agent Runtime 更新'] }] },
@@ -10316,7 +11222,7 @@ function SettingsRail({ activeSection, onSectionChange, onReturnToConversation }
                     }}
                   >
                     <Icon size={16} />
-                    <strong>{item.label}</strong>
+                    <strong>{item.label}{item.beta && <span className="settings-nav-beta">Beta</span>}</strong>
                   </button>
                 );
               })}
@@ -10340,7 +11246,11 @@ function SettingsStatusValue({ state, detail, tone = 'neutral' }: { state: strin
 function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
   const [runtimes, setRuntimes] = useState<RuntimeDefinition[]>(runtimeSeed);
   const [modelCatalogs, setModelCatalogs] = useState<Record<string, RuntimeModelCatalog>>({});
-  const [checkingIds, setCheckingIds] = useState<Set<string>>(() => new Set(runtimeSeed.map((runtime) => runtime.id)));
+  const [packageStatuses, setPackageStatuses] = useState<Record<string, PiRuntimePackageStatus>>({});
+  const [discoveryCandidates, setDiscoveryCandidates] = useState<Record<string, RuntimeDiscoveryCandidate[]>>({});
+  const [expandedRuntimeId, setExpandedRuntimeId] = useState<string>('');
+  const [runtimeBusy, setRuntimeBusy] = useState('');
+  const [checkingIds, setCheckingIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState('');
   const detect = useCallback(async (runtimeId: string) => {
     setCheckingIds((current) => new Set(current).add(runtimeId));
@@ -10364,7 +11274,7 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
       const data = await response.json();
       if (!response.ok) throw new Error(data.error || 'Runtime 状态读取失败。');
       setRuntimes((current) => mergeRuntimeDefinitions(current, data.runtimes || []));
-      const catalogs = await Promise.all(['hermes', 'pi'].map(async (runtimeId) => {
+      const catalogs = await Promise.all(['hermes', 'pi', 'codex', 'claude'].map(async (runtimeId) => {
         try {
           const catalogResponse = await fetch(`/api/runtimes/${runtimeId}/models`);
           const catalog = await catalogResponse.json().catch(() => ({}));
@@ -10374,74 +11284,246 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
         }
       }));
       setModelCatalogs(Object.fromEntries(catalogs.filter(Boolean) as Array<readonly [string, RuntimeModelCatalog]>));
-      await Promise.all(runtimeSeed.map((runtime) => detect(runtime.id)));
+      const packageEntries = await Promise.all(['pi', 'codex', 'claude'].map(async (runtimeId) => {
+        try {
+          const status = await requestJson<PiRuntimePackageStatus>(`/api/runtime-packages/${runtimeId}`);
+          return [runtimeId, status] as const;
+        } catch {
+          return null;
+        }
+      }));
+      setPackageStatuses(Object.fromEntries(packageEntries.filter(Boolean) as Array<readonly [string, PiRuntimePackageStatus]>));
+      const missingSnapshots = (data.runtimes || []).filter((runtime: RuntimeDefinition) => !runtime.capabilitySnapshot).map((runtime: RuntimeDefinition) => runtime.id);
+      if (missingSnapshots.length) await Promise.all(missingSnapshots.map((runtimeId: RuntimeId) => detect(runtimeId)));
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Runtime 状态读取失败。');
     }
   }, [detect]);
   useEffect(() => { void load(); }, [load]);
+  const refreshRuntimePackage = async (runtimeId: string) => {
+    const status = await requestJson<PiRuntimePackageStatus>(`/api/runtime-packages/${runtimeId}`);
+    setPackageStatuses((current) => ({ ...current, [runtimeId]: status }));
+    await detect(runtimeId);
+    return status;
+  };
+  const discoverRuntime = async (runtimeId: string) => {
+    setRuntimeBusy(`discover:${runtimeId}`);
+    setError('');
+    try {
+      const data = await requestJson<{ candidates: RuntimeDiscoveryCandidate[] }>(`/api/runtimes/${runtimeId}/discover`, { method: 'POST', body: '{}' });
+      setDiscoveryCandidates((current) => ({ ...current, [runtimeId]: data.candidates || [] }));
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : '系统 Runtime 发现失败。');
+    } finally {
+      setRuntimeBusy('');
+    }
+  };
+  const bindRuntime = async (runtimeId: string, candidate: RuntimeDiscoveryCandidate) => {
+    setRuntimeBusy(`bind:${runtimeId}`);
+    setError('');
+    try {
+      await requestJson(`/api/runtimes/${runtimeId}/native-bindings`, { method: 'POST', body: JSON.stringify({ executablePath: candidate.realPath, fingerprint: candidate.fingerprint }) });
+      await refreshRuntimePackage(runtimeId);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Runtime 绑定失败。');
+    } finally {
+      setRuntimeBusy('');
+    }
+  };
+  const installRuntime = async (runtimeId: string, version: string) => {
+    setRuntimeBusy(`install:${runtimeId}`);
+    setError('');
+    try {
+      await requestJson(`/api/runtime-packages/${runtimeId}/install`, { method: 'POST', body: JSON.stringify({ version }) });
+      await refreshRuntimePackage(runtimeId);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Runtime 安装失败。');
+    } finally {
+      setRuntimeBusy('');
+    }
+  };
+  const activateRuntime = async (runtimeId: string, runtimeBuildId: string) => {
+    setRuntimeBusy(`activate:${runtimeBuildId}`);
+    setError('');
+    try {
+      await requestJson(`/api/runtime-packages/${runtimeId}/activate`, { method: 'POST', body: JSON.stringify({ runtimeBuildId }) });
+      await refreshRuntimePackage(runtimeId);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Runtime 切换失败。');
+    } finally {
+      setRuntimeBusy('');
+    }
+  };
+  const unbindRuntime = async (runtimeId: string, runtimeBuildId: string) => {
+    setRuntimeBusy(`unbind:${runtimeBuildId}`);
+    setError('');
+    try {
+      await requestJson(`/api/runtimes/${runtimeId}/native-bindings/${encodeURIComponent(runtimeBuildId)}`, { method: 'DELETE' });
+      await refreshRuntimePackage(runtimeId);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Runtime 解除绑定失败。');
+    } finally {
+      setRuntimeBusy('');
+    }
+  };
+  const deleteManagedRuntime = async (runtimeId: string, version: string) => {
+    setRuntimeBusy(`delete:${runtimeId}:${version}`);
+    setError('');
+    try {
+      await requestJson(`/api/runtime-packages/${runtimeId}/versions/${encodeURIComponent(version)}`, { method: 'DELETE' });
+      await refreshRuntimePackage(runtimeId);
+    } catch (actionError) {
+      setError(actionError instanceof Error ? actionError.message : 'Runtime 删除失败。');
+    } finally {
+      setRuntimeBusy('');
+    }
+  };
+  const verifyAll = () => void Promise.all(runtimeSeed.map((runtime) => detect(runtime.id)));
+  const runtimeSummary = useMemo(() => {
+    const checked = runtimes.filter((runtime) => Boolean(runtime.capabilitySnapshot)).length;
+    const ready = runtimes.filter((runtime) => isRuntimeReady(runtime)).length;
+    const missing = runtimes.filter((runtime) => runtime.installation?.status === 'missing').length;
+    if (checkingIds.size) return `正在验证 ${checkingIds.size} 个运行时`;
+    if (missing) return `已验证 ${ready} 个运行时，${missing} 个尚未安装`;
+    return checked ? `已验证 ${ready} 个运行时` : '首次验证后会保留结果';
+  }, [checkingIds.size, runtimes]);
   const renderGroup = (kind: 'core' | 'channel', title: string) => (
     <>
       <div className="settings-section-head"><h3>{title}</h3></div>
-      <SettingsPanel ariaLabel={title}>
+      <SettingsPanel className="runtime-center-panel" ariaLabel={title}>
         {runtimes.filter((runtime) => runtime.kind === kind).map((runtime) => {
           const installation = runtime.installation;
           const ready = installation?.status === 'ready';
+          const checking = checkingIds.has(runtime.id);
+          const expanded = expandedRuntimeId === runtime.id;
           const description = runtime.id === 'pi'
-            ? 'Frakio Work 内置 Pi Worker；使用 Frakio Model Center 的统一模型配置。'
+            ? '独立版本的 Pi Worker；使用 Frakio Model Center，并由 Runtime Platform 固定 Session 版本。'
             : runtime.id === 'hermes'
               ? '内置执行运行时；使用 Frakio Model Center。Profile、网关与备份在 Hermes 集成中管理。'
-              : '使用本机 CLI 与原生账号；模型由 CLI 或 CC Switch 管理，不改写全局配置。';
+              : '使用已确认的 CLI 二进制；模型和凭据只来自 Frakio Model Center。';
           const catalog = modelCatalogs[runtime.id];
           const catalogDetail = runtime.kind === 'core' && catalog
             ? `${catalog.usableModelCount || 0} 个可用模型 · Frakio Model Center`
             : '';
-          return <SettingsRow key={runtime.id} title={<RuntimeLabel runtimeId={runtime.id} />} description={description}>
-            <span className="runtime-center-row-actions">
-              <SettingsStatusValue
-                state={checkingIds.has(runtime.id) ? '检测中' : ready ? '已就绪' : installation?.status === 'missing' ? '未安装' : installation?.status === 'error' ? '异常' : installation?.status || '等待检测'}
-                detail={[installation?.version, catalogDetail, installation?.detail].filter(Boolean).join(' · ')}
-                tone={ready && !checkingIds.has(runtime.id) ? 'ready' : 'warning'}
-              />
-              {runtime.id === 'hermes' && <button className="secondary-btn runtime-center-detail-link" onClick={onOpenHermes}>打开 Hermes 集成</button>}
-            </span>
-          </SettingsRow>;
+          const checkedAt = runtime.capabilitySnapshot?.checkedAt || installation?.checkedAt || '';
+          const runtimeSource = runtime.capabilitySnapshot?.runtimeSource === 'managed' ? '用户安装' : runtime.capabilitySnapshot?.runtimeSource === 'bundled' ? 'Frakio Work 内置' : '';
+          const buildDetail = runtime.capabilitySnapshot?.runtimeBuildId ? `Build ${runtimeBuildLabel(runtime.capabilitySnapshot.runtimeBuildId)}` : '';
+          const packageStatus = packageStatuses[runtime.id];
+          const compatibleRelease = packageStatus?.releases?.verified?.[0];
+          const candidates = discoveryCandidates[runtime.id] || [];
+          const packageCount = packageStatus?.packages.length || 0;
+          const state = checking
+            ? '验证中'
+            : !runtime.capabilitySnapshot ? '尚未验证'
+              : ready ? '已验证'
+                : installation?.status === 'missing' ? '未安装'
+                  : installation?.status === 'error' ? '异常' : installation?.status || '尚未验证';
+          const stateTone = ready && !checking ? 'ready' : installation?.status === 'missing' ? 'neutral' : 'warning';
+          const primaryLabel = checking ? '验证中' : installation?.status === 'missing' && compatibleRelease ? '安装' : ready ? '重新验证' : '查看问题';
+          const runPrimaryAction = () => {
+            if (installation?.status === 'missing' && compatibleRelease) {
+              void installRuntime(runtime.id, compatibleRelease.version);
+              return;
+            }
+            if (ready || !expanded) {
+              void detect(runtime.id);
+              return;
+            }
+            setExpandedRuntimeId(runtime.id);
+          };
+          return <article className={expanded ? 'runtime-center-item expanded' : 'runtime-center-item'} key={runtime.id}>
+            <div className="runtime-center-row">
+              <button
+                type="button"
+                className="runtime-center-disclosure"
+              aria-expanded={expanded}
+              aria-controls={`runtime-detail-${runtime.id}`}
+              onClick={() => setExpandedRuntimeId(expanded ? '' : runtime.id)}
+              >
+                <span className="runtime-center-identity">
+                  <span className="runtime-center-icon"><RuntimeLabel runtimeId={runtime.id} showName={false} /></span>
+                  <span><strong>{runtimeLabels[runtime.id] || runtime.name}</strong><small>{description}</small></span>
+                </span>
+                <span className="runtime-center-status">
+                  <SettingsStatusValue state={state} detail={[installation?.version, checkedAt ? `${formatTime(checkedAt)} 已验证` : packageCount ? `${packageCount} 个安装来源` : '首次验证后显示详情'].filter(Boolean).join(' · ')} tone={stateTone} />
+                </span>
+              </button>
+              <div className="runtime-center-actions" onClick={(event) => event.stopPropagation()}>
+                <button className="secondary-btn compact quiet" onClick={runPrimaryAction} disabled={checking || Boolean(runtimeBusy)}>{primaryLabel}</button>
+                <AppMenu modal={false}>
+                  <AppMenuTrigger asChild><button className="icon-btn small" aria-label={`${runtimeLabels[runtime.id] || runtime.name} 更多操作`}><MoreHorizontal size={16} /></button></AppMenuTrigger>
+                  <AppMenuContent align="end" aria-label={`${runtimeLabels[runtime.id] || runtime.name} 更多操作`}>
+                    <AppMenuItem onSelect={() => void detect(runtime.id)} disabled={checking}><RefreshCw size={15} />{runtime.capabilitySnapshot ? '重新验证' : '验证'}</AppMenuItem>
+                    {runtime.id === 'hermes' ? <AppMenuItem onSelect={onOpenHermes}><Settings size={15} />打开 Hermes 集成</AppMenuItem> : <AppMenuItem onSelect={() => void discoverRuntime(runtime.id)} disabled={Boolean(runtimeBusy)}><Search size={15} />发现系统安装</AppMenuItem>}
+                    {runtime.id !== 'hermes' && compatibleRelease && <AppMenuItem onSelect={() => void installRuntime(runtime.id, compatibleRelease.version)} disabled={Boolean(runtimeBusy)}><Download size={15} />安装 {compatibleRelease.version}</AppMenuItem>}
+                  </AppMenuContent>
+                </AppMenu>
+              </div>
+            </div>
+            {expanded && <div className="runtime-center-detail" id={`runtime-detail-${runtime.id}`}>
+              <section><span>当前状态</span><strong>{state}</strong><small>{installation?.detail || (ready ? '运行时已通过本机验证。' : '请完成验证或安装后再使用。')}</small></section>
+              <section><span>安装来源</span><div className="runtime-source-list">
+                {packageStatus?.packages.map((pkg) => <div className="runtime-source-card" key={pkg.runtimeBuildId}>
+                  <div><strong>{pkg.source === 'native' ? '系统安装' : pkg.source === 'bundled' ? '应用内置' : '托管安装'} {pkg.runtimeVersion}</strong><small title={pkg.executablePath || pkg.runtimeDir}>{pkg.executablePath || pkg.runtimeDir}</small></div>
+                  <div className="runtime-source-actions"><em>{packageStatus.activeBinding?.runtimeBuildId === pkg.runtimeBuildId ? '正在使用' : pkg.availability === 'ready' ? '可用' : '不可用'}</em>{packageStatus.activeBinding?.runtimeBuildId !== pkg.runtimeBuildId && <button className="secondary-btn compact quiet" disabled={Boolean(runtimeBusy)} onClick={() => void activateRuntime(runtime.id, pkg.runtimeBuildId)}>启用</button>}<AppMenu modal={false}><AppMenuTrigger asChild><button className="icon-btn small" aria-label={`${pkg.runtimeVersion} 更多操作`}><MoreHorizontal size={15} /></button></AppMenuTrigger><AppMenuContent align="end">{pkg.source === 'native' && <AppMenuItem onSelect={() => void unbindRuntime(runtime.id, pkg.runtimeBuildId)} disabled={Boolean(runtimeBusy)}>解除绑定</AppMenuItem>}{pkg.source === 'managed' && <AppMenuItem variant="destructive" onSelect={() => void deleteManagedRuntime(runtime.id, pkg.runtimeVersion)} disabled={Boolean(runtimeBusy) || packageStatus.activeBinding?.runtimeBuildId === pkg.runtimeBuildId || packageStatus.previousBinding?.runtimeBuildId === pkg.runtimeBuildId}><Trash2 size={15} />删除</AppMenuItem>}</AppMenuContent></AppMenu></div>
+                </div>)}
+                {!packageStatus?.packages.length && <small className="runtime-detail-empty">尚未发现已绑定的安装来源。</small>}
+              </div></section>
+              <section><span>操作记录</span><small>{[runtimeSource, buildDetail, catalogDetail, checkedAt ? `最近验证 ${formatTime(checkedAt)}` : '尚无验证记录'].filter(Boolean).join(' · ')}</small></section>
+              {candidates.length > 0 && <section><span>发现的系统安装</span><div className="runtime-source-list">{candidates.map((candidate) => <div className="runtime-source-card" key={`${candidate.realPath}:${candidate.fingerprint}`}><div><strong>{candidate.version || '未知版本'} · {candidate.compatibility === 'compatible' ? '兼容' : '需检查'}</strong><small title={candidate.realPath}>{candidate.realPath}</small></div>{candidate.compatibility === 'compatible' && <button className="secondary-btn compact quiet" disabled={Boolean(runtimeBusy)} onClick={() => void bindRuntime(runtime.id, candidate)}>确认绑定</button>}</div>)}</div></section>}
+            </div>}
+          </article>;
         })}
       </SettingsPanel>
     </>
   );
   return (
     <>
-      <div className="settings-head"><h2>Runtime Center</h2><button className="secondary-btn" onClick={() => void load()} disabled={checkingIds.size > 0}>{checkingIds.size > 0 ? '检测中' : '重新检测'}</button></div>
-      {renderGroup('core', '内置内核')}
-      {renderGroup('channel', '外部通道')}
+      <div className="settings-head"><div><h2>Runtime Center</h2><p className="settings-description">{runtimeSummary}</p></div><button className="secondary-btn" onClick={verifyAll} disabled={checkingIds.size > 0}>{checkingIds.size > 0 ? '验证中' : '重新验证全部'}</button></div>
+      {renderGroup('core', 'Runtime 内核')}
+      {renderGroup('channel', 'CLI 内核')}
       <SettingsInlineNote>这里是全部执行运行时的唯一总入口。切换运行时会创建独立原生 Session；Agent 人格、Frakio 对话、Memory 和 Workspace Vault 保持不变。</SettingsInlineNote>
       {error && <div className="form-error">{error}</div>}
     </>
   );
 }
 
-function MemoryCenterPage() {
+function MemoryCenterPage({ vaults, agents, models, onOpenModels, onOpenSource }: { vaults: Vault[]; agents: Agent[]; models: ModelProfile[]; onOpenModels: () => void; onOpenSource: (threadId: string, messageId?: string) => void }) {
   const [entries, setEntries] = useState<MemoryLedgerEntry[]>([]);
-  const [status, setStatus] = useState<MemoryLedgerEntry['status']>('accepted');
+  const [view, setView] = useState<'recent' | 'active' | 'history'>('recent');
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [review, setReview] = useState<{ config: MemoryReviewConfig; status: { running: number; queued: number; failed: number; lastRunAt?: string | null } } | null>(null);
+  const [moving, setMoving] = useState<string>('');
+  const [moveTarget, setMoveTarget] = useState('user:default');
+  const [syncPreview, setSyncPreview] = useState<{ entry: MemoryLedgerEntry; relativePath: string; diff: string; drifted: boolean } | null>(null);
+  const [showImport, setShowImport] = useState(false);
+  const [migration, setMigration] = useState<{ candidates: Array<{ id: string; profileName: string; file: string; excerpt: string }>; projectVaults: Vault[] } | null>(null);
+  const [migrationSelection, setMigrationSelection] = useState<Set<string>>(new Set());
+  const [migrationVaultId, setMigrationVaultId] = useState('');
+  const [showCreate, setShowCreate] = useState(false);
+  const [createFact, setCreateFact] = useState('');
+  const [createScope, setCreateScope] = useState<'user' | 'agent' | 'vault'>('user');
+  const [createTargetId, setCreateTargetId] = useState('');
+  const [creating, setCreating] = useState(false);
   const load = useCallback(async () => {
     setLoading(true);
     setError('');
     try {
-      const response = await fetch(`/api/memory?status=${encodeURIComponent(status)}&limit=200`);
-      const data = await response.json();
-      if (!response.ok) throw new Error(data.error || 'Memory Ledger 读取失败。');
-      setEntries(data.entries || []);
+      const [memoryData, configData] = await Promise.all([
+        requestJson<{ entries: MemoryLedgerEntry[] }>(`/api/memory?view=${view}&limit=200`),
+        requestJson<{ config: MemoryReviewConfig; status: { running: number; queued: number; failed: number; lastRunAt?: string | null } }>('/api/memory/config'),
+      ]);
+      setEntries(memoryData.entries || []);
+      setReview(configData);
     } catch (loadError) {
       setError(loadError instanceof Error ? loadError.message : 'Memory Ledger 读取失败。');
     } finally {
       setLoading(false);
     }
-  }, [status]);
+  }, [view]);
   useEffect(() => { void load(); }, [load]);
-  const resolve = async (entryId: string, action: 'accept' | 'reject') => {
+  const resolve = async (entryId: string, action: 'accept' | 'reject' | 'pause' | 'resume' | 'forget') => {
     const response = await fetch(`/api/memory/${entryId}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
@@ -10454,35 +11536,149 @@ function MemoryCenterPage() {
     }
     await load();
   };
+  const editEntry = async (entry: MemoryLedgerEntry) => {
+    const fact = window.prompt('修正记忆内容', entry.fact)?.trim();
+    if (!fact || fact === entry.fact) return;
+    const response = await fetch(`/api/memory/${entry.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fact }) });
+    const data = await response.json();
+    if (!response.ok) setError(data.error || '记忆修正失败。');
+    else await load();
+  };
+  const moveEntry = async (entryId: string) => {
+    const [scope, subjectId] = moveTarget.split(':');
+    const response = await fetch(`/api/memory/${entryId}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'move', scope, subjectId }) });
+    const data = await response.json();
+    if (!response.ok) setError(data.error || '记忆归属调整失败。');
+    else { setMoving(''); await load(); }
+  };
+  const previewSync = async (entry: MemoryLedgerEntry) => {
+    try {
+      const data = await requestJson<{ preview: { relativePath: string; diff: string; drifted: boolean } }>(`/api/memory/${entry.id}/sync-preview`, { method: 'POST' });
+      setSyncPreview({ entry, ...data.preview });
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '同步预览失败。');
+    }
+  };
+  const applySync = async (resolution = '') => {
+    if (!syncPreview) return;
+    try {
+      await requestJson(`/api/memory/${syncPreview.entry.id}/sync`, { method: 'POST', body: JSON.stringify({ resolution }) });
+      setSyncPreview(null);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '资料库同步失败。');
+    }
+  };
+  const inspectMigration = async () => {
+    const data = await requestJson<{ candidates: Array<{ id: string; profileName: string; file: string; excerpt: string }>; projectVaults: Vault[] }>('/api/memory/migrations/hermes-project-rules');
+    setMigration(data);
+    setMigrationSelection(new Set());
+    setMigrationVaultId(data.projectVaults[0]?.id || '');
+  };
+  const applyMigration = async () => {
+    if (!migrationVaultId || !migrationSelection.size || !window.confirm('所选内容会先完整备份，再移入项目资料库并从原 Profile 删除。确认继续？')) return;
+    try {
+      setError('');
+      await requestJson('/api/memory/migrations/hermes-project-rules', { method: 'POST', body: JSON.stringify({ vaultId: migrationVaultId, candidateIds: [...migrationSelection] }) });
+      await inspectMigration();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '旧项目规则迁移失败。');
+    }
+  };
+  const createMemory = async () => {
+    const fact = createFact.trim();
+    const subjectId = createScope === 'user' ? 'default' : createTargetId;
+    if (!fact) {
+      setError('请先写下一条可复用的事实、规则或偏好。');
+      return;
+    }
+    if (!subjectId) {
+      setError(createScope === 'agent' ? '请选择这条经验归属的 Agent。' : '请选择这条规则归属的项目资料库。');
+      return;
+    }
+    setCreating(true);
+    setError('');
+    try {
+      await requestJson<{ entry: MemoryLedgerEntry }>('/api/memory/proposals', {
+        method: 'POST',
+        body: JSON.stringify({
+          fact,
+          scope: createScope,
+          userConfirmed: true,
+          origin: 'user',
+          userId: createScope === 'user' ? subjectId : '',
+          sourceAgentId: createScope === 'agent' ? subjectId : '',
+          vaultId: createScope === 'vault' ? subjectId : '',
+          confidence: 0.99,
+          kind: createScope === 'user' ? 'personal_fact' : createScope === 'agent' ? 'agent_experience' : 'project_fact',
+          reason: '用户在记忆中心手动创建',
+        }),
+      });
+      setCreateFact('');
+      setCreateScope('user');
+      setCreateTargetId('');
+      setShowCreate(false);
+      setView('active');
+      await load();
+    } catch (createError) {
+      setError(createError instanceof Error ? createError.message : '新建记忆失败。');
+    } finally {
+      setCreating(false);
+    }
+  };
+  const groupForEntry = (entry: MemoryLedgerEntry) => entry.scope === 'user' ? '个人' : entry.scope === 'vault' ? `项目资料库 · ${vaults.find((vault) => vault.id === entry.subjectId)?.name || entry.subjectId}` : entry.scope === 'agent' ? 'Agent 经验' : '其他';
+  const visibleEntries = view === 'active'
+    ? [...entries].sort((left, right) => groupForEntry(left).localeCompare(groupForEntry(right)) || right.updatedAt.localeCompare(left.updatedAt))
+    : entries;
   return (
     <>
       <div className="settings-head">
-        <h2>Memory Ledger</h2>
-        <select value={status} onChange={(event) => setStatus(event.target.value as MemoryLedgerEntry['status'])}>
-          <option value="accepted">已确认</option>
-          <option value="candidate">候选</option>
-          <option value="superseded">已取代</option>
-          <option value="rejected">已拒绝</option>
-        </select>
+        <div><h2>记忆中心 <span className="feature-beta">Beta</span></h2><p className="settings-description">这里管理 Frakio 跨 Agent、跨执行内核共享的记忆，不替代 Hermes 的私有运行时记忆。</p></div>
+        <span className="settings-inline-actions"><button className="send-btn" onClick={() => setShowCreate((current) => !current)}>{showCreate ? '收起新建' : '新建记忆'}</button><button className="secondary-btn quiet" onClick={onOpenModels}>模型设置</button></span>
       </div>
-      <SettingsPanel ariaLabel="Memory Ledger">
-        {entries.map((entry) => (
-          <SettingsRow
-            key={entry.id}
-            title={entry.fact}
-            description={`${entry.scope}:${entry.subjectId} · 置信度 ${Math.round(entry.confidence * 100)}% · ${entry.provenance?.[0]?.source || 'unknown source'} · ${formatTime(entry.updatedAt)}`}
-          >
-            {entry.status === 'candidate' ? (
-              <span className="settings-inline-actions">
-                <button className="secondary-btn" onClick={() => void resolve(entry.id, 'accept')}>确认</button>
-                <button className="secondary-btn danger" onClick={() => void resolve(entry.id, 'reject')}>拒绝</button>
-              </span>
-            ) : <SettingsStatusValue state={entry.status === 'accepted' ? '已确认' : entry.status === 'superseded' ? '已取代' : '已拒绝'} />}
+      <section className="memory-automation-panel">
+        <MemoryReviewModelSettings models={models} compact onOpenModels={onOpenModels} />
+        <SettingsPanel className="memory-automation-status" ariaLabel="记忆整理状态">
+          <SettingsRow title="整理状态" description={review?.config.enabled ? `当前模型：${review.config.model || '自动使用全局默认模型'} · 超时 ${review.config.timeout}s` : '已关闭自动整理'}>
+            <SettingsStatusValue state={!review?.config.enabled ? '已关闭' : review.status.running ? '整理中' : review.status.queued ? `${review.status.queued} 条等待` : review.status.failed ? `${review.status.failed} 条失败` : '运行正常'} tone={review?.status.failed ? 'warning' : 'ready'} />
           </SettingsRow>
-        ))}
-        {!entries.length && !loading ? <SettingsInlineNote>当前分类没有记忆条目。</SettingsInlineNote> : null}
+        </SettingsPanel>
+      </section>
+      {showCreate && <SettingsPanel ariaLabel="新建记忆"><SettingsRow title="新建共享记忆" description="只记录以后需要复用的事实、规则或偏好；它不会写入 Hermes 的私有记忆。"><div className="memory-create-form"><textarea value={createFact} onChange={(event) => setCreateFact(event.target.value)} placeholder="例如：项目发布前必须由 Victor 复核迁移说明。" aria-label="记忆内容" autoFocus /><div className="memory-create-controls"><label>归属 <select value={createScope} onChange={(event) => { const scope = event.target.value as 'user' | 'agent' | 'vault'; setCreateScope(scope); setCreateTargetId(''); }}><option value="user">个人记忆</option><option value="agent">Agent 经验</option><option value="vault">项目资料库</option></select></label>{createScope === 'agent' && <label>Agent <select value={createTargetId} onChange={(event) => setCreateTargetId(event.target.value)}><option value="">请选择</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>}{createScope === 'vault' && <label>项目 <select value={createTargetId} onChange={(event) => setCreateTargetId(event.target.value)}><option value="">请选择</option>{vaults.filter((vault) => vault.kind === 'project').map((vault) => <option key={vault.id} value={vault.id}>{vault.name}</option>)}</select></label>}<button className="send-btn" disabled={creating || !createFact.trim() || (createScope !== 'user' && !createTargetId)} onClick={() => void createMemory()}>{creating ? '保存中' : '保存为长期记忆'}</button><button className="secondary-btn" disabled={creating} onClick={() => { setShowCreate(false); setCreateFact(''); setCreateScope('user'); setCreateTargetId(''); }}>取消</button></div></div></SettingsRow></SettingsPanel>}
+      <section className="memory-ledger-section">
+        <div className="memory-ledger-head"><div><h3>记忆列表</h3><span>{view === 'recent' ? '自动整理出的内容会先等待确认。' : view === 'active' ? '这些记忆会在合适的 Runtime Context 中生效。' : '保留所有历史变更，便于回溯。'}</span></div><div className="module-matrix-tabs memory-center-tabs"><button className={view === 'recent' ? 'selected' : ''} onClick={() => setView('recent')}>最近产生</button><button className={view === 'active' ? 'selected' : ''} onClick={() => setView('active')}>已生效</button><button className={view === 'history' ? 'selected' : ''} onClick={() => setView('history')}>历史</button></div></div>
+      <SettingsPanel className="memory-ledger-list" ariaLabel="Memory Ledger">
+        {visibleEntries.map((entry, index) => <React.Fragment key={entry.id}>
+          {view === 'active' && (index === 0 || groupForEntry(visibleEntries[index - 1]) !== groupForEntry(entry)) && <div className="memory-group-label">{groupForEntry(entry)}</div>}
+          <SettingsRow
+            title={entry.fact}
+            description={`${entry.reason || '由 Frakio 记忆整理器识别'} · ${entry.scope === 'user' ? '个人' : entry.scope === 'agent' ? `Agent 经验：${agents.find((agent) => agent.id === entry.subjectId)?.name || entry.subjectId}` : entry.scope === 'vault' ? `项目资料库：${vaults.find((vault) => vault.id === entry.subjectId)?.name || entry.subjectId}` : '等待确认归属'} · 来源 ${entry.origin || entry.provenance?.[0]?.source || 'unknown'} · ${formatTime(entry.createdAt || entry.updatedAt)}`}
+          >
+            <span className="settings-inline-actions memory-actions">
+              {entry.status === 'candidate' && <button className="secondary-btn" onClick={() => void resolve(entry.id, 'accept')}>保留</button>}
+              {['candidate', 'accepted', 'paused'].includes(entry.status) && <button className="secondary-btn" onClick={() => void editEntry(entry)}>{entry.status === 'candidate' ? '修改后保留' : '编辑'}</button>}
+              {['candidate', 'accepted', 'paused'].includes(entry.status) && <button className="secondary-btn" onClick={() => { setMoving(entry.id); setMoveTarget(entry.scope === 'vault' || entry.scope === 'agent' || entry.scope === 'user' ? `${entry.scope}:${entry.subjectId}` : 'user:default'); }}>调整归属</button>}
+              {entry.status === 'accepted' && <button className="secondary-btn" onClick={() => void resolve(entry.id, 'pause')}>暂停</button>}
+              {entry.status === 'paused' && <button className="secondary-btn" onClick={() => void resolve(entry.id, 'resume')}>恢复</button>}
+              {entry.scope === 'vault' && ['project_fact', 'project_decision', 'project_rule'].includes(entry.kind || '') && entry.status === 'accepted' && <button className="secondary-btn" onClick={() => void previewSync(entry)}>同步资料库规则</button>}
+              {entry.threadId && <button className="secondary-btn" onClick={() => onOpenSource(entry.threadId || '', entry.provenance?.find((item) => item.messageId)?.messageId)}>查看来源</button>}
+              {['candidate', 'accepted', 'paused'].includes(entry.status) && <button className="secondary-btn danger" onClick={() => void resolve(entry.id, entry.status === 'candidate' ? 'reject' : 'forget')}>{entry.status === 'candidate' ? '不记住' : '遗忘'}</button>}
+              <SettingsStatusValue state={entry.status === 'accepted' ? '已生效' : entry.status === 'candidate' ? '等待确认' : entry.status === 'paused' ? '已暂停' : entry.status === 'superseded' ? '已取代' : '已遗忘'} />
+            </span>
+          </SettingsRow>
+        </React.Fragment>)}
+        {!entries.length && !loading ? <div className="settings-empty-state memory-empty-state"><Brain size={22} aria-hidden="true" /><strong>还没有可治理记忆</strong><span>完整对话结束后，Frakio 会在后台整理值得复用的内容。</span></div> : null}
       </SettingsPanel>
-      <SettingsInlineNote>这里只保存可解释的长期事实。聊天记录、技能、项目文档和 Work 状态不会写入 Memory Ledger。</SettingsInlineNote>
+      </section>
+      {moving && <SettingsPanel ariaLabel="调整记忆归属"><SettingsRow title="选择新的归属" description="项目规则必须进入明确的项目资料库。"><span className="settings-inline-actions"><select value={moveTarget} onChange={(event) => setMoveTarget(event.target.value)}><option value="user:default">个人记忆</option>{agents.map((agent) => <option key={agent.id} value={`agent:${agent.id}`}>{agent.name} 的 Agent 经验</option>)}{vaults.filter((vault) => vault.kind === 'project').map((vault) => <option key={vault.id} value={`vault:${vault.id}`}>项目资料库：{vault.name}</option>)}</select><button className="send-btn" onClick={() => void moveEntry(moving)}>保存归属</button><button className="secondary-btn" onClick={() => setMoving('')}>取消</button></span></SettingsRow></SettingsPanel>}
+      <details className="memory-import-tools" open={showImport} onToggle={(event) => setShowImport((event.currentTarget as HTMLDetailsElement).open)}><summary>次级操作</summary><button className="secondary-btn" onClick={() => { void inspectMigration(); setShowImport(true); }}>从 Agent 旧规则导入</button></details>
+      {migration && showImport && <SettingsPanel ariaLabel="旧项目规则迁移审查">
+        <SettingsRow title="目标项目资料库" description="迁移前会在 Frakio Work 备份目录保存原文件。"><select value={migrationVaultId} onChange={(event) => setMigrationVaultId(event.target.value)}><option value="">请选择</option>{migration.projectVaults.map((vault) => <option key={vault.id} value={vault.id}>{vault.name}</option>)}</select></SettingsRow>
+        {migration.candidates.map((candidate) => <SettingsRow key={candidate.id} title={`${candidate.profileName} · ${candidate.file}`} description={candidate.excerpt}><input type="checkbox" checked={migrationSelection.has(candidate.id)} onChange={(event) => setMigrationSelection((current) => { const next = new Set(current); if (event.target.checked) next.add(candidate.id); else next.delete(candidate.id); return next; })} /></SettingsRow>)}
+        {!migration.candidates.length && <SettingsInlineNote>没有发现待整理的旧项目规则。</SettingsInlineNote>}
+        {migration.candidates.length > 0 && <button className="secondary-btn" disabled={!migrationVaultId || !migrationSelection.size} onClick={() => void applyMigration()}>备份并迁移所选规则</button>}
+      </SettingsPanel>}
+      {syncPreview && <div className="modal-backdrop" onClick={() => setSyncPreview(null)}><div className="modal memory-sync-modal" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><h2>同步资料库规则</h2><p>{syncPreview.relativePath}</p></div><button className="icon-btn" onClick={() => setSyncPreview(null)}><X size={18} /></button></div><pre className="memory-sync-diff">{syncPreview.diff || '文档内容没有变化。'}</pre>{syncPreview.drifted && <SettingsInlineNote>文件中的受管区块已被修改。请选择以哪一边为准。</SettingsInlineNote>}<div className="modal-actions"><button className="secondary-btn" onClick={() => setSyncPreview(null)}>取消</button>{syncPreview.drifted && <button className="secondary-btn" onClick={() => void applySync('document')}>以文档更新记忆</button>}<button className="send-btn" onClick={() => void applySync(syncPreview.drifted ? 'memory' : '')}>以记忆更新文档</button></div></div></div>}
       {error && <div className="form-error">{error}</div>}
     </>
   );
@@ -10591,6 +11787,195 @@ function KnowledgeCenterPage() {
   );
 }
 
+function KnowledgeVaultsPage({ vaults, models, agents, vaultPathInput, setVaultPathInput, vaultError, vaultBusy, newVaultKind, setNewVaultKind, showConnector, setShowConnector, addVault, reindexVault, deleteVault, resolveLegacyVaultBinding }: {
+  vaults: Vault[];
+  models: ModelProfile[];
+  agents: Agent[];
+  vaultPathInput: string;
+  setVaultPathInput: (value: string) => void;
+  vaultError: string;
+  vaultBusy: Record<string, 'index' | 'delete' | 'keep' | 'detach'>;
+  newVaultKind: 'personal' | 'project';
+  setNewVaultKind: (kind: 'personal' | 'project') => void;
+  showConnector: boolean;
+  setShowConnector: (show: boolean) => void;
+  addVault: (kind?: 'personal' | 'project', useDefault?: boolean) => Promise<void>;
+  reindexVault: (vaultId: string) => Promise<void>;
+  deleteVault: (vault: Vault) => Promise<void>;
+  resolveLegacyVaultBinding: (vault: Vault, action: 'keep' | 'detach') => Promise<void>;
+}) {
+  const [selectedId, setSelectedId] = useState('');
+  const [tab, setTab] = useState<'overview' | 'content' | 'rules' | 'activity' | 'pending'>('overview');
+  const [detail, setDetail] = useState<VaultDetail | null>(null);
+  const [files, setFiles] = useState<Array<{ relativePath: string; name: string; directory: string; size: number; updatedAt: string }>>([]);
+  const [preview, setPreview] = useState<{ file: { relativePath: string; content: string; body?: string; frontmatter?: Record<string, unknown> }; links: Array<{ to: string }>; backlinks: string[] } | null>(null);
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState<Array<{ relativePath: string; summary: string; score?: number; confident?: boolean }>>([]);
+  const [noAnswer, setNoAnswer] = useState('');
+  const [busy, setBusy] = useState('');
+  const [error, setError] = useState('');
+  const vault = vaults.find((item) => item.id === selectedId) || null;
+
+  const loadDetail = useCallback(async (vaultId: string) => {
+    if (!vaultId) return;
+    setBusy('load');
+    try {
+      const [nextDetail, tree] = await Promise.all([
+        requestJson<VaultDetail>(`/api/vaults/${vaultId}`),
+        requestJson<{ files: Array<{ relativePath: string; name: string; directory: string; size: number; updatedAt: string }> }>(`/api/vaults/${vaultId}/tree`),
+      ]);
+      setDetail(nextDetail);
+      setFiles(tree.files || []);
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '资料库详情读取失败。');
+    } finally {
+      setBusy('');
+    }
+  }, []);
+
+  useEffect(() => { if (selectedId) void loadDetail(selectedId); }, [loadDetail, selectedId]);
+
+  const openFile = async (relativePath: string) => {
+    if (!selectedId) return;
+    try {
+      setPreview(await requestJson(`/api/vaults/${selectedId}/file?path=${encodeURIComponent(relativePath)}`));
+      setTab('content');
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '资料库文件读取失败。');
+    }
+  };
+
+  const search = async () => {
+    if (!selectedId || !query.trim()) return;
+    try {
+      const data = await requestJson<{ results: Array<{ relativePath: string; summary: string; score?: number; confident?: boolean }>; message?: string }>(`/api/vaults/${selectedId}/search?q=${encodeURIComponent(query.trim())}`);
+      setResults(data.results || []);
+      setNoAnswer(data.message || '');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '资料库搜索失败。');
+    }
+  };
+
+  const configure = async (managementMode: 'managed' | 'read_only', autonomy: 'fully_autonomous' | 'tiered' | 'all_review') => {
+    if (!selectedId) return;
+    setBusy('configure');
+    try {
+      await requestJson(`/api/vaults/${selectedId}/initialize`, { method: 'POST', body: JSON.stringify({ managementMode, autonomy, confirmUpgrade: true }) });
+      await loadDetail(selectedId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '资料库配置失败。');
+    } finally { setBusy(''); }
+  };
+
+  const patchConfig = async (patch: Record<string, unknown>) => {
+    if (!selectedId) return;
+    setBusy('configure');
+    try {
+      await requestJson(`/api/vaults/${selectedId}/config`, { method: 'PATCH', body: JSON.stringify(patch) });
+      await loadDetail(selectedId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '配置保存失败。');
+    } finally { setBusy(''); }
+  };
+
+  const uploadCuratorAvatar = async (file: File | undefined) => {
+    if (!file || !selectedId) return;
+    if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type)) { setError('仅支持 png、jpg、webp、gif 头像。'); return; }
+    if (file.size > 3 * 1024 * 1024) { setError('头像大小需小于 3MB。'); return; }
+    setBusy('avatar');
+    try {
+      const data = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || '')); reader.onerror = () => reject(new Error('头像读取失败。')); reader.readAsDataURL(file); });
+      await requestJson(`/api/vaults/${selectedId}/curator-avatar`, { method: 'POST', body: JSON.stringify({ mimeType: file.type, data }) });
+      await loadDetail(selectedId);
+    } catch (err) { setError(err instanceof Error ? err.message : '头像保存失败。'); } finally { setBusy(''); }
+  };
+
+  const removeCuratorAvatar = async () => {
+    if (!selectedId) return;
+    setBusy('avatar');
+    try { await requestJson(`/api/vaults/${selectedId}/curator-avatar`, { method: 'DELETE' }); await loadDetail(selectedId); }
+    catch (err) { setError(err instanceof Error ? err.message : '头像移除失败。'); } finally { setBusy(''); }
+  };
+
+  const runAction = async (key: string, endpoint: string) => {
+    setBusy(key);
+    try {
+      await requestJson(endpoint, { method: 'POST', body: '{}' });
+      if (selectedId) await loadDetail(selectedId);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '操作失败。');
+    } finally { setBusy(''); }
+  };
+
+  if (!vault) return <>
+    <div className="settings-head"><div><h2>资料库 <span className="feature-beta">Beta</span></h2><p className="settings-description">个人资料库参与全局检索；项目资料库只在连接的对话中注入规则和知识。</p></div><button className="send-btn" onClick={() => setShowConnector(!showConnector)}><Plus size={15} />{showConnector ? '收起' : '新建资料库'}</button></div>
+    {showConnector && <div className="vault-form"><select value={newVaultKind} onChange={(event) => setNewVaultKind(event.target.value as 'personal' | 'project')}><option value="project">项目资料库</option><option value="personal">个人资料库</option></select><input value={vaultPathInput} onChange={(event) => setVaultPathInput(event.target.value)} placeholder="选择本地 Markdown 目录" /><button className="send-btn" onClick={() => void addVault(newVaultKind)}>创建或连接</button>{newVaultKind === 'personal' && <button className="secondary-btn" onClick={() => void addVault('personal', true)}>使用默认目录</button>}</div>}
+    {vaultError && <div className="form-error">{vaultError}</div>}
+    <div className="knowledge-vault-list">
+      {vaults.map((item) => <button className="knowledge-vault-list-row" key={item.id} onClick={() => setSelectedId(item.id)}>
+        <span className="knowledge-vault-icon"><Database size={18} /></span><span><strong>{item.name}</strong><small>{item.kind === 'personal' ? '个人资料库' : '项目资料库'} · {item.documentCount || 0} 个 Markdown</small></span><span className={`knowledge-state ${item.managementMode === 'read_only' || item.onboardingStatus === 'needs_upgrade_confirmation' ? 'warning' : ''}`}>{item.managementMode === 'read_only' ? '只读连接' : item.onboardingStatus === 'needs_upgrade_confirmation' ? '待升级' : 'AI 自治'}</span><ChevronRight size={17} />
+      </button>)}
+      {!vaults.length && <div className="empty-state"><Database size={22} /><strong>还没有资料库</strong><span>新建后立即可以连接对话，AI 设置在资料库详情中完成。</span></div>}
+    </div>
+  </>;
+
+  const pendingSources = detail?.sources.filter((source) => ['pending', 'drifted'].includes(source.status)) || [];
+  const pendingOperations = detail?.recentOperations.filter((operation) => ['awaiting_review', 'conflict'].includes(operation.status)) || [];
+  return <div className="knowledge-vault-detail">
+    <div className="settings-head knowledge-vault-head"><div><button className="knowledge-back" onClick={() => { setSelectedId(''); setDetail(null); setPreview(null); }}><ArrowLeft size={16} />资料库</button><h2>{vault.name}</h2><p className="settings-description" title={vault.path}>{vault.path}</p></div><div className="settings-inline-actions">{vault.obsidianAvailable && window.frakioDesktop?.openObsidianVault && <button className="secondary-btn" onClick={() => void window.frakioDesktop?.openObsidianVault?.(vault.path)}><ExternalLink size={15} />Obsidian</button>}<AppMenu><AppMenuTrigger asChild><button className="icon-btn" aria-label="资料库更多操作"><MoreHorizontal size={17} /></button></AppMenuTrigger><AppMenuContent align="end"><AppMenuItem onSelect={() => void reindexVault(vault.id)}><RefreshCw size={15} />重建索引</AppMenuItem>{window.frakioDesktop?.showItemInFolder && <AppMenuItem onSelect={() => void window.frakioDesktop?.showItemInFolder?.(vault.path)}><FolderOpen size={15} />在 Finder 显示</AppMenuItem>}{vault.legacyWorkspaceBinding && <><AppMenuSeparator /><AppMenuItem onSelect={() => void resolveLegacyVaultBinding(vault, 'keep')}>保留项目连接</AppMenuItem><AppMenuItem onSelect={() => void resolveLegacyVaultBinding(vault, 'detach')}>解除旧版连接</AppMenuItem></>}<AppMenuSeparator /><AppMenuItem variant="destructive" onSelect={() => void deleteVault(vault)}><Trash2 size={15} />移除资料库</AppMenuItem></AppMenuContent></AppMenu></div></div>
+    <div className="knowledge-vault-tabs" role="tablist">{([['overview', '概览'], ['content', '内容'], ['rules', '规则与 Agent'], ['activity', '活动记录'], ['pending', `待确认${detail?.stats.pending ? ` ${detail.stats.pending}` : ''}`]] as const).map(([id, label]) => <button role="tab" aria-selected={tab === id} className={tab === id ? 'selected' : ''} key={id} onClick={() => setTab(id)}>{label}</button>)}</div>
+    {busy === 'load' && !detail ? <div className="knowledge-loading"><LoaderCircle className="spin" size={18} />读取资料库</div> : null}
+    {detail && tab === 'overview' && <div className="knowledge-overview">
+      {detail.config.onboardingStatus !== 'ready' && <section className="knowledge-setup-band"><div><Sparkles size={20} /><span><strong>让 Frakio 接管日常维护</strong><small>现有文件不会移动。来源、发布和回滚从确认后开始受 Runtime 管理。</small></span></div><span className="settings-inline-actions"><button className="send-btn" disabled={busy === 'configure'} onClick={() => void configure('managed', 'fully_autonomous')}>一键自动配置</button><button className="secondary-btn" disabled={busy === 'configure'} onClick={() => void configure('managed', 'tiered')}>分级自治</button><button className="secondary-btn" disabled={busy === 'configure'} onClick={() => void configure('read_only', 'all_review')}>只读连接</button></span></section>}
+      <div className="knowledge-stat-grid"><div><strong>{detail.stats.documents}</strong><span>Markdown</span></div><div><strong>{detail.stats.sources}</strong><span>已收录来源</span></div><div><strong>{detail.stats.pending}</strong><span>待确认</span></div><div><strong>{detail.stats.issues}</strong><span>健康问题</span></div></div>
+      <section className="knowledge-overview-section"><div><h3>运行状态</h3><button className="secondary-btn" disabled={busy === 'lint'} onClick={() => void runAction('lint', `/api/vaults/${vault.id}/lint`)}><ShieldCheck size={15} />运行健康检查</button></div><div className="knowledge-status-lines"><span><strong>管理方式</strong>{detail.config.managementMode === 'managed' ? 'Frakio 管理' : '只读连接'}</span><span><strong>自治档位</strong>{detail.config.autonomy === 'fully_autonomous' ? '完全自治' : detail.config.autonomy === 'tiered' ? '分级自治' : '全部审核'}</span><span><strong>维护者</strong>{detail.curator?.displayName || '无上的霸王龙'}</span><span><strong>来源边界</strong>{detail.config.immutableRoots.join('、')}</span></div></section>
+      <section className="knowledge-overview-section"><div><h3>最近活动</h3><button className="knowledge-text-button" onClick={() => setTab('activity')}>查看全部 <ChevronRight size={14} /></button></div>{detail.recentOperations.slice(0, 4).map((operation) => <div className="knowledge-activity-row" key={operation.id}><Activity size={15} /><span><strong>{operation.summary}</strong><small>{formatTime(operation.createdAt)} · {operation.files.length} 个文件</small></span><em>{operation.status === 'published' ? '已发布' : operation.status === 'awaiting_review' ? '待确认' : operation.status}</em></div>)}{!detail.recentOperations.length && <div className="overview-empty">还没有维护活动。</div>}</section>
+    </div>}
+    {detail && tab === 'content' && <div className="knowledge-content-view"><aside><div className="knowledge-search"><Search size={15} /><input value={query} onChange={(event) => setQuery(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void search(); }} placeholder="搜索资料库" /><button onClick={() => void search()} aria-label="搜索"><ArrowUp size={14} /></button></div>{query && <div className="knowledge-search-results">{noAnswer && <div className="knowledge-no-answer">{noAnswer}</div>}{results.map((result) => <button key={result.relativePath} onClick={() => void openFile(result.relativePath)}><strong>{result.relativePath}</strong><small>{result.summary}</small></button>)}</div>}<KnowledgeFileTree files={files} selectedPath={preview?.file.relativePath || ''} onOpen={(relativePath) => void openFile(relativePath)} /></aside><main>{preview ? <><header><div><strong>{preview.file.relativePath}</strong><small>{Object.keys(preview.file.frontmatter || {}).length} 个属性 · {preview.links.length} 个出链 · {preview.backlinks.length} 个反向链接</small></div></header><div className="knowledge-markdown"><MarkdownMessage content={preview.file.body ?? preview.file.content} /></div>{(preview.links.length > 0 || preview.backlinks.length > 0) && <footer>{preview.links.map((link) => <button key={`out-${link.to}`} onClick={() => void openFile(link.to)}><Link2 size={13} />{link.to}</button>)}{preview.backlinks.map((from) => <button key={`back-${from}`} onClick={() => void openFile(from)}><GitBranch size={13} />{from}</button>)}</footer>}</> : <div className="knowledge-preview-empty"><FileText size={24} /><span>从左侧选择一个 Markdown 文件</span></div>}</main></div>}
+    {detail && tab === 'rules' && <div className="knowledge-rules-view"><section className="knowledge-curator-panel"><div className="knowledge-curator-heading"><span className="knowledge-curator-avatar">{detail.curator?.avatarUrl ? <img src={detail.curator.avatarUrl} alt="" /> : <img src={launchDinoUrl} alt="" />}</span><div><h3>{detail.curator?.displayName || '无上的霸王龙'}</h3><p>系统维护者 / frakio-knowledge-curator · 固定通过 Hermes 执行</p></div></div><div className="knowledge-curator-form"><label>昵称<input defaultValue={detail.config.curatorPresentation.displayName} maxLength={48} onBlur={(event) => { const displayName = event.target.value.trim() || '无上的霸王龙'; if (displayName !== detail.config.curatorPresentation.displayName) void patchConfig({ curatorPresentation: { displayName } }); }} /></label><label>头像<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" disabled={busy === 'avatar'} onChange={(event) => { void uploadCuratorAvatar(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label>{detail.curator?.avatarUrl && <button className="secondary-btn" disabled={busy === 'avatar'} onClick={() => void removeCuratorAvatar()}>恢复默认头像</button>}<label>模型路线<select value={detail.config.curatorExecution.mode} onChange={(event) => void patchConfig({ curatorExecution: { mode: event.target.value }, curatorReferenceAgentId: event.target.value === 'follow_agent' ? detail.config.curatorReferenceAgentId : '' })}><option value="auto">自动（全局维护者模型）</option><option value="explicit_model">指定模型</option><option value="follow_agent">跟随 Agent 模型</option></select></label>{detail.config.curatorExecution.mode === 'explicit_model' && <label>指定模型<select value={`${detail.config.curatorExecution.provider}::${detail.config.curatorExecution.model}`} onChange={(event) => { const [provider, model] = event.target.value.split('::'); void patchConfig({ curatorExecution: { provider, model } }); }}><option value="::">选择模型</option>{models.flatMap((item) => modelNamesForProvider(item).map((name) => <option key={`${item.providerKey}::${name}`} value={`${item.providerKey}::${name}`}>{item.name} / {name}</option>))}</select></label>}{detail.config.curatorExecution.mode === 'follow_agent' && <label>参考 Agent<select value={detail.config.curatorReferenceAgentId} onChange={(event) => void patchConfig({ curatorReferenceAgentId: event.target.value })}><option value="">选择 Agent</option>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>}<label>调用超时<input type="number" min="30" max="900" value={detail.config.curatorExecution.timeout} onChange={(event) => void patchConfig({ curatorExecution: { timeout: Number(event.target.value) || 600 } })} /></label><span className="knowledge-curator-effective">当前：Hermes · {detail.curator?.modelLabel || '自动'} · {detail.curator?.modelSource === 'reference_agent' ? `模型路线参考自 ${detail.curator.referenceAgentName}` : detail.curator?.modelSource === 'vault_model' ? '资料库专属模型' : detail.curator?.modelSource === 'global_curator' ? '全局默认模型' : '默认 Agent 模型'}</span></div></section><section><div><h3>自治策略</h3><p>规则和 Agent 权限变更始终进入待确认。</p></div><select value={detail.config.autonomy} disabled={busy === 'configure' || detail.config.managementMode === 'read_only'} onChange={(event) => void patchConfig({ autonomy: event.target.value })}><option value="fully_autonomous">完全自治</option><option value="tiered">分级自治</option><option value="all_review">全部审核</option></select></section><section><div><h3>管理方式</h3><p>只读连接保留检索和规则注入，但暂停 AI 发布。</p></div><select value={detail.config.managementMode} disabled={busy === 'configure'} onChange={(event) => void patchConfig({ managementMode: event.target.value })}><option value="managed">Frakio 管理</option><option value="read_only">只读连接</option></select></section><section className="knowledge-rule-paths"><div><h3>实际注入规则</h3><p>这些路径由 manifest 授权，普通 Markdown 不能扩大权限。</p></div>{detail.config.trustedRulePaths.length ? detail.config.trustedRulePaths.map((rulePath) => <button key={rulePath} onClick={() => void openFile(rulePath)}><ShieldCheck size={15} />{rulePath}<ChevronRight size={14} /></button>) : <span className="overview-empty">个人资料库不注入项目工作流规则。</span>}</section><section className="knowledge-rule-paths"><div><h3>维护规则</h3><p>{detail.curator?.displayName || '无上的霸王龙'}读取这些规则来整理来源和知识。</p></div>{detail.config.maintenanceRulePaths.map((rulePath) => <button key={rulePath} onClick={() => void openFile(rulePath)}><Bot size={15} />{rulePath}<ChevronRight size={14} /></button>)}</section></div>}
+    {detail && tab === 'activity' && <div className="knowledge-activity-view"><div className="knowledge-section-toolbar"><div><h3>维护操作</h3><p>每次发布都有文件级历史，可以整体回滚。</p></div><button className="secondary-btn" onClick={() => void loadDetail(vault.id)}><RefreshCw size={15} />刷新</button></div>{detail.recentOperations.map((operation) => <div className="knowledge-operation-row" key={operation.id}><span className={`knowledge-operation-icon ${operation.status}`}><Activity size={15} /></span><span><strong>{operation.summary}</strong><small>{formatTime(operation.createdAt)} · {operation.kind} · {operation.files.map((file) => file.relativePath).join('、')}</small></span><em>{operation.status === 'published' ? '已发布' : operation.status === 'rejected' ? '已拒绝' : operation.status === 'conflict' ? '冲突' : '待确认'}</em>{operation.status === 'published' && !operation.rolledBackAt && <button className="secondary-btn" disabled={busy === operation.id} onClick={() => void runAction(operation.id, `/api/vaults/${vault.id}/operations/${operation.id}/rollback`)}>回滚</button>}</div>)}{!detail.recentOperations.length && !detail.recentJobs.length && <div className="knowledge-empty-line">还没有维护活动。</div>}{detail.recentJobs.length > 0 && <><div className="knowledge-section-toolbar compact"><div><h3>维护任务</h3></div></div>{detail.recentJobs.map((job) => <div className="knowledge-job-row" key={job.id}><Clock3 size={14} /><span><strong>{job.kind}</strong><small>{formatTime(job.updatedAt)}{job.error ? ` · ${job.error}` : ''}</small></span><em>{job.status}</em></div>)}</>}</div>}
+    {detail && tab === 'pending' && <div className="knowledge-pending-view"><div className="knowledge-section-toolbar"><div><h3>来源确认</h3><p>任何来源首次进入资料库都需要确认。</p></div></div>{pendingSources.map((source) => <div className="knowledge-pending-row" key={source.id}><Globe2 size={16} /><span><strong>{source.title}</strong><small>{source.origin || source.kind} · {source.status === 'drifted' ? '内容已变化' : '等待收录'}</small></span><button className="send-btn" disabled={busy === source.id} onClick={() => void runAction(source.id, `/api/vaults/${vault.id}/sources/${source.id}/accept`)}>确认收录</button><button className="secondary-btn" disabled={busy === source.id} onClick={() => void runAction(source.id, `/api/vaults/${vault.id}/sources/${source.id}/reject`)}>拒绝</button></div>)}{!pendingSources.length && <div className="knowledge-empty-line">没有待确认来源。</div>}<div className="knowledge-section-toolbar"><div><h3>变更审核</h3><p>规则、删除、矛盾裁决和大批量变更始终在这里确认。</p></div></div>{pendingOperations.map((operation) => <div className="knowledge-pending-row operation" key={operation.id}><GitCompareArrows size={16} /><span><strong>{operation.summary}</strong><small>{operation.files.length} 个文件 · {operation.status === 'conflict' ? '外部文件已变化' : operation.files.map((file) => file.relativePath).join('、')}</small></span>{operation.status !== 'conflict' && <button className="send-btn" disabled={busy === operation.id} onClick={() => void runAction(operation.id, `/api/vaults/${vault.id}/operations/${operation.id}/publish`)}>发布</button>}<button className="secondary-btn" disabled={busy === operation.id} onClick={() => void runAction(operation.id, `/api/vaults/${vault.id}/operations/${operation.id}/reject`)}>拒绝</button></div>)}{!pendingOperations.length && <div className="knowledge-empty-line">没有待审核变更。</div>}{detail.issues.length > 0 && <><div className="knowledge-section-toolbar"><div><h3>健康问题</h3></div></div>{detail.issues.map((issue) => <div className="knowledge-issue-row" key={issue.id}><TriangleAlert size={15} /><span><strong>{issue.message}</strong><small>{issue.relativePath || issue.code}</small></span><em>{issue.severity}</em></div>)}</>}</div>}
+    {error && <div className="form-error">{error}</div>}
+  </div>;
+}
+
+type KnowledgeTreeFile = { relativePath: string; name: string; directory: string; size: number; updatedAt: string };
+type KnowledgeTreeDirectory = { name: string; path: string; directories: Map<string, KnowledgeTreeDirectory>; files: KnowledgeTreeFile[] };
+
+function KnowledgeFileTree({ files, selectedPath, onOpen }: { files: KnowledgeTreeFile[]; selectedPath: string; onOpen: (relativePath: string) => void }) {
+  const tree = useMemo(() => {
+    const root: KnowledgeTreeDirectory = { name: '', path: '', directories: new Map(), files: [] };
+    for (const file of files) {
+      const parts = file.relativePath.split('/');
+      const fileName = parts.pop() || file.name;
+      let current = root;
+      for (const part of parts) {
+        const directoryPath = current.path ? `${current.path}/${part}` : part;
+        if (!current.directories.has(part)) current.directories.set(part, { name: part, path: directoryPath, directories: new Map(), files: [] });
+        current = current.directories.get(part)!;
+      }
+      current.files.push({ ...file, name: fileName });
+    }
+    return root;
+  }, [files]);
+
+  const renderDirectory = (directory: KnowledgeTreeDirectory, depth: number): React.ReactNode => {
+    const containsSelection = Boolean(selectedPath && (selectedPath === directory.path || selectedPath.startsWith(`${directory.path}/`)));
+    return <details className="knowledge-tree-directory" key={directory.path} open={depth === 0 || containsSelection}>
+      <summary style={{ paddingLeft: `${8 + depth * 14}px` }}><ChevronRight className="knowledge-tree-chevron" size={13} /><FolderOpen size={14} /><span>{directory.name}</span></summary>
+      {[...directory.directories.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')).map((child) => renderDirectory(child, depth + 1))}
+      {directory.files.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')).map((file) => <button style={{ paddingLeft: `${23 + depth * 14}px` }} className={selectedPath === file.relativePath ? 'selected' : ''} key={file.relativePath} onClick={() => onOpen(file.relativePath)} title={file.relativePath}><FileText size={14} /><span>{file.name}</span></button>)}
+    </details>;
+  };
+
+  return <div className="knowledge-file-tree">
+    {[...tree.directories.values()].sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')).map((directory) => renderDirectory(directory, 0))}
+    {tree.files.sort((a, b) => a.name.localeCompare(b.name, 'zh-CN')).map((file) => <button className={selectedPath === file.relativePath ? 'selected' : ''} key={file.relativePath} onClick={() => onOpen(file.relativePath)} title={file.relativePath}><FileText size={14} /><span>{file.name}</span></button>)}
+  </div>;
+}
+
 function SystemStatusPage({ hermesBootstrap, hermesRuntime, hermesDiagnostics, hermesApiAvailability }: {
   hermesBootstrap: HermesBootstrapStatus | null;
   hermesRuntime: HermesRuntimeStatus | null;
@@ -10637,14 +12022,25 @@ function SystemStatusPage({ hermesBootstrap, hermesRuntime, hermesDiagnostics, h
 
 function ToolCapabilitiesPage({ profile, hermesRuntime }: { profile: string; hermesRuntime: HermesRuntimeStatus | null }) {
   const [networkStatus, setNetworkStatus] = useState<HermesNetworkStatus | null>(null);
+  const [checking, setChecking] = useState(false);
+  const [error, setError] = useState('');
+  const load = useCallback(async (refresh = false) => {
+    setChecking(true);
+    try {
+      const response = await fetch(`/api/hermes/network-status${refresh ? '/refresh' : ''}?profile=${encodeURIComponent(profile || 'default')}`, { method: refresh ? 'POST' : 'GET', headers: refresh ? { 'x-frakio-request': '1' } : undefined });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || '工具能力读取失败。');
+      setNetworkStatus(data);
+      setError('');
+    } catch (loadError) {
+      setError(loadError instanceof Error ? loadError.message : '工具能力读取失败。');
+    } finally {
+      setChecking(false);
+    }
+  }, [profile]);
   useEffect(() => {
-    const controller = new AbortController();
-    void fetch(`/api/hermes/network-status?profile=${encodeURIComponent(profile || 'default')}`, { signal: controller.signal })
-      .then((response) => response.ok ? response.json() : Promise.reject(new Error('network status unavailable')))
-      .then(setNetworkStatus)
-      .catch(() => { if (!controller.signal.aborted) setNetworkStatus(null); });
-    return () => controller.abort();
-  }, [profile, hermesRuntime?.bridge?.ready]);
+    void load();
+  }, [load, hermesRuntime?.bridge?.ready]);
   const detail = (capability: HermesNetworkStatus['search'] | HermesNetworkStatus['browser']) => {
     if (capability.detail === 'free_provider_ready') return '免费搜索可用，服务繁忙时可能限流';
     if (capability.detail === 'tool_disabled') return '工具未启用';
@@ -10653,14 +12049,16 @@ function ToolCapabilitiesPage({ profile, hermesRuntime }: { profile: string; her
     if (capability.detail === 'browser_cli_missing') return '只读浏览器组件未就绪';
     return capability.provider ? `${capability.provider} 已就绪` : '已就绪';
   };
+  const statusDetail = networkStatus?.checkedAt ? `验证于 ${formatTime(networkStatus.checkedAt)}` : checking ? '正在读取验证结果' : '尚未验证';
   return <>
-    <div className="settings-head"><h2>工具能力</h2></div>
-    <div className="settings-section-head"><h3>联网与浏览</h3></div>
+    <div className="settings-head"><div><h2>工具能力</h2><p className="settings-description">联网与浏览能力按当前 Hermes Profile 保存验证结果。</p></div><button className="secondary-btn" onClick={() => void load(true)} disabled={checking}>{checking ? '检查中' : '检查工具'}</button></div>
+    <div className="settings-section-head"><h3>联网与浏览</h3><span className="settings-section-meta">{statusDetail}</span></div>
     <SettingsPanel ariaLabel="联网与浏览工具能力">
-      <SettingsRow title="网页搜索" description="实时信息优先使用搜索；单个免费服务限流不代表本机离线。"><SettingsStatusValue state={networkStatus?.search.ready ? '可用' : '未就绪'} detail={networkStatus ? detail(networkStatus.search) : '等待检测'} tone={networkStatus?.search.ready ? 'ready' : 'warning'} /></SettingsRow>
-      <SettingsRow title="网页浏览" description="搜索失败时使用只读浏览器；目标网站拒绝或超时不代表本机离线。"><SettingsStatusValue state={networkStatus?.browser.ready ? '可用' : '未就绪'} detail={networkStatus ? detail(networkStatus.browser) : '等待检测'} tone={networkStatus?.browser.ready ? 'ready' : 'warning'} /></SettingsRow>
-      <SettingsInlineNote>Plan 模式允许网页搜索和只读浏览。点击、输入、脚本控制或终端 curl 被拦截时，属于 Plan 安全策略，不是网络故障。</SettingsInlineNote>
+      <SettingsRow title="网页搜索" description="实时信息优先使用搜索；单个免费服务限流不代表本机离线。"><SettingsStatusValue state={checking ? '检查中' : networkStatus?.search.ready ? '可用' : networkStatus ? '未就绪' : '尚未验证'} detail={networkStatus ? detail(networkStatus.search) : statusDetail} tone={networkStatus?.search.ready ? 'ready' : 'warning'} /></SettingsRow>
+      <SettingsRow title="网页浏览" description="搜索失败时使用只读浏览器；目标网站拒绝或超时不代表本机离线。"><SettingsStatusValue state={checking ? '检查中' : networkStatus?.browser.ready ? '可用' : networkStatus ? '未就绪' : '尚未验证'} detail={networkStatus ? detail(networkStatus.browser) : statusDetail} tone={networkStatus?.browser.ready ? 'ready' : 'warning'} /></SettingsRow>
     </SettingsPanel>
+    <SettingsInlineNote>Plan 模式允许网页搜索和只读浏览。点击、输入、脚本控制或终端 curl 被拦截时，属于 Plan 安全策略，不是网络故障。</SettingsInlineNote>
+    {error && <div className="form-error">{error}</div>}
   </>;
 }
 
@@ -10717,7 +12115,7 @@ function HermesBackupPanel({ status, busy, onCreate, onRollback, onDelete, onCle
   );
 }
 
-function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, hermesRuntime, hermesDiagnostics, hermesApiAvailability, hermesError, updatesStatus, updatesBusy, updatesError, updatesResult, desktopUpdateState, onCheckDesktopUpdate, onDownloadDesktopUpdate, onCancelDesktopUpdate, onOpenDesktopUpdate, onCheckHermesRuntime, onInstallHermesRuntime, onActivateHermesRuntime, onUseBundledHermesRuntime, onDeleteHermesRuntime, onCreateHermesBackup, onRollbackHermesBackup, onDeleteHermesBackup, onCleanupHermesBackups, userProfile, uiSettings, telemetryStatus, isImportingHermes, vaultPathInput, setVaultPathInput, vaultError, vaultBusy, addVault, reindexVault, deleteVault, onImportHermes, onRunFirstUseGuide, firstUseGuideRunning, onStartHermesRuntime, onRefreshHermesRuntime, onStartProfileGateway, onStopProfileGateway, onUpdateUi, onUserProfileSaved, pinnedNav, onTogglePinned, modelError, saveModel, deleteModel, fetchAvailableModels, onCapabilityChanged, activeSection, onSectionChange, archivedThreads, onRefreshArchivedThreads, onRestoreThread, onDeleteThread, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreateAgent, profileEditor, onUpdateDefaultAgent }: {
+function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, hermesRuntime, hermesDiagnostics, hermesApiAvailability, hermesError, updatesStatus, updatesBusy, updatesError, updatesResult, desktopUpdateState, onCheckDesktopUpdate, onDownloadDesktopUpdate, onCancelDesktopUpdate, onOpenDesktopUpdate, onCheckHermesRuntime, onInstallHermesRuntime, onActivateHermesRuntime, onUseBundledHermesRuntime, onDeleteHermesRuntime, onCreateHermesBackup, onRollbackHermesBackup, onDeleteHermesBackup, onCleanupHermesBackups, userProfile, uiSettings, telemetryStatus, isImportingHermes, vaultPathInput, setVaultPathInput, vaultError, vaultBusy, addVault, reindexVault, deleteVault, resolveLegacyVaultBinding, onImportHermes, onRunFirstUseGuide, firstUseGuideRunning, onStartHermesRuntime, onRefreshHermesRuntime, onStartProfileGateway, onStopProfileGateway, onUpdateUi, onUserProfileSaved, pinnedNav, onTogglePinned, modelError, saveModel, deleteModel, fetchAvailableModels, onCapabilityChanged, activeSection, onSectionChange, archivedThreads, onRefreshArchivedThreads, onRestoreThread, onDeleteThread, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreateAgent, profileEditor, onUpdateDefaultAgent, onOpenMemorySource }: {
   vaults: Vault[];
   models: ModelProfile[];
   agents: Agent[];
@@ -10752,10 +12150,11 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
   vaultPathInput: string;
   setVaultPathInput: (value: string) => void;
   vaultError: string;
-  vaultBusy: Record<string, 'index' | 'delete'>;
-  addVault: () => Promise<void>;
+  vaultBusy: Record<string, 'index' | 'delete' | 'keep' | 'detach'>;
+  addVault: (kind?: 'personal' | 'project', useDefault?: boolean) => Promise<void>;
   reindexVault: (vaultId: string) => Promise<void>;
   deleteVault: (vault: Vault) => Promise<void>;
+  resolveLegacyVaultBinding: (vault: Vault, action: 'keep' | 'detach') => Promise<void>;
   onImportHermes: () => Promise<void>;
   onRunFirstUseGuide: () => void;
   firstUseGuideRunning: boolean;
@@ -10786,7 +12185,10 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
   onCreateAgent: () => void;
   profileEditor: ProfileEditorControls;
   onUpdateDefaultAgent: (agentId: string) => void;
+  onOpenMemorySource: (threadId: string, messageId?: string) => void;
 }) {
+  const [newVaultKind, setNewVaultKind] = useState<'personal' | 'project'>('project');
+  const [showVaultConnector, setShowVaultConnector] = useState(false);
   const localProfiles = hermesBootstrap?.profiles.length ? hermesBootstrap.profiles : hermesStatus?.profiles || [];
   const detectedProfiles = localProfiles.length;
   const hermesPath = hermesBootstrap?.installPath || hermesStatus?.profiles?.[0]?.path?.replace(/\/profiles\/[^/]+$/, '') || '~/.hermes';
@@ -10814,8 +12216,7 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
           )}
 
           {activeSection === 'runtimes' && <RuntimeCenterPage onOpenHermes={() => onSectionChange('hermesAgent')} />}
-          {activeSection === 'memory' && <MemoryCenterPage />}
-          {activeSection === 'knowledge' && <KnowledgeCenterPage />}
+          {activeSection === 'memory' && <MemoryCenterPage vaults={vaults} agents={agents} models={models} onOpenModels={() => onSectionChange('models')} onOpenSource={onOpenMemorySource} />}
           {activeSection === 'tools' && <ToolCapabilitiesPage profile={defaultAgentProfile} hermesRuntime={hermesRuntime} />}
 
           {activeSection === 'hermesAgent' && <>
@@ -10953,28 +12354,7 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
           {activeSection === 'plugins' && <HermesModulesPage kind="plugin" onStartProfileGateway={onStartProfileGateway} />}
           {activeSection === 'jobs' && <JobsPage profiles={localProfiles} defaultProfile={defaultAgentProfile || uiSettings.defaultProfile || hermesBootstrap?.approval.profileName || 'default'} embedded />}
           {activeSection === 'monitoring' && <MonitoringPage embedded />}
-          {activeSection === 'vaults' && <>
-            <div className="settings-head"><h2>Obsidian 仓库</h2></div>
-            <div className="vault-form">
-              <input value={vaultPathInput} onChange={(event) => setVaultPathInput(event.target.value)} placeholder="/Users/.../你的 Obsidian 仓库" />
-              <button className="send-btn" onClick={() => void addVault()}>检测并添加</button>
-            </div>
-            {vaultError && <div className="form-error">{vaultError}</div>}
-            <div className="vault-table">
-              {vaults.map((vault) => (
-                <div className="vault-row" key={vault.id}>
-                  <div><strong>{vault.name}</strong><span>{vault.path}</span></div>
-                  <div><strong>{vault.documentCount}</strong><span>Markdown</span></div>
-                  <div><strong>{vault.productCount}</strong><span>产品文档</span></div>
-                  <div><strong>{vault.lastIndexedAt ? formatTime(vault.lastIndexedAt) : '尚未索引'}</strong><span>{vault.needsRefresh ? '建议更新' : vault.status === 'not_indexed' ? '未建立索引' : '已建立索引'}</span></div>
-                  <div className="vault-row-actions">
-                    <button className="secondary-btn" onClick={() => void reindexVault(vault.id)} disabled={Boolean(vaultBusy[vault.id])}><RefreshCw className={vaultBusy[vault.id] === 'index' ? 'spin' : ''} size={15} />{vaultBusy[vault.id] === 'index' ? '更新中' : '更新索引'}</button>
-                    <button className="icon-btn small danger vault-delete-btn" onClick={() => void deleteVault(vault)} disabled={Boolean(vaultBusy[vault.id])} aria-label={`删除仓库 ${vault.name}`} title="移除仓库连接"><Trash2 size={15} /></button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          </>}
+          {activeSection === 'vaults' && <KnowledgeVaultsPage vaults={vaults} models={models} agents={agents} vaultPathInput={vaultPathInput} setVaultPathInput={setVaultPathInput} vaultError={vaultError} vaultBusy={vaultBusy} newVaultKind={newVaultKind} setNewVaultKind={setNewVaultKind} showConnector={showVaultConnector} setShowConnector={setShowVaultConnector} addVault={addVault} reindexVault={reindexVault} deleteVault={deleteVault} resolveLegacyVaultBinding={resolveLegacyVaultBinding} />}
       </div>
     </section>
   );
@@ -11510,7 +12890,10 @@ function calculateProviderModelMenuPlacement(trigger: DOMRect, viewportWidth: nu
   const gap = 8;
   const margin = 12;
   const narrow = viewportWidth < 720;
-  const rootPanelWidth = 260;
+  // This must stay aligned with `.provider-model-root-panel`. The portal itself
+  // is only a positioning wrapper, so a wider value leaves a visible empty tail
+  // when the second-level panel flips to the left.
+  const rootPanelWidth = 232;
   const subPanelWidth = 300;
   const singlePanelWidth = Math.min(subPanelWidth, viewportWidth - margin * 2);
   const width = advanced && !narrow ? rootPanelWidth : singlePanelWidth;
@@ -11554,13 +12937,14 @@ function calculateProviderModelMenuPlacement(trigger: DOMRect, viewportWidth: nu
   };
 }
 
-function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLabel = '未配置模型', className = '', ariaLabel = '切换模型', title = '切换模型', allowDefault = false, usingDefault = false, capabilities, runOverride, onRunOverrideChange }: { models: ModelProfile[]; value: string; onChange: (value: string) => void | Promise<void>; agentName?: string; emptyLabel?: string; className?: string; ariaLabel?: string; title?: string; allowDefault?: boolean; usingDefault?: boolean; capabilities?: Record<string, ModelCapability>; runOverride?: AgentRunOverride; onRunOverrideChange?: (override: AgentRunOverride) => void | Promise<void> }) {
+function ProviderModelPicker({ models, value, onChange, runtimeId = 'hermes', agentName = '', emptyLabel = '未配置模型', className = '', ariaLabel = '切换模型', title = '切换模型', allowDefault = false, usingDefault = false, capabilities, runOverride, onRunOverrideChange }: { models: ModelProfile[]; value: string; onChange: (value: string) => void | Promise<void>; runtimeId?: RuntimeId; agentName?: string; emptyLabel?: string; className?: string; ariaLabel?: string; title?: string; allowDefault?: boolean; usingDefault?: boolean; capabilities?: Record<string, ModelCapability>; runOverride?: AgentRunOverride; onRunOverrideChange?: (override: AgentRunOverride) => void | Promise<void> }) {
   const [open, setOpen] = useState(false);
   const [section, setSection] = useState<'root' | 'model' | 'reasoning' | 'speed'>('model');
   const [saving, setSaving] = useState(false);
   const [menuStyle, setMenuStyle] = useState<React.CSSProperties>({});
   const [submenuSide, setSubmenuSide] = useState<'left' | 'right'>('right');
   const [openAbove, setOpenAbove] = useState(true);
+  const [runtimeCatalog, setRuntimeCatalog] = useState<RuntimeModelCatalog | null>(null);
   const menuId = useId();
   const rootRef = useRef<HTMLDivElement | null>(null);
   const menuRef = useRef<HTMLDivElement | null>(null);
@@ -11575,6 +12959,17 @@ function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLab
   const speedLabel = selectedCapability?.serviceTiers.length
     ? selectedTier?.name || (runOverride?.speedMode === 'standard' ? '标准' : '跟随 Agent')
     : selectedCapability?.serviceTierStatus === 'unsupported' ? '该模型不支持' : '能力未确认';
+
+  useEffect(() => {
+    let cancelled = false;
+    setRuntimeCatalog(null);
+    fetch(`/api/runtimes/${runtimeId}/models`).then(async (response) => {
+      const payload = await response.json();
+      if (!response.ok) throw new Error(payload.error || 'Runtime 模型目录读取失败。');
+      if (!cancelled) setRuntimeCatalog(payload);
+    }).catch(() => { if (!cancelled) setRuntimeCatalog({ runtimeId, source: 'frakio-model-center', models: [], usableModelCount: 0 }); });
+    return () => { cancelled = true; };
+  }, [runtimeId]);
 
   const positionMenu = useCallback(() => {
     const trigger = rootRef.current?.getBoundingClientRect();
@@ -11663,7 +13058,9 @@ function ProviderModelPicker({ models, value, onChange, agentName = '', emptyLab
             <div>{modelNamesForProvider(provider).map((modelName) => {
               const itemValue = modelChoiceValue(provider, modelName);
               const isSelected = selected.value === itemValue;
-              return <button type="button" className={isSelected ? 'selected' : ''} key={itemValue} onClick={() => chooseModel(itemValue)} disabled={saving}><span>{modelName}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>;
+              const compatibility = runtimeCatalog?.models.find((entry) => entry.id === provider.id)?.compatibility;
+              const usable = Boolean(compatibility?.usableModelIds.includes(modelName));
+              return <button type="button" className={`${isSelected ? 'selected' : ''}${runtimeCatalog && !usable ? ' incompatible' : ''}`} key={itemValue} onClick={() => chooseModel(itemValue)} disabled={saving || !runtimeCatalog || !usable} title={usable ? '可由当前 Runtime 直接使用' : compatibility?.reason || '当前 Runtime 不支持该模型'}><span>{modelName}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>;
             })}</div>
           </section>
         )) : <span className="provider-model-empty">{emptyLabel}</span>}
@@ -11792,7 +13189,7 @@ function ModelIdCombobox({ value, options, onChange, placeholder = '选择或输
   );
 }
 
-function AuxiliaryModelsPanel({ profile, groups }: { profile: string; groups: ModelSlotGroup[] }) {
+function AuxiliaryModelsPanel({ groups }: { groups: ModelSlotGroup[] }) {
   const [tasks, setTasks] = useState<AuxiliaryModelTask[]>([]);
   const [auxiliary, setAuxiliary] = useState<AuxiliaryModelsConfig>({});
   const [loading, setLoading] = useState(false);
@@ -11801,11 +13198,10 @@ function AuxiliaryModelsPanel({ profile, groups }: { profile: string; groups: Mo
   const [editing, setEditing] = useState<{ task: AuxiliaryModelTask; settings: AuxiliaryModelSettings; extraBody: string } | null>(null);
 
   async function load() {
-    if (!profile) return;
     setLoading(true);
     setError('');
     try {
-      const data = await requestJson<{ tasks: AuxiliaryModelTask[]; auxiliary: AuxiliaryModelsConfig }>(`/api/hermes/config/auxiliary-models?profile=${encodeURIComponent(profile)}`);
+      const data = await requestJson<{ tasks: AuxiliaryModelTask[]; auxiliary: AuxiliaryModelsConfig }>('/api/auxiliary-models');
       setTasks(data.tasks || []);
       setAuxiliary(data.auxiliary || {});
     } catch (err: any) {
@@ -11815,7 +13211,7 @@ function AuxiliaryModelsPanel({ profile, groups }: { profile: string; groups: Mo
     }
   }
 
-  useEffect(() => { void load(); }, [profile]);
+  useEffect(() => { void load(); }, []);
 
   function openEditor(task: AuxiliaryModelTask) {
     const current = auxiliary[task.key] || {};
@@ -11835,7 +13231,7 @@ function AuxiliaryModelsPanel({ profile, groups }: { profile: string; groups: Mo
     setSaving(true);
     setError('');
     try {
-      const data = await requestJson<{ auxiliary: AuxiliaryModelsConfig }>(`/api/hermes/config/auxiliary-models?profile=${encodeURIComponent(profile)}`, {
+      const data = await requestJson<{ auxiliary: AuxiliaryModelsConfig }>('/api/auxiliary-models', {
         method: 'PUT',
         body: JSON.stringify({ auxiliary: { [task.key]: settings } }),
       });
@@ -11881,13 +13277,13 @@ function AuxiliaryModelsPanel({ profile, groups }: { profile: string; groups: Mo
   const editingGroup = groups.find((group) => group.provider === editing?.settings.provider);
   return (
     <section className="model-routing-panel">
-      <div className="model-routing-head"><div><h3>辅助模型</h3><p>为压缩、视觉、审批、MCP 和后台维护等任务单独指定模型。</p></div><button className="secondary-btn" onClick={() => void load()} disabled={loading}>{loading ? '刷新中' : '刷新'}</button></div>
+      <div className="model-routing-head"><div><h3>Frakio 系统辅助模型</h3><p>为视觉、压缩、审批、MCP 和后台维护指定一套全局模型，所有 Agent 共用。</p></div><button className="secondary-btn" onClick={() => void load()} disabled={loading}>{loading ? '刷新中' : '刷新'}</button></div>
       {error && <div className="form-error">{error}</div>}
       <div className="model-routing-table auxiliary-routing-table">
         <div className="model-routing-row head"><span>任务</span><span>Provider / 默认模型</span><span>超时</span><span>操作</span></div>
         {tasks.map((task) => <div className="model-routing-row" key={task.key}><strong>{task.label}</strong><span className="mono-cell">{configLabel(auxiliary[task.key])}</span><span className="mono-cell">{timeoutLabel(task, auxiliary[task.key])}</span><span className="row-actions"><button onClick={() => openEditor(task)}>编辑</button><button disabled={saving} onClick={() => void persist(task, { provider: 'auto', timeout: task.default_timeout, ...(task.key === 'vision' ? { download_timeout: task.default_download_timeout } : {}) })}>清除</button></span></div>)}
       </div>
-      {editing && <div className="modal-backdrop" onClick={() => !saving && setEditing(null)}><div className="modal model-routing-modal" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><h2>{editing.task.label}</h2><p>正在编辑 Profile：{profile}</p></div><button className="icon-btn" onClick={() => setEditing(null)}><X size={18} /></button></div><div className="routing-form-grid">
+      {editing && <div className="modal-backdrop" onClick={() => !saving && setEditing(null)}><div className="modal model-routing-modal" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><h2>{editing.task.label}</h2><p>Frakio 全局系统辅助模型，所有 Agent 共用。</p></div><button className="icon-btn" onClick={() => setEditing(null)}><X size={18} /></button></div><div className="routing-form-grid">
         <label>Provider<select value={editing.settings.provider || 'auto'} onChange={(event) => setEditing((current) => current ? { ...current, settings: { ...current.settings, provider: event.target.value, model: '' } } : current)}><option value="auto">自动</option><option value="main">主模型</option>{groups.map((group) => <option value={group.provider} key={group.provider}>{group.label}</option>)}</select></label>
         <label>模型{['auto', 'main'].includes(editing.settings.provider || 'auto')
           ? <span className="auxiliary-model-inherited">{editing.settings.provider === 'main' ? '直接使用当前 Agent 的主模型，无需另选模型。' : '由 Hermes 自动选择当前任务的模型，无需另选模型。'}</span>
@@ -11900,6 +13296,58 @@ function AuxiliaryModelsPanel({ profile, groups }: { profile: string; groups: Mo
   );
 }
 
+function MemoryReviewModelSettings({ models, compact = false, onOpenModels }: { models: ModelProfile[]; compact?: boolean; onOpenModels?: () => void }) {
+  const [config, setConfig] = useState<MemoryReviewConfig>({ enabled: true, provider: 'auto', model: '', timeout: 60, extraBody: {} });
+  const [extraBody, setExtraBody] = useState('');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  const options = models.flatMap((model) => modelNamesForProvider(model).map((modelName) => ({ value: `${model.id}::${modelName}`, label: `${model.name} / ${modelName}` })));
+  const load = useCallback(async () => {
+    try {
+      const data = await requestJson<{ config: MemoryReviewConfig }>('/api/memory/config');
+      setConfig(data.config);
+      setExtraBody(Object.keys(data.config.extraBody || {}).length ? JSON.stringify(data.config.extraBody, null, 2) : '');
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '记忆整理配置读取失败。');
+    }
+  }, []);
+  useEffect(() => { void load(); }, [load]);
+  const save = async () => {
+    let parsed: Record<string, unknown> = {};
+    if (extraBody.trim()) {
+      try {
+        parsed = JSON.parse(extraBody);
+        if (!parsed || Array.isArray(parsed) || typeof parsed !== 'object') throw new Error();
+      } catch {
+        setError('高级请求参数必须是 JSON 对象。');
+        return;
+      }
+    }
+    setSaving(true);
+    try {
+      const data = await requestJson<{ config: MemoryReviewConfig }>('/api/memory/config', { method: 'PUT', body: JSON.stringify({ ...config, provider: config.model ? 'configured' : 'auto', extraBody: parsed }) });
+      setConfig(data.config);
+      setError('');
+    } catch (err) {
+      setError(err instanceof Error ? err.message : '记忆整理配置保存失败。');
+    } finally {
+      setSaving(false);
+    }
+  };
+  return <section className={`model-routing-panel memory-review-model-panel ${compact ? 'memory-review-model-compact' : ''}`}>
+    <div className="model-routing-head"><div><h3>{compact ? '记忆整理模型' : '全局记忆整理模型'}</h3><p>{compact ? '在这里快速选择整理模型。高级请求参数与超时在模型中心管理。' : 'Frakio 全局任务。对话完整结束后异步识别跨内核记忆，不跟随 Profile 切换。'}</p></div><SettingsStatusValue state={config.enabled ? '已开启' : '已关闭'} tone={config.enabled ? 'ready' : 'warning'} /></div>
+    <SettingsPanel ariaLabel="全局记忆整理模型">
+      <SettingsRow title="自动整理" description="关闭后仍可在历史对话中手动执行整理。"><input type="checkbox" checked={config.enabled} onChange={(event) => setConfig((current) => ({ ...current, enabled: event.target.checked }))} /></SettingsRow>
+      <SettingsRow title="模型" description="自动会使用 Frakio 的全局默认 Agent 模型。"><select value={config.model} onChange={(event) => setConfig((current) => ({ ...current, model: event.target.value }))}><option value="">自动使用全局默认模型</option>{options.map((option) => <option value={option.value} key={option.value}>{option.label}</option>)}</select></SettingsRow>
+      {!compact && <SettingsRow title="超时" description="整理失败会后台重试三次，不影响对话和 Work 完成。"><input type="number" min="5" max="300" value={config.timeout} onChange={(event) => setConfig((current) => ({ ...current, timeout: Number(event.target.value) }))} /></SettingsRow>}
+      {!compact && <SettingsRow title="高级请求参数" description="仅传给已选择的模型，不会自动回退到其他外部模型。"><textarea rows={4} value={extraBody} placeholder="可选 JSON" onChange={(event) => setExtraBody(event.target.value)} /></SettingsRow>}
+      <div className="modal-actions"><button className="send-btn" disabled={saving} onClick={() => void save()}>{saving ? '保存中' : compact ? '保存记忆设置' : '保存全局设置'}</button>{compact && onOpenModels && <button className="secondary-btn" onClick={onOpenModels}>前往模型中心</button>}</div>
+    </SettingsPanel>
+    {error && <div className="form-error">{error}</div>}
+  </section>;
+}
+
 function ModelConfigPage({ models, profiles, defaultProfile, modelError, saveModel, deleteModel, fetchAvailableModels, onCapabilityChanged }: { models: ModelProfile[]; profiles: HermesProfile[]; defaultProfile: string; modelError: string; saveModel: SaveModel; deleteModel: (modelId: string) => Promise<boolean>; fetchAvailableModels: FetchAvailableModels; onCapabilityChanged: (modelId: string, modelName: string, capability: ModelCapability) => void }) {
   return (
     <section className="settings-page">
@@ -11910,14 +13358,12 @@ function ModelConfigPage({ models, profiles, defaultProfile, modelError, saveMod
 
 function ModelCenter({ models, profiles, defaultProfile, modelError, saveModel, deleteModel, fetchAvailableModels, onCapabilityChanged }: { models: ModelProfile[]; profiles: HermesProfile[]; defaultProfile: string; modelError: string; saveModel: SaveModel; deleteModel: (modelId: string) => Promise<boolean>; fetchAvailableModels: FetchAvailableModels; onCapabilityChanged: (modelId: string, modelName: string, capability: ModelCapability) => void }) {
   const [activeTab, setActiveTab] = useState<'general' | 'accounts' | 'auxiliary'>('general');
-  const [profile, setProfile] = useState(defaultProfile || profiles[0]?.name || 'default');
   const [editingModel, setEditingModel] = useState<ModelProfile | null>(null);
   const [modalOpen, setModalOpen] = useState(false);
   const [runtimeCatalogs, setRuntimeCatalogs] = useState<Record<string, RuntimeModelCatalog>>({});
   const [oauthAccounts, setOauthAccounts] = useState<OAuthAccount[]>([]);
   const [oauthAccountsApiError, setOauthAccountsApiError] = useState('');
   const slotGroups = useModelSlotGroups(models);
-  useEffect(() => { if (!profiles.some((item) => item.name === profile)) setProfile(defaultProfile || profiles[0]?.name || 'default'); }, [profiles.map((item) => item.name).join(','), defaultProfile]);
   useEffect(() => {
     let cancelled = false;
     void Promise.all(['hermes', 'pi'].map(async (runtimeId) => {
@@ -11968,13 +13414,12 @@ function ModelCenter({ models, profiles, defaultProfile, modelError, saveModel, 
       <div className="model-center-head settings-head">
         <div><h2>Frakio Work 模型中心</h2></div>
         <div className="top-actions">
-          {activeTab === 'auxiliary' && <label className="model-profile-select">Profile<select value={profile} onChange={(event) => setProfile(event.target.value)}>{profileOptions(profiles).map((item) => <option value={item.name} key={item.name}>{String((item as HermesProfile).displayName || item.name)}</option>)}</select></label>}
           {activeTab === 'general' && <button className="secondary-btn" onClick={() => { setEditingModel(null); setModalOpen(true); }}><Plus size={16} />添加模型</button>}
         </div>
       </div>
       <div className="module-matrix-tabs model-center-tabs"><button className={activeTab === 'general' ? 'selected' : ''} onClick={() => setActiveTab('general')}>模型配置</button><button className={activeTab === 'accounts' ? 'selected' : ''} onClick={() => setActiveTab('accounts')}>授权账户</button><button className={activeTab === 'auxiliary' ? 'selected' : ''} onClick={() => setActiveTab('auxiliary')}>辅助模型</button></div>
       {modelError && <div className="form-error">{modelError}</div>}
-      {activeTab === 'auxiliary' ? <AuxiliaryModelsPanel profile={profile} groups={slotGroups} /> : activeTab === 'accounts' ? <><p className="settings-description">全局授权账户。任意 Agent 的模型配置绑定后，Hermes 与 Pi 都能使用同一账户。</p>{oauthAccountsApiError ? <div className="form-error">{oauthAccountsApiError}</div> : <OAuthAccountsPanel accounts={oauthAccounts} onChanged={refreshAccounts} />}</> : <div className="model-grid">
+      {activeTab === 'auxiliary' ? <><MemoryReviewModelSettings models={models} /><AuxiliaryModelsPanel groups={slotGroups} /></> : activeTab === 'accounts' ? <><p className="settings-description">全局授权账户。任意 Agent 的模型配置绑定后，Hermes 与 Pi 都能使用同一账户。</p>{oauthAccountsApiError ? <div className="form-error">{oauthAccountsApiError}</div> : <OAuthAccountsPanel accounts={oauthAccounts} onChanged={refreshAccounts} />}</> : <div className="model-grid">
         {models.map((model) => {
           const runtimeCompatibility = ['hermes', 'pi'].map((runtimeId) => ({
             runtimeId,
@@ -12661,7 +14106,8 @@ function modelAuthorizationLabel(model: ModelProfile) {
   const oauthLabels: Record<string, string> = {
     'openai-codex': '已授权 ChatGPT / Codex 账号',
     'claude-oauth': '已授权 Claude Pro / Max',
-    'google-gemini-cli': '已授权 Gemini CLI / Code Assist',
+    'google-gemini-oauth': '已授权 Google Gemini OAuth',
+    'google-gemini-cli': '已授权 Google Gemini OAuth',
   };
   if (oauthLabels[model.providerKey || '']) return model.oauthAccountBindingRequired ? '需要选择授权账户' : model.hasApiKey ? oauthLabels[model.providerKey || ''] : '未授权';
   return model.hasApiKey ? '已配置 Key' : '未配置 Key';
@@ -12791,7 +14237,7 @@ function AgentRuntimePolicyPanel({ agent, onUpdateAgent }: { agent: Agent; onUpd
           <label><input type="checkbox" checked={enabled} disabled={saving || isDefault || lockedHermes || (!available && !enabled)} onChange={(event) => {
             const allowedRuntimeIds = event.target.checked ? Array.from(new Set([...policy.allowedRuntimeIds, runtime.id])) : policy.allowedRuntimeIds.filter((runtimeId) => runtimeId !== runtime.id);
             void save({ ...policy, allowedRuntimeIds });
-          }} /><span><strong><RuntimeLabel runtimeId={runtime.id} /></strong><small>{available ? `${current.installation?.version || '已就绪'}${runtime.kind === 'core' ? ' · 使用 Frakio Model Center' : ' · 模型由原生 CLI / CC Switch 管理'}` : current.installation?.status === 'checking' ? '正在检测' : current.installation?.detail || '请前往 Runtime Center 修复'}</small></span></label>
+          }} /><span><strong><RuntimeLabel runtimeId={runtime.id} /></strong><small>{available ? `${current.installation?.version || '已就绪'} · 使用 Frakio Model Center` : current.installation?.status === 'checking' ? '正在检测' : current.installation?.detail || '请前往 Runtime Center 修复'}</small></span></label>
         </div>;
       })}
     </div>
@@ -13482,6 +14928,25 @@ function MessageAttachments({ attachments }: { attachments: Attachment[] }) {
           <span><strong>{attachment.name}</strong><small>{attachmentKindLabel(attachment.kind)} · {formatFileSize(attachment.size)}</small></span>
         </a>
       ))}
+    </div>
+  );
+}
+
+function WorkMessageArtifacts({ artifacts, workspaceId }: { artifacts: WorkMessageArtifact[]; workspaceId: string }) {
+  return (
+    <div className="message-attachments work-message-artifacts">
+      {artifacts.map((artifact) => {
+        const preview = `/api/rich-preview?${new URLSearchParams({ workspaceId, path: artifact.path }).toString()}`;
+        return (
+          <div className="work-message-artifact" key={artifact.id} title={artifact.path}>
+            <a className="message-attachment-file" href={preview} target="_blank" rel="noreferrer">
+              <FileText size={20} />
+              <span><strong>{artifact.name}</strong><small>{artifact.relativePath || artifact.path}</small></span>
+            </a>
+            {window.frakioDesktop?.showItemInFolder && <button type="button" className="work-message-artifact-finder" onClick={() => void window.frakioDesktop?.showItemInFolder?.(artifact.path)} aria-label={`在 Finder 中显示 ${artifact.name}`} title="在 Finder 中显示"><FolderOpen size={16} /></button>}
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -14247,6 +15712,18 @@ function ComposerRunButton({
   );
 }
 
+function ContextCompactionRecord({ record }: { record: RunUiState['compactionRecords'][number] }) {
+  if (record.status === 'running') {
+    return <div className="context-compaction-record is-running" role="status" aria-live="polite"><LoaderCircle className="context-compaction-spinner" size={14} aria-hidden="true" /><span>正在压缩上下文…</span></div>;
+  }
+  if (record.status === 'failed') {
+    return <div className="context-compaction-record is-failed" role="status"><TriangleAlert size={14} aria-hidden="true" /><span>上下文压缩失败：{record.error || '请稍后重试。'}{record.originalContextPreserved !== false && ' 原始上下文未删除。'}</span></div>;
+  }
+  const before = record.tokensBefore ? `${Math.round(record.tokensBefore / 1000)}K` : '—';
+  const after = record.tokensAfterEstimate ? `${Math.round(record.tokensAfterEstimate / 1000)}K` : '—';
+  return <div className="context-compaction-record is-completed" role="separator"><Check size={14} aria-hidden="true" /><span>已压缩上下文 · {before} → {after} tokens</span></div>;
+}
+
 function ChatRunStatus({
   target,
   startedAt,
@@ -14549,13 +16026,12 @@ function AgentEditorModal({ title, models, agent, onClose, onSave }: { title: st
 
 function AgentFields({ draft, setDraft, models }: { draft: Agent; setDraft: (agent: Agent) => void; models: ModelProfile[] }) {
   const modelChoices = models.flatMap((model) => modelNamesForProvider(model).map((modelName) => ({ value: modelChoiceValue(model, modelName), label: `${model.name} · ${modelName}` })));
-  const policy = draft.runtimePolicy || { defaultRuntimeId: draft.profileName ? 'hermes' : 'pi', allowedRuntimeIds: draft.profileName ? ['hermes', 'pi'] : ['pi'], permissionProfileId: 'default' };
+  const policy = draft.runtimePolicy || { defaultRuntimeId: 'hermes', allowedRuntimeIds: ['hermes'], permissionProfileId: 'default' };
   const runtimeOptions = [
     { id: 'hermes', name: 'Hermes Agent', description: '使用 Frakio Model Center' },
     { id: 'pi', name: 'Pi', description: '使用 Frakio Model Center' },
-    { id: 'codex', name: 'Codex', description: '由原生 CLI 管理模型' },
-    { id: 'claude', name: 'Claude Code', description: '由原生 CLI 管理模型' },
-    { id: 'gemini', name: 'Gemini CLI', description: '由原生 CLI 管理模型' },
+    { id: 'codex', name: 'Codex', description: '使用 Frakio Model Center' },
+    { id: 'claude', name: 'Claude Code', description: '使用 Frakio Model Center' },
   ];
   const setRuntimePolicy = (next: AgentRuntimePolicy) => setDraft({ ...draft, runtimePolicy: next });
   return (
@@ -14633,8 +16109,8 @@ function isVisibleChatMessage(message: ChatEvent) {
   return true;
 }
 
-function slugText(value: string) {
-  return value.toLowerCase().replace(/[^a-z0-9\u4e00-\u9fa5_-]+/g, '-').replace(/^-+|-+$/g, '') || 'new-project';
+function workspaceDirectoryPreview(value: string) {
+  return value.trim();
 }
 
 function normalizeSpaceThemePalette(theme?: Partial<SpaceThemePalette>, fallback: SpaceThemePalette = defaultProductSpaceTheme): SpaceThemePalette {
@@ -15393,6 +16869,8 @@ function ResizeHandle({
   disabled,
   onResize,
   onCommit,
+  onDragStart,
+  onDragEnd,
 }: {
   side: 'left' | 'right';
   currentWidth: number;
@@ -15402,11 +16880,15 @@ function ResizeHandle({
   disabled?: boolean;
   onResize: (width: number) => void;
   onCommit: (width: number) => void;
+  onDragStart?: () => void;
+  onDragEnd?: (width: number) => void;
 }) {
   const latestWidthRef = useRef(currentWidth);
+  const latestBoundsRef = useRef({ minWidth, maxWidth });
   const keyboardWidthRef = useRef<number | null>(null);
   const dragCleanupRef = useRef<(() => void) | null>(null);
   const effectiveMaxWidth = Math.max(minWidth, maxWidth);
+  latestBoundsRef.current = { minWidth, maxWidth: effectiveMaxWidth };
 
   useEffect(() => () => {
     dragCleanupRef.current?.();
@@ -15421,6 +16903,7 @@ function ResizeHandle({
     const target = event.currentTarget;
     const startWidth = clampNumber(currentWidth, minWidth, effectiveMaxWidth);
     latestWidthRef.current = startWidth;
+    onDragStart?.();
     document.body.classList.add('resizing-columns');
     target.classList.add('is-resizing');
     try {
@@ -15428,13 +16911,23 @@ function ResizeHandle({
     } catch {
       // Pointer capture is best-effort; window listeners still keep the drag stable.
     }
-    const onMove = (moveEvent: PointerEvent) => {
-      const nextWidth = paneWidthFromPointer({ side, startWidth, startX, currentX: moveEvent.clientX, minWidth, maxWidth: effectiveMaxWidth });
+    const applyPointerPosition = (clientX: number) => {
+      const bounds = latestBoundsRef.current;
+      const nextWidth = paneWidthFromPointer({ side, startWidth, startX, currentX: clientX, minWidth: bounds.minWidth, maxWidth: bounds.maxWidth });
       latestWidthRef.current = nextWidth;
       onResize(nextWidth);
     };
+    const moveScheduler = createLatestFrameScheduler({
+      requestFrame: window.requestAnimationFrame.bind(window),
+      cancelFrame: window.cancelAnimationFrame.bind(window),
+      apply: applyPointerPosition,
+    });
+    const onMove = (moveEvent: PointerEvent) => {
+      moveScheduler.schedule(moveEvent.clientX);
+    };
     let finished = false;
     const cleanup = () => {
+      moveScheduler.cancel();
       document.body.classList.remove('resizing-columns');
       target.classList.remove('is-resizing');
       window.removeEventListener('pointermove', onMove);
@@ -15451,8 +16944,10 @@ function ResizeHandle({
     const finish = () => {
       if (finished) return;
       finished = true;
+      moveScheduler.flush();
       cleanup();
       onCommit(latestWidthRef.current);
+      onDragEnd?.(latestWidthRef.current);
     };
     dragCleanupRef.current?.();
     dragCleanupRef.current = cleanup;
@@ -15463,7 +16958,7 @@ function ResizeHandle({
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLDivElement>) {
-    if (disabled || (event.key !== 'ArrowLeft' && event.key !== 'ArrowRight')) return;
+    if (disabled || !['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
     event.preventDefault();
     const nextWidth = paneWidthFromKey({
       side,
@@ -15498,7 +16993,7 @@ function ResizeHandle({
       onPointerDown={startDrag}
       onKeyDown={handleKeyDown}
       onKeyUp={(event) => {
-        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') commitKeyboardWidth();
+        if (['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) commitKeyboardWidth();
       }}
       onBlur={commitKeyboardWidth}
     />

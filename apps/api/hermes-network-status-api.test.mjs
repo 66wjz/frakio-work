@@ -101,6 +101,16 @@ test('network status exposes capability readiness without credentials or local p
     { action: 'network_status', profile: 'iris' },
   );
 
+  const cached = await fetch(`${baseUrl}/api/hermes/network-status?profile=iris`, { headers: { cookie } });
+  const cachedPayload = await cached.json();
+  assert.equal(cached.status, 200, JSON.stringify(cachedPayload));
+  assert.equal(cachedPayload.verificationState, 'verified');
+  assert.equal(bridge.requests.filter((request) => request.action === 'network_status').length, 1);
+
+  const refreshed = await fetch(`${baseUrl}/api/hermes/network-status/refresh?profile=iris`, { method: 'POST', headers: { cookie, 'x-frakio-request': '1' } });
+  assert.equal(refreshed.status, 200);
+  assert.equal(bridge.requests.filter((request) => request.action === 'network_status').length, 2);
+
   const missing = await fetch(`${baseUrl}/api/hermes/network-status?profile=missing`, {
     headers: { cookie },
   });

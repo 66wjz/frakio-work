@@ -4,7 +4,7 @@ export type ApiError = {
   details?: Record<string, unknown>;
 };
 
-export type RuntimeId = 'hermes' | 'pi' | 'codex' | 'claude' | 'gemini' | (string & {});
+export type RuntimeId = 'hermes' | 'pi' | 'codex' | 'claude' | (string & {});
 
 export type RuntimeCapability = {
   streaming: boolean;
@@ -16,16 +16,43 @@ export type RuntimeCapability = {
   customModels: boolean;
   managedCredentials: boolean;
   workTasks: boolean;
+  contextUsage?: boolean;
+  compaction?: boolean;
+};
+
+export type RuntimeControlCapability = 'native' | 'host' | 'unsupported' | 'unobservable';
+
+export type RuntimeAdapterCapabilities = {
+  contextUsage: RuntimeControlCapability;
+  compaction: RuntimeControlCapability;
+  recovery: RuntimeControlCapability;
+  cancellation: RuntimeControlCapability;
+  permissions: RuntimeControlCapability;
+};
+
+export type RuntimeCapabilitySupport = 'supported' | 'partial' | 'unsupported' | 'unknown';
+
+export type RuntimeCapabilitySnapshot = {
+  runtimeId: RuntimeId;
+  capabilities: Record<keyof RuntimeCapability | string, RuntimeCapabilitySupport>;
+  source: 'probe' | 'runtime_receipt' | 'static_fallback';
+  evidence: Record<string, unknown>;
+  runtimeVersion: string;
+  runtimeBuildId?: string;
+  runtimeSource?: RuntimeBinding['source'] | '';
+  authFingerprint: string;
+  checkedAt: string;
+  expiresAt: string;
 };
 
 export type RuntimeInstallation = {
   runtimeId: RuntimeId;
   kind: 'core' | 'channel';
-  status: 'ready' | 'missing' | 'needs_login' | 'incompatible' | 'disabled' | 'error';
+  status: 'ready' | 'missing' | 'discoverable' | 'broken' | 'incompatible' | 'disabled' | 'error';
   installed: boolean;
   version: string;
   command?: string;
-  authMode?: 'frakio-managed' | 'native' | 'none';
+  authMode?: 'frakio-managed' | 'none';
   detail?: string;
   checkedAt: string;
 };
@@ -38,6 +65,7 @@ export type RuntimeDefinition = {
   enabled: boolean;
   capabilities: RuntimeCapability;
   installation?: RuntimeInstallation;
+  activeBinding?: RuntimeBinding | null;
 };
 
 export type AgentRuntimePolicy = {
@@ -65,17 +93,110 @@ export type RuntimeModelCatalogEntry = {
 
 export type RuntimeModelCatalog = {
   runtimeId: RuntimeId;
-  source: 'frakio-model-center' | 'native-account';
+  source: 'frakio-model-center';
   models: RuntimeModelCatalogEntry[];
   usableModelCount?: number;
 };
 
 export type RuntimeFeatureFlags = {
+  runtimePlatformV2: boolean;
+  runtimeSessionLanes: boolean;
+  runtimeContextDelta: boolean;
+  runtimeSkillProjection: boolean;
+  runtimePermissionBroker: boolean;
   runtimeRouterV1: boolean;
   piRuntime: boolean;
   runtimeNeutralWork: boolean;
   memoryLedger: boolean;
   externalCliChannels: boolean;
+  runtimePackageManager?: boolean;
+  runtimeVersionBindings?: boolean;
+  managedPiRuntime?: boolean;
+  piBridgePool?: boolean;
+  piVersionHandoff?: boolean;
+};
+
+export type RuntimeBinding = {
+  runtimeId: RuntimeId;
+  runtimeVersion: string;
+  runtimeBuildId: string;
+  source: 'bundled' | 'managed' | 'override' | 'native';
+  runtimeDir: string;
+  executablePath: string;
+  packageRoot: string;
+  fingerprint: string;
+  platform: string;
+  arch: string;
+  artifactDigest?: string;
+  adapterProtocolVersion: number;
+  activationRevision: string;
+  verificationState: 'verified' | 'incompatible' | 'failed' | 'unverified';
+  availability: 'unavailable' | 'discoverable' | 'ready' | 'broken';
+  lastVerifiedAt: string | null;
+};
+
+export type RuntimeDiscoveryCandidate = {
+  runtimeId: RuntimeId;
+  path: string;
+  realPath: string;
+  packageRoot: string;
+  version: string;
+  platform: string;
+  arch: string;
+  fingerprint: string;
+  compatibility: 'compatible' | 'incompatible';
+  detail: string;
+};
+
+export type RuntimeModelRoute = {
+  runtimeId: RuntimeId;
+  providerId: string;
+  providerName?: string;
+  modelProfileId?: string;
+  modelId: string;
+  apiMode: 'anthropic_messages' | 'codex_responses' | 'openai_responses' | 'chat_completions' | 'bedrock_converse' | string;
+  protocol?: 'anthropic-messages' | 'openai-responses' | 'openai-chat';
+  compatibility: 'direct' | 'bridge' | 'unsupported';
+  credentialRevision: string;
+  providerCredentialRevision?: string;
+  routeRevision: string;
+  baseUrl?: string;
+  endpoint: string;
+  targetUrl?: string;
+  authType?: 'api_key' | 'oauth' | 'none';
+  contextWindow?: number;
+  maxOutputTokens?: number;
+  reason: string;
+};
+
+export type RuntimeExecutionRealm = {
+  id: string;
+  revision: string;
+  runtimeId: RuntimeId;
+  runtimeBuildId: string;
+  providerId: string;
+  providerCredentialRevision: string;
+  agentId: string;
+  skillSetRevision: string;
+  runtimeConfigRevision: string;
+};
+
+export type RuntimePackage = Omit<RuntimeBinding, 'activationRevision'> & {
+  installationState: 'available' | 'installing' | 'installed' | 'failed';
+  verificationReceipt: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  installedAt: string;
+  verifiedAt: string | null;
+  lastUsedAt: string | null;
+  updatedAt: string;
+};
+
+export type RuntimeActivation = {
+  runtimeId: RuntimeId;
+  activeBuildId: string;
+  previousBuildId: string;
+  activationRevision: string;
+  updatedAt: string;
 };
 
 export type AgentProfileSnapshot = {
@@ -93,36 +214,117 @@ export type AgentProfileSnapshot = {
 export type RuntimeSession = {
   id: string;
   runtimeId: RuntimeId;
+  runtimeVersion: string;
+  runtimeBuildId: string;
+  activationRevision: string;
   threadId: string;
   agentId: string;
   workspaceId: string;
   nativeSessionId: string;
+  executionRealmRevision: string;
+  modelRouteRevision: string;
   profileRevision: string;
+  laneType: 'chat' | 'work_task';
+  laneId: string;
+  worktreeId: string;
+  lifecycleState: 'opening' | 'active' | 'parked' | 'restoring' | 'recovering' | 'stale' | 'closed' | 'failed';
+  contextWatermark: string;
+  skillSetRevision: string;
+  permissionPolicyRevision: string;
+  capabilitySnapshot: RuntimeCapabilitySnapshot | Record<string, unknown>;
+  resumeStrategy: 'native_resumed' | 'handoff_resumed' | 'new_session' | 'unsupported' | 'failed' | '';
+  checkpoint: Record<string, unknown>;
+  lastError: string;
+  /** @deprecated Use lifecycleState. */
   status: 'active' | 'idle' | 'closed' | 'failed';
   metadata: Record<string, unknown>;
   createdAt: string;
   updatedAt: string;
 };
 
-export type RuntimeRunStatus = 'starting' | 'running' | 'waiting_approval' | 'completed' | 'failed' | 'cancelled';
+export type RuntimeRunStatus =
+  | 'queued'
+  | 'running'
+  | 'interrupting'
+  | 'completed'
+  | 'failed'
+  | 'cancelled'
+  /** @deprecated Compatibility with Runtime v2 records written before Host Run Controller. */
+  | 'starting'
+  /** @deprecated Approval is represented by phase=approval. */
+  | 'waiting_approval';
+
+export type RuntimeRunPhase = 'opening' | 'model' | 'tool' | 'compaction' | 'approval';
 
 export type RuntimeRun = {
   id: string;
   sessionId: string;
   runtimeId: RuntimeId;
+  runtimeVersion: string;
+  runtimeBuildId: string;
+  activationRevision: string;
   threadId: string;
   agentId: string;
   turnId: string;
+  nativeRunId: string;
+  nativeTurnId: string;
+  lastNativeEventSequence: number;
+  executionRealmRevision: string;
+  modelRouteRevision: string;
   profileRevision: string;
   modelId: string;
   status: RuntimeRunStatus;
+  phase: RuntimeRunPhase;
+  stopRequestedAt?: string | null;
   error: string;
+  contextWatermarkFrom: string;
+  contextWatermarkTo: string;
+  skillSetRevision: string;
+  permissionPolicyRevision: string;
+  permissionCoverage: PermissionCoverage;
+  receipt: RunReceipt | Record<string, unknown>;
   startedAt: string;
   completedAt?: string | null;
 };
 
+export type RuntimeLaunchSpec = {
+  runId: string;
+  sessionId: string;
+  runtimeId: RuntimeId;
+  runtimeBinding: RuntimeBinding | null;
+  executionRealm: RuntimeExecutionRealm;
+  modelRoute: RuntimeModelRoute;
+  cwd: string;
+  prompt: string;
+  permissionMode: string;
+};
+
+export type CanonicalRuntimeEventEnvelope = {
+  runId: string;
+  nativeEventKey: string;
+  nativeSequence: number;
+  event: { type: RuntimeEventType; payload: Record<string, unknown> };
+};
+
 export type RuntimeEventType =
+  | 'run.accepted'
   | 'run.started'
+  | 'session.opening'
+  | 'session.parked'
+  | 'session.resume_started'
+  | 'session.resumed'
+  | 'session.resume_failed'
+  | 'context.delta_applied'
+  | 'context.usage.updated'
+  | 'context.compaction.started'
+  | 'context.compaction.completed'
+  | 'context.compaction.failed'
+  | 'session.checkpoint.created'
+  | 'session.recovered'
+  | 'skill.application_started'
+  | 'skill.applied'
+  | 'skill.apply_failed'
+  | 'permission.coverage_changed'
   | 'message.delta'
   | 'reasoning.summary'
   | 'tool.started'
@@ -131,6 +333,7 @@ export type RuntimeEventType =
   | 'approval.requested'
   | 'approval.resolved'
   | 'artifact.published'
+  | 'run.interrupting'
   | 'run.completed'
   | 'run.failed'
   | 'run.cancelled';
@@ -141,9 +344,136 @@ export type RuntimeEvent = {
   runId: string;
   sessionId: string;
   runtimeId: RuntimeId;
+  runtimeVersion: string;
+  runtimeBuildId: string;
+  nativeEventKey?: string;
   type: RuntimeEventType;
   payload: Record<string, unknown>;
   createdAt: string;
+};
+
+export type ContextCompactionTrigger = 'threshold' | 'model_switch' | 'runtime_switch' | 'overflow' | 'manual';
+
+export type ContextCheckpoint = {
+  id: string;
+  threadId: string;
+  throughCursor: number;
+  retainedFromCursor: number;
+  summary: string;
+  sourceRuntimeId: RuntimeId;
+  sourceModelId: string;
+  trigger: ContextCompactionTrigger;
+  tokensBefore?: number;
+  tokensAfterEstimate?: number;
+  version: 1;
+  createdAt: string;
+};
+
+export type RuntimeLane = {
+  type: 'chat' | 'work_task';
+  id: string;
+  worktreeId: string;
+};
+
+export type ContextDelta = {
+  fromWatermark: string;
+  toWatermark: string;
+  changed: boolean;
+  hash: string;
+  sourceIds: string[];
+  packet: Record<string, unknown>;
+};
+
+export type SkillScope = 'agent' | 'workspace' | 'team';
+export type SkillApplicationStatus = 'available' | 'projecting' | 'applied' | 'pending_restart' | 'incompatible' | 'failed';
+
+export type SkillManifest = {
+  id: string;
+  name: string;
+  version: string;
+  contentHash: string;
+  scope: SkillScope;
+  subjectId: string;
+  sourceAgentId: string;
+  compatibleRuntimeIds: RuntimeId[];
+  dependencies: string[];
+  permissionIntents: string[];
+  entryPath: string;
+  createdAt: string;
+};
+
+export type SkillApplicationReceipt = {
+  id: string;
+  skillId: string;
+  skillVersion: string;
+  runtimeId: RuntimeId;
+  agentId: string;
+  sessionId: string;
+  status: SkillApplicationStatus;
+  loadMethod: string;
+  error: string;
+  appliedAt: string | null;
+  updatedAt: string;
+};
+
+export type PermissionModeInternal = 'ask_all' | 'risk_based' | 'full_access';
+export type PermissionCoverage = 'host_enforced' | 'native_enforced' | 'partial' | 'unobservable' | '';
+
+export type ToolIntent = {
+  id: string;
+  agentId: string;
+  runtimeId: RuntimeId;
+  runId: string;
+  action: string;
+  category: 'read' | 'write' | 'command' | 'network' | 'publish' | 'delete' | 'payment' | 'authorization' | 'other';
+  target: string;
+  workspaceRoot: string;
+  mutating: boolean;
+  networked: boolean;
+  externalPublish: boolean;
+  irreversible: boolean;
+  summary: string;
+};
+
+export type PermissionDecision = {
+  decision: 'allow' | 'ask' | 'deny';
+  reason: string;
+  source: 'hard_boundary' | 'plan_mode' | 'workspace_policy' | 'agent_policy' | 'user_grant' | 'smart_review' | 'default';
+  scope: 'once' | 'run' | 'agent_workspace';
+  coverage: PermissionCoverage;
+  expiresAt: string | null;
+  policyRevision: string;
+};
+
+export type RunReceipt = {
+  runId: string;
+  sessionId: string;
+  threadId: string;
+  agentId: string;
+  runtimeId: RuntimeId;
+  runtimeVersion: string;
+  runtimeBuildId: string;
+  runtimeSource: RuntimeBinding['source'] | '';
+  activationRevision: string;
+  versionSwitchReason: string;
+  modelId: string;
+  lane: RuntimeLane;
+  worktreePath: string;
+  profileRevision: string;
+  contextWatermarkFrom: string;
+  contextWatermarkTo: string;
+  skillSetRevision: string;
+  permissionPolicyRevision: string;
+  permissionCoverage: PermissionCoverage;
+  resumeStrategy: RuntimeSession['resumeStrategy'];
+  memoryEntryIds: string[];
+  memoryExclusions: Array<{ id: string; reason: string }>;
+  skillApplications: Array<Pick<SkillApplicationReceipt, 'skillId' | 'skillVersion' | 'status' | 'loadMethod'>>;
+  toolSummary: Record<string, number>;
+  status: RuntimeRunStatus;
+  error: string;
+  startedAt: string;
+  completedAt: string | null;
 };
 
 export type MemoryEntryStatus = 'candidate' | 'accepted' | 'superseded' | 'rejected';
@@ -181,6 +511,107 @@ export type Attachment = {
   kind: AttachmentKind;
   createdAt: string;
   contentUrl: string;
+};
+
+export type BrowserAnnotationTarget = 'element' | 'region';
+
+export type BrowserAnnotationRect = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  scrollX: number;
+  scrollY: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  devicePixelRatio: number;
+};
+
+export type BrowserAnnotation = {
+  id: string;
+  threadId: string;
+  target: BrowserAnnotationTarget;
+  url: string;
+  pageTitle: string;
+  comment: string;
+  selector?: string;
+  tagName?: string;
+  accessibleName?: string;
+  text?: string;
+  domExcerpt?: string;
+  rect: BrowserAnnotationRect;
+  evidenceAttachmentId?: string;
+  createdAt: string;
+};
+
+export type ReviewComment = {
+  id: string;
+  threadId: string;
+  changeSetId: string;
+  filePath: string;
+  side: 'old' | 'new';
+  line: number;
+  hunk?: string;
+  comment: string;
+  createdAt: string;
+};
+
+export type MessageContext = {
+  browserAnnotations: BrowserAnnotation[];
+  reviewComments: ReviewComment[];
+};
+
+export type ConversationSource = {
+  id: string;
+  kind: 'attachment' | 'link';
+  label: string;
+  detail: string;
+  url?: string;
+  attachment?: Attachment;
+  messageId: string;
+  createdAt?: string;
+};
+
+export type RunChangeFile = {
+  path: string;
+  previousPath?: string;
+  status: 'added' | 'modified' | 'deleted' | 'renamed' | 'binary';
+  additions: number;
+  deletions: number;
+  binary?: boolean;
+  patch?: string;
+  truncated?: boolean;
+};
+
+export type RunChangeSet = {
+  id: string;
+  threadId: string;
+  runId: string;
+  workspaceId: string;
+  scope: 'last-turn' | 'uncommitted';
+  status: 'running' | 'completed' | 'failed' | 'cancelled';
+  fileCount: number;
+  additions: number;
+  deletions: number;
+  files: RunChangeFile[];
+  createdAt: string;
+  completedAt?: string;
+  error?: string;
+};
+
+export type ConversationOverview = {
+  threadId: string;
+  environment: {
+    kind: 'local' | 'unbound';
+    workspaceName: string;
+    workspaceRoot: string;
+    gitBranch: string;
+    gitAvailable: boolean;
+  };
+  plan: { title: string; status: string; taskCount: number } | null;
+  sources: ConversationSource[];
+  artifacts: Array<{ id: string; name: string; kind: string; path?: string; updatedAt?: string }>;
+  lastChangeSet: RunChangeSet | null;
 };
 
 export type CollaborationMode = 'default' | 'plan';
@@ -379,6 +810,142 @@ export type HermesNetworkCapabilityStatus = {
     | 'chromium_missing';
 };
 
+export type AutonomyMode = 'fully_autonomous' | 'tiered' | 'all_review';
+
+export type ManagementMode = 'managed' | 'read_only';
+
+export type VaultConfig = {
+  type: 'personal' | 'project';
+  version: 2;
+  indexVersion: number;
+  managementMode: ManagementMode;
+  autonomy: AutonomyMode;
+  onboardingStatus: 'ready' | 'needs_upgrade_confirmation' | string;
+  trustedRulePaths: string[];
+  maintenanceRulePaths: string[];
+  writableRoots: string[];
+  immutableRoots: string[];
+  tagTaxonomy: string[];
+  templateId: string;
+  maintenanceModel: { profile: string; fallback: string };
+  curatorPresentation: { displayName: string; avatarAssetPath: string };
+  curatorExecution: { mode: 'auto' | 'explicit_model' | 'follow_agent'; provider: string; model: string; timeout: number; source: string };
+  curatorReferenceAgentId: string;
+  search: { engine: 'fts5' | string; confidenceThreshold: number };
+  updatedAt: string;
+};
+
+export type KnowledgeSource = {
+  id: string;
+  vaultId: string;
+  kind: 'url' | 'web' | 'file' | 'text' | 'markdown' | 'pdf' | 'conversation' | 'asset' | string;
+  title: string;
+  origin: string;
+  relativePath: string;
+  contentHash: string;
+  status: 'pending' | 'accepted' | 'rejected' | 'duplicate' | 'drifted';
+  metadata: Record<string, unknown>;
+  createdAt: string;
+  updatedAt: string;
+  acceptedAt: string | null;
+};
+
+export type KnowledgeJob = {
+  id: string;
+  vaultId: string;
+  triggerKey: string;
+  kind: 'ingest' | 'query' | 'lint' | 'maintenance' | string;
+  status: 'queued' | 'running' | 'completed' | 'failed';
+  attempts: number;
+  modelSnapshot: Record<string, unknown>;
+  input: Record<string, unknown>;
+  result: Record<string, unknown>;
+  error: string;
+  nextAttemptAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  completedAt: string | null;
+};
+
+export type KnowledgeOperationFile = {
+  operationId: string;
+  relativePath: string;
+  action: 'write' | 'delete';
+  baseHash: string;
+  beforeHash: string;
+  afterHash: string;
+  beforeContent: string | null;
+  afterContent: string | null;
+  metadata: Record<string, unknown>;
+};
+
+export type KnowledgeOperation = {
+  id: string;
+  vaultId: string;
+  jobId: string;
+  kind: 'change_set' | 'rule_change' | 'rollback' | string;
+  status: 'proposed' | 'awaiting_review' | 'published' | 'rejected' | 'conflict';
+  summary: string;
+  risk: string;
+  requiresReview: boolean;
+  actor: Record<string, unknown>;
+  metadata: Record<string, unknown>;
+  files: KnowledgeOperationFile[];
+  createdAt: string;
+  updatedAt: string;
+  publishedAt: string | null;
+  rejectedAt: string | null;
+  rolledBackAt: string | null;
+};
+
+export type KnowledgeIssue = {
+  id: string;
+  vaultId: string;
+  code: 'broken_link' | 'orphan' | 'index_missing' | 'frontmatter' | 'illegal_tag' | 'low_confidence' | 'contradiction' | 'source_drift' | 'oversized' | string;
+  severity: 'error' | 'warning' | 'info';
+  relativePath: string;
+  message: string;
+  metadata: Record<string, unknown>;
+  status: 'open' | 'resolved' | 'ignored';
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type RuleChangeProposal = {
+  summary: string;
+  changes: Array<{ relativePath: string; action?: 'write' | 'delete'; content?: string; baseHash?: string }>;
+  reason?: string;
+  actor?: Record<string, unknown>;
+};
+
+export type VaultDetail = {
+  vault: {
+    id: string;
+    name: string;
+    path: string;
+    kind: 'personal' | 'project';
+    managementMode: ManagementMode;
+    autonomy: AutonomyMode;
+    onboardingStatus: string;
+  };
+  config: VaultConfig;
+  curator?: {
+    actorId: 'frakio-knowledge-curator';
+    displayName: string;
+    avatarUrl: string;
+    runtime: 'hermes';
+    modelLabel: string;
+    modelSource: 'vault_model' | 'reference_agent' | 'global_curator' | 'default_agent';
+    referenceAgentId: string;
+    referenceAgentName: string;
+  };
+  stats: { documents: number; sources: number; pending: number; issues: number };
+  recentOperations: KnowledgeOperation[];
+  recentJobs: KnowledgeJob[];
+  sources: KnowledgeSource[];
+  issues: KnowledgeIssue[];
+};
+
 export type HermesNetworkStatus = {
   profile: string;
   onlineReadReady: boolean;
@@ -386,6 +953,8 @@ export type HermesNetworkStatus = {
   extract: HermesNetworkCapabilityStatus;
   browser: HermesNetworkCapabilityStatus;
   checkedAt: string;
+  configurationRevision?: string;
+  verificationState?: 'verified';
 };
 
 export type CollaborationWorkflowStatus = 'active' | 'paused' | 'completed' | 'cancelled' | 'archived';

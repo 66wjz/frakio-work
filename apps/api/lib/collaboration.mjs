@@ -69,6 +69,11 @@ export function normalizeWorkflow(workflow = {}, fallback = {}) {
     pausedAt: workflow.pausedAt || null,
     cancelledAt: workflow.cancelledAt || null,
     archivedAt: workflow.archivedAt || null,
+    finalization: {
+      state: ['idle', 'requested', 'delivered'].includes(workflow.finalization?.state) ? workflow.finalization.state : 'idle',
+      requestedAt: workflow.finalization?.requestedAt || null,
+      deliveryMessageId: String(workflow.finalization?.deliveryMessageId || ''),
+    },
     taskStatusProjection: workflow.taskStatusProjection && typeof workflow.taskStatusProjection === 'object' ? workflow.taskStatusProjection : {},
   };
 }
@@ -162,9 +167,9 @@ export function normalizeThreadCollaboration(collaboration = {}, fallback = {}) 
   const workflows = (Array.isArray(collaboration.workflows) ? collaboration.workflows : [])
     .map((workflow) => normalizeWorkflow(workflow, fallback))
     .filter((workflow) => workflow.id);
-  const activeWorkflowId = workflows.some((workflow) => workflow.id === collaboration.activeWorkflowId)
+  const activeWorkflowId = workflows.some((workflow) => workflow.id === collaboration.activeWorkflowId && ['active', 'paused'].includes(workflow.status))
     ? collaboration.activeWorkflowId
-    : workflows.find((workflow) => workflow.status === 'active')?.id || workflows[0]?.id || '';
+    : workflows.find((workflow) => ['active', 'paused'].includes(workflow.status))?.id || '';
   const rawEvents = Array.isArray(collaboration.events) ? collaboration.events : [];
   const events = rawEvents
     .filter((event) => event && collaborationEventTypes.has(event.type))

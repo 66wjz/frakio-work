@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "runtimeId": "pi",
+  "generatedAt": "2026-08-02T00:00:00.000Z",
+  "versions": [
+    {
+      "version": "0.83.0",
+      "integrity": "sha512-uYhF+FsZxogoSX/AxBcUdiY+ZklubwaXyAoEGA2eQwsHcyEAhUYIKh/WLXe/a8+k8eTCmxb+ZN2Zo9mzQtzbWw==",
+      "adapterProtocolVersion": 1,
+      "minimumFrakioVersion": "1.1.1",
+      "node": ">=22.19.0",
+      "verifiedAt": "2026-08-02T00:00:00.000Z"
+    }
+  ]
+}

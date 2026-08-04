@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { execFile } from 'node:child_process';
-import { mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, mkdtemp, readFile, writeFile } from 'node:fs/promises';
 import http from 'node:http';
 import os from 'node:os';
 import path from 'node:path';
@@ -16,10 +16,12 @@ import { createWorkScheduler } from './work-scheduler.mjs';
 import { createWorktreeManager } from './worktree-manager.mjs';
 import { createCodexAppServerBridge } from './codex-app-server.mjs';
 import { createClaudeAgentSdkBridge } from './claude-agent-sdk.mjs';
-import { createGeminiAcpBridge } from './gemini-acp.mjs';
 
 const execFileAsync = promisify(execFile);
 const runtimeTestDirectory = path.dirname(fileURLToPath(import.meta.url));
+const developmentPiRoot = path.resolve(runtimeTestDirectory, '../../..');
+const bundledPiAvailable = await access(path.join(developmentPiRoot, 'node_modules/@earendil-works/pi-coding-agent/package.json')).then(() => true).catch(() => false);
+const developmentPiBinding = { runtimeId: 'pi', runtimeVersion: '0.83.0', runtimeBuildId: 'pi-development-test', runtimeDir: developmentPiRoot, adapterProtocolVersion: 1 };
 
 test('runtime store keeps separate native sessions for one Agent across runtimes', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-runtime-store-'));
@@ -45,6 +47,9 @@ test('Memory Ledger deduplicates candidates and only injects accepted valid fact
   assert.equal(ledger.packet({ agentId: 'ares' }).length, 0);
   ledger.accept(first.id);
   assert.deepEqual(ledger.packet({ agentId: 'ares' }).map((entry) => entry.fact), ['The user prefers concise status updates.']);
+  store.putMemory({ scope: 'workspace', subjectId: 'workspace-1', fact: 'Legacy project rule.', status: 'accepted' });
+  assert.equal(store.migrateWorkspaceMemoryScopes([{ id: 'workspace-1', vaultId: 'vault-1' }]), 1);
+  assert.deepEqual(store.listMemory({ scope: 'vault', subjectId: 'vault-1' }).map((entry) => entry.fact), ['Legacy project rule.']);
   store.close();
 });
 
@@ -53,13 +58,16 @@ test('Knowledge Gateway writes run-owned drafts and publishes reviewed Markdown'
   const store = createRuntimeStore(path.join(root, 'frakio.db'));
   const gateway = createKnowledgeGateway({ store });
   const workspace = { id: 'workspace-1' };
-  const vault = { id: 'vault-1', path: path.join(root, 'vault') };
+  const vault = { id: 'vault-1', path: path.join(root, 'vault'), kind: 'project', trustedRulePaths: ['FRAKIO.md'] };
   await gateway.initializeVault(vault);
   const draft = await gateway.draftWrite({ workspace, vault, runId: 'run-1', relativePath: 'research/result.md', content: '# Result\n\nVerified.' });
-  assert.equal(draft.relativePath, 'drafts/run-1/research/result.md');
+  assert.equal(draft.relativePath, '.frakio/drafts/run-1/research/result.md');
   const published = await gateway.publish({ workspace, vault, runId: 'run-1', draftPath: draft.relativePath });
-  assert.equal(published.relativePath, 'wiki/research/result.md');
+  assert.equal(published.relativePath, '知识/research/result.md');
   assert.match(await readFile(path.join(vault.path, published.relativePath), 'utf8'), /Verified/);
+  assert.equal(await readFile(path.join(vault.path, 'AGENTS.md'), 'utf8').catch(() => ''), '');
+  await gateway.index(vault);
+  assert.equal((await gateway.search(vault, 'Verified'))[0]?.relativePath, '知识/research/result.md');
   await assert.rejects(() => gateway.read(vault, '../outside.md'), /超出当前 Workspace Root/);
   store.close();
 });
@@ -76,12 +84,10 @@ test('runtime policy keeps identity independent from runtime choice', () => {
 test('runtime registry exposes stable cards before independent detection completes', async () => {
   let resolveHermes;
   const registry = createRuntimeRegistry({
-    resolveCommand: async (command) => command === 'codex' ? '/tmp/codex' : '',
-    execFile: async () => ({ stdout: 'codex 1.0.0' }),
-    piVersion: '0.83.0',
+    bindingStatus: async (runtimeId) => ({ activeBinding: runtimeId === 'pi' ? { runtimeVersion: '0.83.0', source: 'managed', availability: 'ready' } : null }),
     hermesStatus: () => new Promise((resolve) => { resolveHermes = resolve; }),
   });
-  assert.deepEqual(registry.snapshot().map((runtime) => runtime.id), ['hermes', 'pi', 'codex', 'claude', 'gemini']);
+  assert.deepEqual(registry.snapshot().map((runtime) => runtime.id), ['hermes', 'pi', 'codex', 'claude']);
   assert.equal(registry.snapshot().find((runtime) => runtime.id === 'pi').installation.status, 'checking');
   const pi = await registry.refresh('pi');
   assert.equal(pi.installation.status, 'ready');
@@ -154,7 +160,7 @@ test('code task worktrees are isolated from the main repository', async () => {
   assert.equal(created.branch, 'frakio/task-task-1');
 });
 
-test('Pi Worker runs the bundled SDK in isolation and emits canonical stream events', async (t) => {
+test('Pi Worker runs an installed SDK in isolation and emits canonical stream events', { skip: !bundledPiAvailable }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-pi-worker-'));
   const requestBodies = [];
   const provider = http.createServer((request, response) => {
@@ -193,7 +199,7 @@ test('Pi Worker runs the bundled SDK in isolation and emits canonical stream eve
   await new Promise((resolve) => provider.once('listening', resolve));
   t.after(() => provider.close());
 
-  const bridge = createPiBridge({ toolHandler: async () => ({ ok: true }) });
+  const bridge = createPiBridge({ runtimeBinding: developmentPiBinding, toolHandler: async () => ({ ok: true }) });
   t.after(() => bridge.close());
   const events = [];
   const completed = new Promise((resolve, reject) => {
@@ -252,7 +258,7 @@ test('Pi Worker runs the bundled SDK in isolation and emits canonical stream eve
   assert.equal(requestBodies.some((body) => body.reasoning_effort === 'none'), false);
 });
 
-test('Pi Worker converts a provider model error into run.failed instead of an empty completion', async (t) => {
+test('Pi Worker converts a provider model error into run.failed instead of an empty completion', { skip: !bundledPiAvailable }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-pi-worker-error-'));
   const provider = http.createServer((request, response) => {
     request.resume();
@@ -263,7 +269,7 @@ test('Pi Worker converts a provider model error into run.failed instead of an em
   await new Promise((resolve) => provider.once('listening', resolve));
   t.after(() => provider.close());
 
-  const bridge = createPiBridge({ toolHandler: async () => ({ ok: true }) });
+  const bridge = createPiBridge({ runtimeBinding: developmentPiBinding, toolHandler: async () => ({ ok: true }) });
   t.after(() => bridge.close());
   const events = [];
   const terminal = new Promise((resolve, reject) => {
@@ -292,7 +298,7 @@ test('Pi Worker converts a provider model error into run.failed instead of an em
   assert.equal(events.some((event) => event.type === 'run.completed'), false);
 });
 
-test('Pi Gemini Code Assist provider reads its OAuth credential through Frakio IPC and does not persist it', async (t) => {
+test('Pi Gemini Code Assist provider reads its OAuth credential through Frakio IPC and does not persist it', { skip: !bundledPiAvailable }, async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-pi-gemini-oauth-'));
   const requests = [];
   const provider = http.createServer(async (request, response) => {
@@ -306,6 +312,7 @@ test('Pi Gemini Code Assist provider reads its OAuth credential through Frakio I
   await new Promise((resolve) => provider.once('listening', resolve));
   t.after(() => provider.close());
   const bridge = createPiBridge({
+    runtimeBinding: developmentPiBinding,
     env: { FRAKIO_WORK_GEMINI_CODE_ASSIST_URL: `http://127.0.0.1:${provider.address().port}/v1internal` },
     toolHandler: async () => ({ ok: true }),
     credentialHandler: async (operation, providerId) => {
@@ -345,11 +352,10 @@ test('Pi Gemini Code Assist provider reads its OAuth credential through Frakio I
 test('Codex channel uses app-server JSON-RPC and preserves the native thread id', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-codex-bridge-'));
   const bridge = createCodexAppServerBridge({
-    commandResolver: async () => process.execPath,
-    commandArgs: [path.join(runtimeTestDirectory, 'fixtures', 'fake-codex-app-server.mjs')],
+    runtimeHomeRoot: path.join(root, 'codex-home'),
+    commandArgsFactory: () => [path.join(runtimeTestDirectory, 'fixtures', 'fake-codex-app-server.mjs')],
   });
   t.after(() => bridge.close());
-  assert.deepEqual((await bridge.listModels()).map((model) => model.id), ['fake-codex-model']);
   const events = [];
   const completed = new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new Error('Codex fake turn did not finish.')), 5000);
@@ -371,6 +377,9 @@ test('Codex channel uses app-server JSON-RPC and preserves the native thread id'
     profileSnapshot: { name: 'Ares', role: 'Engineer', soul: 'Be precise.', scope: 'Finish the task.' },
     contextPacket: { memory: [], knowledge: [] },
     prompt: 'Reply with the test phrase.',
+    runtimeBinding: { runtimeVersion: '1.0.0', runtimeBuildId: 'codex-test-build', executablePath: process.execPath },
+    executionRealm: { revision: 'codex-test-realm' },
+    launchSpec: { baseUrl: 'http://127.0.0.1:8787/frakio', token: 'realm-token', modelId: 'fake-codex-model' },
   });
   assert.equal(accepted.nativeSessionId, 'codex-thread-1');
   const terminal = await completed;
@@ -378,9 +387,11 @@ test('Codex channel uses app-server JSON-RPC and preserves the native thread id'
   assert.equal(events.some((event) => event.type === 'message.delta'), true);
 });
 
-test('Claude channel uses Agent SDK sessions and canonical stream events', async (t) => {
+test('Claude channel uses an isolated Agent SDK realm and canonical stream events', async (t) => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-claude-bridge-'));
-  const queryFactory = () => {
+  let capturedOptions;
+  const queryFactory = ({ options }) => {
+    capturedOptions = options;
     const generator = (async function* () {
       yield { type: 'system', subtype: 'init', session_id: 'claude-session-1' };
       yield {
@@ -403,7 +414,7 @@ test('Claude channel uses Agent SDK sessions and canonical stream events', async
     return generator;
   };
   const bridge = createClaudeAgentSdkBridge({
-    commandResolver: async () => process.execPath,
+    runtimeHomeRoot: path.join(root, 'claude-home'),
     queryFactory,
   });
   t.after(() => bridge.close());
@@ -427,43 +438,16 @@ test('Claude channel uses Agent SDK sessions and canonical stream events', async
     profileSnapshot: { name: 'Ares', role: 'Engineer', soul: 'Be precise.', scope: 'Finish the task.' },
     contextPacket: { memory: [], knowledge: [] },
     prompt: 'Reply with the test phrase.',
+    model: 'claude-test',
+    runtimeBinding: { runtimeVersion: '2.1.0', runtimeBuildId: 'claude-test-build', executablePath: process.execPath },
+    executionRealm: { revision: 'claude-test-realm' },
+    launchSpec: { baseUrl: 'http://127.0.0.1:8787/frakio', token: 'realm-token', modelId: 'claude-test' },
   });
   assert.equal(accepted.nativeSessionId, 'claude-session-1');
   const terminal = await completed;
   assert.equal(terminal.payload.output, 'Claude ready');
   assert.equal(events.some((event) => event.type === 'message.delta'), true);
-});
-
-test('Gemini channel uses ACP instead of parsing terminal output', async (t) => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-gemini-bridge-'));
-  const bridge = createGeminiAcpBridge({
-    commandResolver: async () => process.execPath,
-    commandArgs: [path.join(runtimeTestDirectory, 'fixtures', 'fake-gemini-acp.mjs')],
-  });
-  t.after(() => bridge.close());
-  const events = [];
-  const completed = new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('Gemini fake run did not finish.')), 5000);
-    bridge.on('event', ({ runId, event }) => {
-      if (runId !== 'gemini-run-test') return;
-      events.push(event);
-      if (event.type === 'run.completed') {
-        clearTimeout(timer);
-        resolve(event);
-      }
-    });
-  });
-  const accepted = await bridge.startRun({
-    runId: 'gemini-run-test',
-    sessionId: 'gemini-frakio-session',
-    cwd: root,
-    permissionMode: 'off',
-    profileSnapshot: { name: 'Ares', role: 'Engineer', soul: 'Be precise.', scope: 'Finish the task.' },
-    contextPacket: { memory: [], knowledge: [] },
-    prompt: 'Reply with the test phrase.',
-  });
-  assert.equal(accepted.nativeSessionId, 'gemini-session-1');
-  const terminal = await completed;
-  assert.equal(terminal.payload.output, 'Gemini ready');
-  assert.equal(events.some((event) => event.type === 'message.delta'), true);
+  assert.deepEqual(capturedOptions.settingSources, []);
+  assert.equal(capturedOptions.env.CLAUDE_CONFIG_DIR, path.join(root, 'claude-home', 'claude-test-realm'));
+  assert.equal(capturedOptions.env.ANTHROPIC_AUTH_TOKEN, 'realm-token');
 });

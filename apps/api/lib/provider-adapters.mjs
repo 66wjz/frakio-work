@@ -234,7 +234,7 @@ export function adapterFor(model = {}) {
   if (mode === 'codex_responses' || mode === 'openai_responses') return { id: providerKey === 'openai-codex' ? 'openai_codex_responses' : 'openai_responses', apiMode: mode, catalogKind: 'openai', modelsPaths: ['/v1/models', '/models'] };
   if (providerKey === 'openrouter') return { id: 'openrouter', apiMode: 'chat_completions', catalogKind: 'openrouter', modelsPaths: ['/api/v1/models', '/v1/models', '/models'] };
   if (providerKey === 'deepseek') return { id: 'deepseek', apiMode: 'chat_completions', catalogKind: 'openai', modelsPaths: ['/models', '/v1/models'] };
-  if (providerKey === 'gemini' || providerKey === 'google-gemini-cli') return { id: 'gemini', apiMode: 'chat_completions', catalogKind: 'gemini', modelsPaths: ['/models', '/v1/models'] };
+  if (providerKey === 'gemini' || providerKey === 'google-gemini-oauth' || providerKey === 'google-gemini-cli') return { id: 'gemini', apiMode: 'chat_completions', catalogKind: 'gemini', modelsPaths: ['/models', '/v1/models'] };
   if (providerKey === 'lmstudio') return { id: 'lmstudio', apiMode: 'chat_completions', catalogKind: 'openai', modelsPaths: ['/v1/models', '/models'] };
   return { id: 'openai_chat', apiMode: mode || 'chat_completions', catalogKind: 'openai', modelsPaths: ['/v1/models', '/models'] };
 }

@@ -93,6 +93,7 @@ class BridgeServer:
                 speed_provider_mode,
                 runtime_overrides,
                 bool(req.get("ephemeral")),
+                req.get("host_run_id"),
             )
             if req.get("wait"):
                 timeout = float(req.get("timeout", 0) or 0)
@@ -180,6 +181,24 @@ class BridgeServer:
                 str(req.get("transcript") or ""),
                 req.get("profile"),
                 float(req.get("timeout") or 30.0),
+            )
+
+        if action == "memory_review":
+            return self.pool.review_memory(
+                str(req.get("instructions") or ""),
+                str(req.get("input") or ""),
+                req.get("profile"),
+                float(req.get("timeout") or 60.0),
+                req.get("main_runtime") if isinstance(req.get("main_runtime"), dict) else None,
+            )
+
+        if action == "context_compact":
+            return self.pool.compact_context(
+                str(req.get("instructions") or ""),
+                str(req.get("input") or ""),
+                req.get("profile"),
+                float(req.get("timeout") or 120.0),
+                req.get("main_runtime") if isinstance(req.get("main_runtime"), dict) else None,
             )
 
         if action == "command":

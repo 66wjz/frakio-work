@@ -35,9 +35,44 @@ export function paneWidthFromPointer({ side, startWidth, startX, currentX, minWi
 }
 
 export function paneWidthFromKey({ side, currentWidth, key, shiftKey, minWidth, maxWidth }) {
+  if (key === 'Home') return clamp(minWidth, minWidth, maxWidth);
+  if (key === 'End') return clamp(maxWidth, minWidth, maxWidth);
   if (key !== 'ArrowLeft' && key !== 'ArrowRight') return currentWidth;
-  const step = shiftKey ? 24 : 8;
+  const step = shiftKey ? 64 : 16;
   const direction = key === 'ArrowRight' ? 1 : -1;
   const signedStep = side === 'left' ? direction * step : direction * -step;
   return clamp(currentWidth + signedStep, minWidth, maxWidth);
+}
+
+export function createLatestFrameScheduler({ requestFrame, cancelFrame, apply }) {
+  let frame = 0;
+  let pendingValue = null;
+
+  const applyPending = () => {
+    if (pendingValue === null) return;
+    const value = pendingValue;
+    pendingValue = null;
+    apply(value);
+  };
+
+  return {
+    schedule(value) {
+      pendingValue = value;
+      if (frame) return;
+      frame = requestFrame(() => {
+        frame = 0;
+        applyPending();
+      });
+    },
+    flush() {
+      if (frame) cancelFrame(frame);
+      frame = 0;
+      applyPending();
+    },
+    cancel() {
+      if (frame) cancelFrame(frame);
+      frame = 0;
+      pendingValue = null;
+    },
+  };
 }

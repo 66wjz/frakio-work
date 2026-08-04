@@ -53,22 +53,35 @@ test('state API persists the one-time macOS sidebar width migration', async (t) 
   assert.equal(migrated.ui.sidebarWidth, 240);
   assert.equal(migrated.ui.macSidebarWidth, 224);
   assert.equal(migrated.ui.macSidebarWidthVersion, 1);
-  assert.equal(migrated.version, 6);
+  assert.equal(migrated.version, 9);
   assert.deepEqual(migrated.features, {
+    runtimePlatformV2: true,
+    runtimeSessionLanes: true,
+    runtimeContextDelta: true,
+    runtimeSkillProjection: true,
+    runtimePermissionBroker: true,
+    runtimePackageManager: true,
+    runtimeVersionBindings: true,
+    managedPiRuntime: true,
+    piBridgePool: true,
+    piVersionHandoff: true,
     runtimeRouterV1: true,
     piRuntime: true,
     piOAuthProviders: true,
     piGeminiCodeAssistAdapter: false,
     runtimeNeutralWork: true,
     memoryLedger: true,
+    memoryRouterV1: true,
+    libraryV1: true,
+    structuredHandoffs: true,
     externalCliChannels: true,
   });
 
   const stored = JSON.parse(await readFile(statePath, 'utf8'));
   assert.equal(stored.ui.macSidebarWidth, 224);
   assert.equal(stored.ui.macSidebarWidthVersion, 1);
-  assert.equal(stored.version, 6);
-  assert.deepEqual(stored.agents[0].runtimePolicy.allowedRuntimeIds, ['hermes', 'pi', 'codex', 'claude', 'gemini']);
+  assert.equal(stored.version, 9);
+  assert.deepEqual(stored.agents[0].runtimePolicy.allowedRuntimeIds, ['hermes', 'pi', 'codex', 'claude']);
   assert.equal(stored.agents[0].runtimePolicy.defaultModelByRuntime, undefined);
   assert.equal(stored.agents[0].model, 'model_deepseek::deepseek-v4-flash');
 
