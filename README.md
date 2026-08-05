@@ -5,10 +5,6 @@
 <h1>Frakio Work</h1>
 
 <p>
-  基于 Hermes Agent 的多 Agent 协作工作台
-</p>
-
-<p>
   <a href="https://madsgogo.com">🌱 作者主页</a>
   ·
   <a href="https://madsgogo.life">📚 博客</a>
