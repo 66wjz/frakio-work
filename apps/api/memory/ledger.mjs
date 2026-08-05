@@ -83,7 +83,7 @@ export function createMemoryLedger({ store }) {
       return store.updateMemory(id, { status: 'accepted', pausedAt: null, statusReason: '' });
     },
     forget(id) {
-      return store.updateMemory(id, { status: 'rejected', pausedAt: null, statusReason: 'forgotten' });
+      return store.updateMemory(id, { status: 'forgotten', pausedAt: null, statusReason: 'forgotten', deletedAt: currentTimestamp(), deletionReason: 'user_requested' });
     },
     search({ scope = '', subjectId = '', query = '', status = 'accepted', limit = 50 } = {}) {
       return store.listMemory({ scope, subjectId, query, status, limit }).filter(isCurrentlyValid);

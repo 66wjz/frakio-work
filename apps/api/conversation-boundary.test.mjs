@@ -36,6 +36,14 @@ test('macOS window chrome remains available above launch and settings content', 
   assert.match(settingsSource, /\.mac-desktop-shell\.settings-mode \.settings-content\s*\{[\s\S]*?padding-top:\s*calc\(var\(--scroll-boundary-fade-size\) \+ 50px\);/);
 });
 
+test('Web workbench keeps navigation controls without rendering native window chrome', () => {
+  assert.match(mainSource, /const workbenchLeftActions = \([\s\S]*?aria-label="新对话"/);
+  assert.match(mainSource, /\{!isDesktopShell && !isSettingsNav && workbenchLeftActions\}/);
+  assert.match(mainSource, /\{!isDesktopShell && !isSettingsNav && rightRailKind && \(/);
+  assert.match(stylesSource, /\.managed-web-shell \.workbench-window-controls\s*\{[\s\S]*?top:\s*11px;[\s\S]*?left:\s*16px;/);
+  assert.match(stylesSource, /\.managed-web-shell \.mac-window-toolbar,[\s\S]*?display:\s*none !important;/);
+});
+
 test('macOS message viewport fades its own pixels instead of covering them with a bright layer', () => {
   assert.doesNotMatch(mainSource, /thread-boundary-fade/);
   assert.doesNotMatch(stylesSource, /\.thread-boundary-fade/);

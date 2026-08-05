@@ -5,10 +5,34 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { fileURLToPath } from 'node:url';
-import { createClaudeAgentSdkBridge } from './claude-agent-sdk.mjs';
-import { createCodexAppServerBridge } from './codex-app-server.mjs';
+import { createClaudeAgentSdkBridge, permissionMode as claudePermissionMode } from './claude-agent-sdk.mjs';
+import { approvalPolicy as codexApprovalPolicy, codexArguments, createCodexAppServerBridge, sandboxPolicy as codexSandboxPolicy } from './codex-app-server.mjs';
 
 const fixtureDirectory = path.join(path.dirname(fileURLToPath(import.meta.url)), 'fixtures');
+
+test('Codex and Claude permission modes use current native values and fail closed', () => {
+  assert.equal(codexApprovalPolicy('manual'), 'on-request');
+  assert.equal(codexApprovalPolicy('smart'), 'on-request');
+  assert.equal(codexApprovalPolicy('off'), 'never');
+  assert.equal(codexApprovalPolicy('unknown'), 'on-request');
+  assert.equal(codexSandboxPolicy('manual', '/workspace').type, 'workspaceWrite');
+  assert.equal(codexSandboxPolicy('off', '/workspace').type, 'dangerFullAccess');
+  assert.equal(claudePermissionMode('manual'), 'default');
+  assert.equal(claudePermissionMode('smart'), 'default');
+  assert.equal(claudePermissionMode('off'), 'bypassPermissions');
+  assert.equal(claudePermissionMode('unknown'), 'default');
+});
+
+test('Codex isolated launch injects only the Frakio MCP server configuration', () => {
+  const args = codexArguments({
+    baseUrl: 'http://127.0.0.1:8787/gateway/v1', token: 'realm-token', modelId: 'gpt-test',
+    mcpServers: { frakio: { command: '/runtime/node', args: ['/app/hermes-workbench-mcp.mjs', 'use'], env: { HERMES_WORKBENCH_URL: 'http://127.0.0.1:8787' } } },
+  });
+  const settings = args.filter((item, index) => args[index - 1] === '-c');
+  assert.equal(settings.some((item) => item.startsWith('mcp_servers.frakio.command=')), true);
+  assert.equal(settings.some((item) => item.startsWith('mcp_servers.frakio.args=')), true);
+  assert.equal(settings.some((item) => item.startsWith('mcp_servers.frakio.env.HERMES_WORKBENCH_URL=')), true);
+});
 
 async function sentinel(root, relativePath, content) {
   const target = path.join(root, relativePath);
@@ -80,7 +104,7 @@ test('Claude and Codex use Frakio homes without reading or changing global CLI s
     profileSnapshot: { name: 'Ares', role: 'Engineer' }, contextPacket: {}, prompt: 'test',
     runtimeBinding: { runtimeBuildId: 'claude-build', runtimeVersion: '2.1.0', executablePath: process.execPath },
     executionRealm: { revision: 'claude-realm' },
-    launchSpec: { baseUrl: 'http://127.0.0.1:8787/frakio', token: 'realm-token', modelId: 'claude-test' },
+    launchSpec: { baseUrl: 'http://127.0.0.1:8787/frakio', token: 'realm-token', modelId: 'claude-test', mcpServers: { frakio: { type: 'stdio', command: '/runtime/node', args: ['mcp.mjs'] } } },
   });
   await claudeCompleted;
 
@@ -91,6 +115,7 @@ test('Claude and Codex use Frakio homes without reading or changing global CLI s
   assert.equal('HOME' in claudeOptions.env, false);
   assert.equal(claudeOptions.env.ANTHROPIC_API_KEY, '');
   assert.deepEqual(claudeOptions.settingSources, []);
+  assert.equal(claudeOptions.mcpServers.frakio.command, '/runtime/node');
 
   for (const item of sentinels) {
     assert.equal(await readFile(item.target, 'utf8'), item.content);

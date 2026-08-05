@@ -1,0 +1,33 @@
+import assert from 'node:assert/strict';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
+import test from 'node:test';
+import { createRuntimeStore } from './store.mjs';
+import { createHermesProjectionService } from './hermes-projection.mjs';
+
+test('Hermes projection is Frakio-owned, revisioned, and preserves unmanaged content in compat mode', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-hermes-projection-'));
+  const profile = path.join(root, 'profile');
+  const store = createRuntimeStore(path.join(root, 'runtime.db'));
+  let authority = 'compat';
+  const service = createHermesProjectionService({ store, profileDir: async () => profile, authorityMode: () => authority });
+  const agent = { id: 'iris', profileName: 'iris', profileRevision: 'profile-1', name: 'Iris', role: 'Assistant', soul: 'Be precise.', scope: 'Help', notes: '' };
+  const first = await service.publish({ agent, userProfile: { nickname: 'Mads' } });
+  assert.equal(first.status, 'ready');
+  assert.match(await readFile(path.join(profile, 'memories', 'USER.md'), 'utf8'), /FRAKIO_MANAGED_PROJECTION/);
+  const user = await readFile(path.join(profile, 'memories', 'USER.md'), 'utf8');
+  const second = await service.publish({ agent, userProfile: { nickname: 'Mads' } });
+  assert.equal(second.contentHash, first.contentHash);
+  await import('node:fs/promises').then(({ appendFile }) => appendFile(path.join(profile, 'memories', 'USER.md'), '\nExternal Hermes note\n'));
+  const preserved = await service.publish({ agent, userProfile: { nickname: 'Mads' } });
+  assert.equal(preserved.contentHash, first.contentHash);
+  assert.match(await readFile(path.join(profile, 'memories', 'USER.md'), 'utf8'), /External Hermes note/);
+  assert.equal(user.includes('External Hermes note'), false);
+  authority = 'authority';
+  const authoritative = await service.publish({ agent, userProfile: { nickname: 'Mads' } });
+  assert.notEqual(authoritative.contentHash, preserved.contentHash);
+  assert.doesNotMatch(await readFile(path.join(profile, 'memories', 'USER.md'), 'utf8'), /External Hermes note/);
+  store.close();
+  await rm(root, { recursive: true, force: true });
+});

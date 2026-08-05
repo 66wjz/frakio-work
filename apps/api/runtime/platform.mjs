@@ -132,6 +132,25 @@ export function createRuntimePlatform({ store, registry, packageManager = null, 
       ? input.skillSet || resolveSkillSet(await (skillResolver?.(input) || {}))
       : resolveSkillSet();
     const adapter = adapterMap.get(input.runtimeId);
+    const currentMemoryIds = new Set((packet.memory || []).map((entry) => String(entry.id || '')).filter(Boolean));
+    const previousMemoryIds = Array.isArray(existing?.metadata?.contextMemoryEntryIds)
+      ? existing.metadata.contextMemoryEntryIds.map(String).filter(Boolean)
+      : [];
+    const memoryRemoved = previousMemoryIds.some((memoryId) => !currentMemoryIds.has(memoryId));
+    if (existing?.nativeSessionId && memoryRemoved) {
+      await Promise.resolve(adapter?.disposeSession?.(existing.id)).catch(() => {});
+      existing = store.upsertSession({
+        ...existing,
+        nativeSessionId: '',
+        lifecycleState: 'recovering',
+        resumeStrategy: 'handoff_resumed',
+        checkpoint: {
+          ...existing.checkpoint,
+          previousNativeSessionId: existing.nativeSessionId,
+          reason: 'memory_context_removed',
+        },
+      });
+    }
     const modelRoute = lane.type === 'work_task' && existing?.metadata?.modelRoute
       ? existing.metadata.modelRoute
       : input.modelRoute || {};
@@ -245,6 +264,8 @@ export function createRuntimePlatform({ store, registry, packageManager = null, 
       originalContextPacket: packet,
       contextAssessment,
       contextDelta,
+      executionRealm,
+      modelRoute,
       skillSet: resolvedSkills,
       skillApplications: skillApplication.receipts,
       permissionPolicy: policy,

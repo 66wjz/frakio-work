@@ -108,6 +108,7 @@ import {
   ArrowUpRight,
   Archive,
   Bot,
+  BookOpenText,
   Boxes,
   Brain,
   Briefcase,
@@ -300,7 +301,7 @@ type ManagedHermesModulesPayload = {
 };
 type RuntimeId = 'hermes' | 'pi' | 'codex' | 'claude' | string;
 type AgentRuntimePolicy = { defaultRuntimeId: RuntimeId; allowedRuntimeIds: RuntimeId[]; permissionProfileId: string };
-type RuntimeModelCompatibility = { status: 'ready' | 'partial' | 'unsupported' | 'missing_credentials'; credentialStatus: 'ready' | 'missing' | 'not_required'; usableModelIds: string[]; unsupportedModelIds: string[]; reason: string };
+type RuntimeModelCompatibility = { status: 'ready' | 'partial' | 'unsupported' | 'missing_credentials'; credentialStatus: 'ready' | 'missing' | 'not_required'; compatibility?: 'direct' | 'bridged' | 'unsupported'; bridgeId?: string; harnessApiMode?: string; upstreamApiMode?: string; capabilities?: Record<string, 'native' | 'bridge' | 'auxiliary' | 'unsupported'>; degradations?: string[]; usableModelIds: string[]; unsupportedModelIds: string[]; reason: string };
 type RuntimeModelCatalogEntry = { id: string; name: string; provider?: string; defaultModelId?: string; models: string[]; compatibility: RuntimeModelCompatibility };
 type RuntimeModelCatalog = { runtimeId: string; source: string; models: RuntimeModelCatalogEntry[]; usableModelCount?: number };
 type RuntimeDefinition = {
@@ -357,17 +358,24 @@ type MemoryLedgerEntry = {
   reason?: string;
   statusReason?: string;
   confidence: number;
-  status: 'candidate' | 'accepted' | 'paused' | 'superseded' | 'rejected';
+  status: 'candidate' | 'accepted' | 'paused' | 'superseded' | 'rejected' | 'forgotten';
   provenance: Array<{ source?: string; runtimeId?: string; runId?: string; messageId?: string; quote?: string; createdAt?: string }>;
   validFrom?: string | null;
   validUntil?: string | null;
   pausedAt?: string | null;
+  sourceRuntimeId?: string;
+  sourceSessionId?: string;
+  sourceMessageId?: string;
+  recallCount?: number;
+  lastRecalledAt?: string | null;
+  deletedAt?: string | null;
+  deletionReason?: string;
   sync?: { vaultId?: string; relativePath?: string; blockHash?: string; state?: string; syncedAt?: string | null };
   createdAt: string;
   updatedAt: string;
 };
 type MemoryReviewConfig = { enabled: boolean; provider: string; model: string; timeout: number; extraBody?: Record<string, unknown> };
-type Agent = { id: string; name: string; role: string; model: string; color: string; soul: string; scope: string; profileName?: string; gatewayStatus?: string; source?: string; soulExcerpt?: string; userProfileExcerpt?: string; memoryExcerpt?: string; userProfile?: string; memory?: string; providerSummary?: HermesProviderSummary[]; skills?: ProfileModuleEntry[]; plugins?: ProfileModuleEntry[]; avatarUrl?: string; runtimePolicy?: AgentRuntimePolicy; profileRevision?: string };
+type Agent = { id: string; name: string; role: string; model: string; color: string; soul: string; scope: string; profileName?: string; gatewayStatus?: string; source?: string; soulExcerpt?: string; userProfileExcerpt?: string; memoryExcerpt?: string; userProfile?: string; memory?: string; notes?: string; communicationStyle?: string; providerSummary?: HermesProviderSummary[]; skills?: ProfileModuleEntry[]; plugins?: ProfileModuleEntry[]; avatarUrl?: string; runtimePolicy?: AgentRuntimePolicy; profileRevision?: string; ownership?: { identity: 'frakio'; memory: 'frakio'; runtimeProfile: 'hermes' | 'none' }; projection?: { status: string; generatedAt?: string; error?: string } | null };
 type ModelKind = 'official' | 'relay' | 'local';
 type ModelProtocol = 'OpenAI Compatible' | 'Anthropic Compatible' | 'Custom';
 type ProviderApiMode = 'chat_completions' | 'openai_responses' | 'codex_responses' | 'anthropic_messages' | 'bedrock_converse' | 'codex_app_server' | '';
@@ -442,6 +450,7 @@ type Vault = {
   managementMode?: 'managed' | 'read_only';
   autonomy?: 'fully_autonomous' | 'tiered' | 'all_review';
   onboardingStatus?: string;
+  avatarUrl?: string;
 };
 type KnowledgeOperation = { id: string; status: string; summary: string; kind: string; risk: string; requiresReview: boolean; files: Array<{ relativePath: string; action: string; beforeContent?: string | null; afterContent?: string | null }>; createdAt: string; publishedAt?: string | null; rolledBackAt?: string | null };
 type KnowledgeSource = { id: string; title: string; kind: string; origin: string; relativePath: string; status: string; createdAt: string; acceptedAt?: string | null };
@@ -1226,6 +1235,7 @@ function App() {
   const [modelCapabilities, setModelCapabilities] = useState<Record<string, ModelCapability>>({});
   const [vaults, setVaults] = useState<Vault[]>([]);
   const [defaultVaultId, setDefaultVaultId] = useState<string | null>(null);
+  const [personalVaultId, setPersonalVaultId] = useState<string | null>(null);
   const [vaultSummary, setVaultSummary] = useState<VaultSummary | null>(null);
   const [spaces, setSpaces] = useState<Space[]>([]);
   const [workspaceThemeLoaded, setWorkspaceThemeLoaded] = useState(false);
@@ -2333,7 +2343,7 @@ function App() {
       safeJson<{ models: ModelProfile[] }>('/api/models'),
       safeJson<{ capabilities: Record<string, ModelCapability> }>('/api/model-capabilities'),
       safeJson<{ ui?: WorkbenchUiSettings; integrations?: { hermesStudio?: { selectedProfile?: string } } }>('/api/state'),
-      safeJson<{ vaults: Vault[]; defaultVaultId?: string | null }>('/api/vaults'),
+      safeJson<{ vaults: Vault[]; defaultVaultId?: string | null; personalVaultId?: string | null }>('/api/vaults'),
       safeJson<{ spaces: Space[]; activeSpaceId?: string | null }>('/api/spaces'),
       safeJson<{ workspaces: Workspace[] }>('/api/workspaces'),
       safeJson<{ conversations: ThreadSummary[] }>('/api/conversations'),
@@ -2429,6 +2439,7 @@ function App() {
     setPinnedNav({ ...Object.fromEntries(railNavItems.map((item) => [item.id, true])), ...(stateData?.ui?.pinnedNav || {}) });
     setVaults(vaultData?.vaults || []);
     setDefaultVaultId(vaultData?.defaultVaultId || null);
+    setPersonalVaultId(vaultData?.personalVaultId || null);
     setSpaces(spaceData?.spaces || []);
     setActiveSpaceId(stateData?.ui?.activeSpaceId || spaceData?.activeSpaceId || spaceData?.spaces?.[0]?.id || 'space_default');
     setWorkspaceThemeLoaded(true);
@@ -3808,6 +3819,23 @@ function App() {
     const hasMessageContext = Boolean(messageContext.browserAnnotations.length || messageContext.reviewComments.length);
     const clientMessageId = options.clientMessageId || `client-message-${startedAt}`;
     const userDraftMessage: ChatEvent = { id: clientMessageId, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments, ...(hasMessageContext ? { context: messageContext } : {}) };
+    const targetAgent = target?.kind === 'agent' ? target.agent : activeComposerAgent;
+    const runtimeId = targetAgent?.id === activeComposerAgent?.id ? activeComposerRuntimeId : (targetAgent?.runtimePolicy?.defaultRuntimeId || 'hermes');
+    if (targetAgent && ['codex', 'claude'].includes(runtimeId)) {
+      await requestJson('/api/runtime-preflight', {
+        method: 'POST',
+        body: JSON.stringify({
+          runtimeId,
+          agentId: targetAgent.id,
+          permissionMode,
+          planMode: activeThread?.collaborationMode === 'plan',
+          modelProfileId: activeThreadModelOverride.split('::')[0] || '',
+          modelId: activeThreadModelOverride.split('::')[1] || '',
+          attachmentKinds: runAttachments.map((attachment) => attachment.kind),
+          workspaceId: activeThread?.workspaceId || '',
+        }),
+      });
+    }
     let completedThread: Thread | null = null;
     let planDraftRun = false;
     const appendMissingRunMessages = (thread: Thread, runId: string, assistantDraft = '') => {
@@ -3862,7 +3890,11 @@ function App() {
     });
     const created = await createRes.json().catch(() => ({}));
     if (!createRes.ok) {
-      throw new Error(formatHermesRuntimeError(created.error || 'Hermes Bridge run 创建失败。', target?.agent ? resolveHermesProfileNameForAgent(target.agent, localProfilesForComposer) : activeComposerProfileName, created.details));
+      const detail = [created.error || 'Runtime 运行创建失败。', created.remediation].filter(Boolean).join(' ');
+      const error = new Error(formatHermesRuntimeError(detail, target?.agent ? resolveHermesProfileNameForAgent(target.agent, localProfilesForComposer) : activeComposerProfileName, created.details)) as Error & { code?: string; details?: Record<string, unknown> };
+      error.code = created.code;
+      error.details = created;
+      throw error;
     }
     planDraftRun = created.kind === 'plan-drafting';
     updateRunUi(threadId, { startPending: false });
@@ -5218,8 +5250,8 @@ function App() {
   }
 
   const cleanShell = launchPhase !== 'done';
-  const desktopLeftActions = (
-    <div className="desktop-window-controls">
+  const workbenchLeftActions = (
+    <div className="workbench-window-controls">
       <button
         type="button"
         className="desktop-window-control"
@@ -5254,7 +5286,7 @@ function App() {
         <div className="mac-window-drag-region" aria-hidden="true" />
         {!cleanShell && !isSettingsNav && (
           <>
-            {desktopLeftActions}
+            {workbenchLeftActions}
             {rightRailKind && (
               <>
               {rightRailOpen && openRightRailTabs.length > 0 && <div className="mac-window-workspace-tabs" role="tablist" aria-label="已打开工具">
@@ -5307,7 +5339,7 @@ function App() {
     <div data-appearance={effectiveAppDark ? 'dark' : 'light'} data-space-color-mode={activeSpaceTheme.colorMode || 'custom'} className={`app ${isWorkbenchShell ? 'workbench-shell desktop-shell mac-desktop-shell' : ''} ${isDesktopShell ? 'native-desktop-shell' : 'managed-web-shell'} ${isWindowsDesktop ? 'windows-shell' : ''} ${isMacConversationShell ? 'workbench-conversation-shell mac-conversation-shell' : ''} ${['org', 'settings', 'models', 'channels', 'plugins', 'kanban', 'jobs', 'monitoring'].includes(activeNav) || activeView === 'new-chat' || spaceEditorReplacesPage ? 'management-mode' : ''} ${isSettingsNav ? 'settings-mode' : ''} ${spaceEditorReplacesPage ? 'workspace-create-mode' : ''} ${macSpaceEditorOpen ? 'mac-space-editor-open' : ''} ${rightRailKind ? 'has-right-rail' : ''} ${rightRailOpen ? 'right-rail-open' : ''} ${rightRailOverlaysMain ? 'right-rail-overlay' : ''} ${browserFullWorkspace ? 'browser-full-workspace' : ''} ${activeView === 'new-chat' && !spaceEditorReplacesPage ? 'new-chat-mode' : ''} ${libraryCollapsed ? 'library-collapsed' : ''} ${autoSidebarCollapsed && !spaceEditorReplacesPage ? 'sidebar-auto-collapsed' : ''} ${(isWorkbenchShell || isSettingsNav) && sidebarUsesCollapsedLayout && !spaceEditorReplacesPage ? 'sidebar-collapsed' : ''} ${macSidebarOverlayVisible ? 'mac-sidebar-overlay-visible' : ''} ${macSidebarOverlayOpen ? 'mac-sidebar-overlay-open' : ''} ${macSidebarOverlayClosing ? 'mac-sidebar-overlay-closing' : ''} ${uiSettings.density === 'compact' ? 'compact-density' : ''}`} style={workspaceMaterialStyle}>
       {isDesktopShell && !isSettingsNav && (
         <>
-          {!isMacConversationShell && desktopLeftActions}
+          {!isMacConversationShell && workbenchLeftActions}
           {rightRailKind && (!isMacConversationShell || !isMacDesktop) && (
             <IconTooltipButton
               className={rightRailOpen ? 'desktop-window-control desktop-right-rail-toggle active' : 'desktop-window-control desktop-right-rail-toggle'}
@@ -5333,6 +5365,7 @@ function App() {
           )}
         </>
       )}
+      {!isDesktopShell && !isSettingsNav && workbenchLeftActions}
       {!isDesktopShell && !isSettingsNav && rightRailKind && (
         <IconTooltipButton
           className={rightRailOpen ? 'desktop-window-control desktop-right-rail-toggle active' : 'desktop-window-control desktop-right-rail-toggle'}
@@ -5799,6 +5832,7 @@ function App() {
                 onRuntimeChange={updateThreadAgentRuntimeOverride}
                 onOpenRuntimeCenter={() => openSettingsSection('runtimes')}
               />
+              <VaultSwitcher vaults={vaults} personalVaultId={personalVaultId} activeVaultId={activeThread.vaultId} onChange={updateThreadVault} />
               <button className={overviewOpen ? 'top-icon-btn active' : 'top-icon-btn'} type="button" onClick={() => setOverviewOpen((open) => !open)} aria-label="会话摘要" title="会话摘要"><Library size={16} /></button>
               <ThreadActionsMenu
                 thread={activeThread}
@@ -6168,7 +6202,6 @@ function App() {
           <OrgPage
             agents={agents}
             models={models}
-            hermesRuntime={hermesRuntime}
             selectedOrgAgentId={selectedOrgAgentId}
             onSelectAgent={selectOrgAgent}
             onProfilesChanged={refreshOrg}
@@ -6181,9 +6214,6 @@ function App() {
               setNewChatAgentId(agentId);
               void persistUi({ defaultAgentId: agentId });
             }}
-            onRefreshHermesRuntime={refreshHermesRuntime}
-            onStartProfileGateway={startHermesProfileGateway}
-            onStopProfileGateway={stopHermesProfileGateway}
           />
         ) : (
           <>
@@ -6749,7 +6779,7 @@ function GlobalSearchDialog({ conversations, agents, onClose, onOpenThread, onOp
   );
 }
 
-const profileOptionFallback = [{ name: 'default', model: '', provider: '', hasConfig: true, hasEnv: false, hasAuth: false }];
+const profileOptionFallback: HermesProfile[] = [{ name: 'default', model: '', provider: '', hasConfig: true, hasEnv: false, hasAuth: false }];
 
 function profileOptions(profiles: HermesProfile[]) {
   return profiles.length ? profiles : profileOptionFallback;
@@ -6927,6 +6957,35 @@ function HermesProfileConfigEditor({ profileName, compact = false }: { profileNa
         </div>
       )}
     </section>
+  );
+}
+
+function HermesAdvancedProfileConfig({ profiles, defaultProfileName }: { profiles: HermesProfile[]; defaultProfileName: string }) {
+  const options = profileOptions(profiles);
+  const optionNames = options.map((profile) => profile.name);
+  const initialProfileName = optionNames.includes(defaultProfileName) ? defaultProfileName : options[0]?.name || '';
+  const [selectedProfileName, setSelectedProfileName] = useState(initialProfileName);
+
+  useEffect(() => {
+    const nextProfileName = optionNames.includes(defaultProfileName) ? defaultProfileName : options[0]?.name || '';
+    setSelectedProfileName((current) => optionNames.includes(current) && current === defaultProfileName ? current : nextProfileName);
+  }, [defaultProfileName, optionNames.join('|')]);
+
+  return (
+    <details className="hermes-advanced-profile-config">
+      <summary>高级 Profile 配置</summary>
+      <div className="hermes-advanced-profile-config-body">
+        <SettingsInlineNote>
+          这里用于兼容 Hermes 原生 CLI、Gateway 和外部会话。Frakio 对话的正式记忆、跨执行内核上下文压缩、会话状态和频道管理由 Frakio 控制。
+        </SettingsInlineNote>
+        <SettingsRow title="Hermes Profile" description="选择要查看或修改的本地 Hermes Profile 原生配置。">
+          <select value={selectedProfileName} onChange={(event) => setSelectedProfileName(event.target.value)} aria-label="选择 Hermes Profile">
+            {options.map((profile) => <option key={profile.name} value={profile.name}>{profile.displayName || profile.name}</option>)}
+          </select>
+        </SettingsRow>
+        {selectedProfileName ? <HermesProfileConfigEditor key={selectedProfileName} profileName={selectedProfileName} /> : <div className="empty-state">没有可用的 Hermes Profile。</div>}
+      </div>
+    </details>
   );
 }
 
@@ -11288,7 +11347,7 @@ function HermesRuntimePanel({ runtime, bootstrap, localStatus, diagnostics, apiA
           </div>
         </details>
       )}
-      <SettingsInlineNote>Profile Gateway 状态与操作继续由 Agent 配置中的 Agent 卡片管理。</SettingsInlineNote>
+      <SettingsInlineNote>Profile Gateway 状态与操作请前往“频道”和“Hermes 集成”的高级 Profile 配置。</SettingsInlineNote>
     </SettingsPanel>
   );
 }
@@ -11816,13 +11875,17 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
           const compatibleRelease = packageStatus?.releases?.verified?.[0];
           const candidates = discoveryCandidates[runtime.id] || [];
           const packageCount = packageStatus?.packages.length || 0;
+          const modelRouteReady = Boolean(catalog?.usableModelCount);
+          const activePackage = packageStatus?.packages.find((pkg) => pkg.runtimeBuildId === packageStatus.activeBinding?.runtimeBuildId);
+          const realTurnVerified = Boolean(activePackage?.verificationReceipt?.realTurnVerified);
           const state = checking
             ? '验证中'
             : !runtime.capabilitySnapshot ? '尚未验证'
-              : ready ? '已验证'
+              : ready && modelRouteReady ? '模型链路可用'
+                : ready ? 'CLI 已连接'
                 : installation?.status === 'missing' ? '未安装'
                   : installation?.status === 'error' ? '异常' : installation?.status || '尚未验证';
-          const stateTone = ready && !checking ? 'ready' : installation?.status === 'missing' ? 'neutral' : 'warning';
+          const stateTone = ready && modelRouteReady && !checking ? 'ready' : installation?.status === 'missing' ? 'neutral' : 'warning';
           const primaryLabel = checking ? '验证中' : installation?.status === 'missing' && compatibleRelease ? '安装' : ready ? '重新验证' : '查看问题';
           const runPrimaryAction = () => {
             if (installation?.status === 'missing' && compatibleRelease) {
@@ -11865,7 +11928,7 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
               </div>
             </div>
             {expanded && <div className="runtime-center-detail" id={`runtime-detail-${runtime.id}`}>
-              <section><span>当前状态</span><strong>{state}</strong><small>{installation?.detail || (ready ? '运行时已通过本机验证。' : '请完成验证或安装后再使用。')}</small></section>
+              <section><span>链路状态</span><strong>{state}</strong><small>{ready ? `二进制可用 · Adapter 可用 · ${modelRouteReady ? '模型路由可用' : '尚无可用模型路由'} · ${realTurnVerified ? `真实对话已验证${activePackage?.verificationReceipt?.realTurnVerifiedAt ? ` ${formatTime(String(activePackage.verificationReceipt.realTurnVerifiedAt))}` : ''}` : '真实对话待验证'}` : installation?.detail || '请完成验证或安装后再使用。'}</small></section>
               <section><span>安装来源</span><div className="runtime-source-list">
                 {packageStatus?.packages.map((pkg) => <div className="runtime-source-card" key={pkg.runtimeBuildId}>
                   <div><strong>{pkg.source === 'native' ? '系统安装' : pkg.source === 'bundled' ? '应用内置' : '托管安装'} {pkg.runtimeVersion}</strong><small title={pkg.executablePath || pkg.runtimeDir}>{pkg.executablePath || pkg.runtimeDir}</small></div>
@@ -11950,7 +12013,7 @@ function MemoryCenterPage({ vaults, agents, models, onOpenModels, onOpenSource }
   const editEntry = async (entry: MemoryLedgerEntry) => {
     const fact = window.prompt('修正记忆内容', entry.fact)?.trim();
     if (!fact || fact === entry.fact) return;
-    const response = await fetch(`/api/memory/${entry.id}`, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fact }) });
+    const response = await fetch(`/api/memory/${entry.id}/update`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ fact }) });
     const data = await response.json();
     if (!response.ok) setError(data.error || '记忆修正失败。');
     else await load();
@@ -12044,7 +12107,7 @@ function MemoryCenterPage({ vaults, agents, models, onOpenModels, onOpenSource }
   return (
     <>
       <div className="settings-head">
-        <div><h2>记忆中心 <span className="feature-beta">Beta</span></h2><p className="settings-description">这里管理 Frakio 跨 Agent、跨执行内核共享的记忆，不替代 Hermes 的私有运行时记忆。</p></div>
+        <div><h2>记忆中心 <span className="feature-beta">Beta</span></h2><p className="settings-description">Frakio 是正式记忆的唯一来源。Hermes、Pi、Codex 和 Claude 读取同一份记忆。</p></div>
         <span className="settings-inline-actions"><button className="send-btn" onClick={() => setShowCreate((current) => !current)}>{showCreate ? '收起新建' : '新建记忆'}</button><button className="secondary-btn quiet" onClick={onOpenModels}>模型设置</button></span>
       </div>
       <section className="memory-automation-panel">
@@ -12198,6 +12261,11 @@ function KnowledgeCenterPage() {
   );
 }
 
+function VaultSwitcher({ vaults, personalVaultId, activeVaultId, onChange }: { vaults: Vault[]; personalVaultId: string | null; activeVaultId: string | null; onChange: (vaultId: string | null) => Promise<void> }) {
+  const active = vaults.find((vault) => vault.id === activeVaultId) || vaults.find((vault) => vault.id === personalVaultId) || null;
+  return <AppMenu modal={false}><AppMenuTrigger asChild><button className="top-icon-btn vault-switcher-trigger" type="button" aria-label="切换资料库" title={`资料库：${active?.name || '未连接'}`}><span className="vault-switcher-icon">{active?.avatarUrl ? <img src={active.avatarUrl} alt="" /> : <BookOpenText size={16} />}</span></button></AppMenuTrigger><AppMenuContent className="vault-switcher-menu" side="bottom" align="end" aria-label="切换资料库"><div className="runtime-switcher-summary">资料库上下文</div><AppMenuItem className={!activeVaultId || activeVaultId === personalVaultId ? 'selected' : ''} onSelect={() => void onChange(personalVaultId)}><BookOpenText size={15} /><span>个人资料库</span>{activeVaultId === personalVaultId && <Check size={14} />}</AppMenuItem><AppMenuItem className={!activeVaultId ? 'selected' : ''} onSelect={() => void onChange(null)}><Minus size={15} /><span>不连接项目资料库</span>{!activeVaultId && <Check size={14} />}</AppMenuItem>{vaults.filter((vault) => vault.kind === 'project').map((vault) => <AppMenuItem key={vault.id} className={activeVaultId === vault.id ? 'selected' : ''} onSelect={() => void onChange(vault.id)}>{vault.avatarUrl ? <img className="vault-switcher-menu-avatar" src={vault.avatarUrl} alt="" /> : <BookOpenText size={15} />}<span>{vault.name}</span>{activeVaultId === vault.id && <Check size={14} />}</AppMenuItem>)}</AppMenuContent></AppMenu>;
+}
+
 function KnowledgeVaultsPage({ vaults, models, agents, vaultPathInput, setVaultPathInput, vaultError, vaultBusy, newVaultKind, setNewVaultKind, showConnector, setShowConnector, addVault, reindexVault, deleteVault, resolveLegacyVaultBinding }: {
   vaults: Vault[];
   models: ModelProfile[];
@@ -12310,6 +12378,24 @@ function KnowledgeVaultsPage({ vaults, models, agents, vaultPathInput, setVaultP
     catch (err) { setError(err instanceof Error ? err.message : '头像移除失败。'); } finally { setBusy(''); }
   };
 
+  const uploadVaultAvatar = async (file: File | undefined) => {
+    if (!file || !selectedId) return;
+    if (!['image/png', 'image/jpeg', 'image/webp', 'image/gif'].includes(file.type) || file.size > 3 * 1024 * 1024) { setError('请上传小于 3MB 的 png、jpg、webp 或 gif 图片。'); return; }
+    setBusy('vault-avatar');
+    try {
+      const data = await new Promise<string>((resolve, reject) => { const reader = new FileReader(); reader.onload = () => resolve(String(reader.result || '')); reader.onerror = () => reject(new Error('图片读取失败。')); reader.readAsDataURL(file); });
+      await requestJson(`/api/vaults/${selectedId}/avatar`, { method: 'POST', body: JSON.stringify({ mimeType: file.type, data }) });
+      await loadDetail(selectedId);
+    } catch (err) { setError(err instanceof Error ? err.message : '资料库头像保存失败。'); } finally { setBusy(''); }
+  };
+
+  const removeVaultAvatar = async () => {
+    if (!selectedId) return;
+    setBusy('vault-avatar');
+    try { await requestJson(`/api/vaults/${selectedId}/avatar`, { method: 'DELETE' }); await loadDetail(selectedId); }
+    catch (err) { setError(err instanceof Error ? err.message : '资料库头像移除失败。'); } finally { setBusy(''); }
+  };
+
   const runAction = async (key: string, endpoint: string) => {
     setBusy(key);
     try {
@@ -12326,7 +12412,7 @@ function KnowledgeVaultsPage({ vaults, models, agents, vaultPathInput, setVaultP
     {vaultError && <div className="form-error">{vaultError}</div>}
     <div className="knowledge-vault-list">
       {vaults.map((item) => <button className="knowledge-vault-list-row" key={item.id} onClick={() => setSelectedId(item.id)}>
-        <span className="knowledge-vault-icon"><Database size={18} /></span><span><strong>{item.name}</strong><small>{item.kind === 'personal' ? '个人资料库' : '项目资料库'} · {item.documentCount || 0} 个 Markdown</small></span><span className={`knowledge-state ${item.managementMode === 'read_only' || item.onboardingStatus === 'needs_upgrade_confirmation' ? 'warning' : ''}`}>{item.managementMode === 'read_only' ? '只读连接' : item.onboardingStatus === 'needs_upgrade_confirmation' ? '待升级' : 'AI 自治'}</span><ChevronRight size={17} />
+        <span className="knowledge-vault-icon">{item.avatarUrl ? <img src={item.avatarUrl} alt="" /> : <BookOpenText size={18} />}</span><span><strong>{item.name}</strong><small>{item.kind === 'personal' ? '个人资料库' : '项目资料库'} · {item.documentCount || 0} 个 Markdown</small></span><span className={`knowledge-state ${item.managementMode === 'read_only' || item.onboardingStatus === 'needs_upgrade_confirmation' ? 'warning' : ''}`}>{item.kind === 'personal' ? '默认资料库' : item.managementMode === 'read_only' ? '只读连接' : item.onboardingStatus === 'needs_upgrade_confirmation' ? '待升级' : 'AI 自治'}</span><ChevronRight size={17} />
       </button>)}
       {!vaults.length && <div className="empty-state"><Database size={22} /><strong>还没有资料库</strong><span>新建后立即可以连接对话，AI 设置在资料库详情中完成。</span></div>}
     </div>
@@ -12339,6 +12425,7 @@ function KnowledgeVaultsPage({ vaults, models, agents, vaultPathInput, setVaultP
     <div className="knowledge-vault-tabs" role="tablist">{([['overview', '概览'], ['content', '内容'], ['rules', '规则与 Agent'], ['activity', '活动记录'], ['pending', `待确认${detail?.stats.pending ? ` ${detail.stats.pending}` : ''}`]] as const).map(([id, label]) => <button role="tab" aria-selected={tab === id} className={tab === id ? 'selected' : ''} key={id} onClick={() => setTab(id)}>{label}</button>)}</div>
     {busy === 'load' && !detail ? <div className="knowledge-loading"><LoaderCircle className="spin" size={18} />读取资料库</div> : null}
     {detail && tab === 'overview' && <div className="knowledge-overview">
+      <section className="knowledge-overview-section"><div><h3>资料库头像</h3></div><div className="knowledge-vault-avatar-form"><span className="knowledge-vault-icon large">{vault.avatarUrl ? <img src={`${vault.avatarUrl}?v=${Date.now()}`} alt="" /> : <BookOpenText size={21} />}</span><label className="secondary-btn">上传头像<input type="file" accept="image/png,image/jpeg,image/webp,image/gif" hidden disabled={busy === 'vault-avatar'} onChange={(event) => { void uploadVaultAvatar(event.target.files?.[0]); event.currentTarget.value = ''; }} /></label>{vault.avatarUrl && <button className="secondary-btn" disabled={busy === 'vault-avatar'} onClick={() => void removeVaultAvatar()}>恢复默认图标</button>}</div></section>
       {detail.config.onboardingStatus !== 'ready' && <section className="knowledge-setup-band"><div><Sparkles size={20} /><span><strong>让 Frakio 接管日常维护</strong><small>现有文件不会移动。来源、发布和回滚从确认后开始受 Runtime 管理。</small></span></div><span className="settings-inline-actions"><button className="send-btn" disabled={busy === 'configure'} onClick={() => void configure('managed', 'fully_autonomous')}>一键自动配置</button><button className="secondary-btn" disabled={busy === 'configure'} onClick={() => void configure('managed', 'tiered')}>分级自治</button><button className="secondary-btn" disabled={busy === 'configure'} onClick={() => void configure('read_only', 'all_review')}>只读连接</button></span></section>}
       <div className="knowledge-stat-grid"><div><strong>{detail.stats.documents}</strong><span>Markdown</span></div><div><strong>{detail.stats.sources}</strong><span>已收录来源</span></div><div><strong>{detail.stats.pending}</strong><span>待确认</span></div><div><strong>{detail.stats.issues}</strong><span>健康问题</span></div></div>
       <section className="knowledge-overview-section"><div><h3>运行状态</h3><button className="secondary-btn" disabled={busy === 'lint'} onClick={() => void runAction('lint', `/api/vaults/${vault.id}/lint`)}><ShieldCheck size={15} />运行健康检查</button></div><div className="knowledge-status-lines"><span><strong>管理方式</strong>{detail.config.managementMode === 'managed' ? 'Frakio 管理' : '只读连接'}</span><span><strong>自治档位</strong>{detail.config.autonomy === 'fully_autonomous' ? '完全自治' : detail.config.autonomy === 'tiered' ? '分级自治' : '全部审核'}</span><span><strong>维护者</strong>{detail.curator?.displayName || '无上的霸王龙'}</span><span><strong>来源边界</strong>{detail.config.immutableRoots.join('、')}</span></div></section>
@@ -12637,6 +12724,7 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
               <SettingsRow title="初次使用引导" description="重新检查依赖并完成 Frakio Work 与 Hermes Agent 的连接。">
                 <button className="secondary-btn" onClick={onRunFirstUseGuide} disabled={firstUseGuideRunning}>{firstUseGuideRunning ? '引导运行中' : '运行引导'}</button>
               </SettingsRow>
+              <HermesAdvancedProfileConfig profiles={localProfiles} defaultProfileName={defaultAgentProfile} />
             </SettingsPanel>
             <div className="settings-section-head"><h3>Runtime 与诊断</h3></div>
             <HermesRuntimePanel runtime={hermesRuntime} bootstrap={hermesBootstrap} localStatus={hermesStatus} diagnostics={hermesDiagnostics} apiAvailability={hermesApiAvailability} onStart={onStartHermesRuntime} onRefresh={onRefreshHermesRuntime} />
@@ -12676,7 +12764,6 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
             <OrgPage
               agents={agents}
               models={models}
-              hermesRuntime={hermesRuntime}
               selectedOrgAgentId={selectedOrgAgentId}
               onSelectAgent={onSelectAgent}
               onProfilesChanged={onProfilesChanged}
@@ -12686,9 +12773,6 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
               profileEditor={profileEditor}
               defaultAgentId={uiSettings.defaultAgentId || defaultAgent?.id || ''}
               onUpdateDefaultAgent={onUpdateDefaultAgent}
-              onRefreshHermesRuntime={onRefreshHermesRuntime}
-              onStartProfileGateway={onStartProfileGateway}
-              onStopProfileGateway={onStopProfileGateway}
             />
           )}
 
@@ -13471,7 +13555,8 @@ function ProviderModelPicker({ models, value, onChange, runtimeId = 'hermes', ag
               const isSelected = selected.value === itemValue;
               const compatibility = runtimeCatalog?.models.find((entry) => entry.id === provider.id)?.compatibility;
               const usable = Boolean(compatibility?.usableModelIds.includes(modelName));
-              return <button type="button" className={`${isSelected ? 'selected' : ''}${runtimeCatalog && !usable ? ' incompatible' : ''}`} key={itemValue} onClick={() => chooseModel(itemValue)} disabled={saving || !runtimeCatalog || !usable} title={usable ? '可由当前 Runtime 直接使用' : compatibility?.reason || '当前 Runtime 不支持该模型'}><span>{modelName}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>;
+              const compatibilityLabel = compatibility?.compatibility === 'bridged' ? '通过 Frakio 兼容桥使用' : '可由当前 Runtime 直接使用';
+              return <button type="button" className={`${isSelected ? 'selected' : ''}${runtimeCatalog && !usable ? ' incompatible' : ''}`} key={itemValue} onClick={() => chooseModel(itemValue)} disabled={saving || !runtimeCatalog || !usable} title={usable ? compatibilityLabel : compatibility?.reason || '当前 Runtime 不支持该模型'}><span>{modelName}{usable && compatibility?.compatibility === 'bridged' ? ' · 兼容桥' : ''}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>;
             })}</div>
           </section>
         )) : <span className="provider-model-empty">{emptyLabel}</span>}
@@ -14535,10 +14620,9 @@ function pricingSourceLabel(source?: string) {
   return '未计价';
 }
 
-function OrgPage({ agents, models, hermesRuntime, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreate, profileEditor, defaultAgentId, onUpdateDefaultAgent, onRefreshHermesRuntime, onStartProfileGateway, onStopProfileGateway }: {
+function OrgPage({ agents, models, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreate, profileEditor, defaultAgentId, onUpdateDefaultAgent }: {
   agents: Agent[];
   models: ModelProfile[];
-  hermesRuntime: HermesRuntimeStatus | null;
   selectedOrgAgentId: string;
   onSelectAgent: (id: string) => void;
   onProfilesChanged: () => Promise<void>;
@@ -14548,9 +14632,6 @@ function OrgPage({ agents, models, hermesRuntime, selectedOrgAgentId, onSelectAg
   profileEditor: ProfileEditorControls;
   defaultAgentId: string;
   onUpdateDefaultAgent: (agentId: string) => void;
-  onRefreshHermesRuntime: () => Promise<unknown>;
-  onStartProfileGateway: (profileName: string) => Promise<void>;
-  onStopProfileGateway: (profileName: string) => Promise<void>;
 }) {
   const selectedAgent = agents.find((agent) => agent.id === selectedOrgAgentId) || agents[0] || null;
   return (
@@ -14561,40 +14642,14 @@ function OrgPage({ agents, models, hermesRuntime, selectedOrgAgentId, onSelectAg
           {agents.length > 0 && <label className="org-default-agent">默认 Agent<select value={defaultAgentId} onChange={(event) => onUpdateDefaultAgent(event.target.value)}>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>}
         </div>
         <div className="profile-grid">
-          {agents.map((agent) => {
-            const gateway = gatewayForAgent(agent, hermesRuntime);
-            return <button className={`profile-card ${selectedOrgAgentId === agent.id ? 'active' : ''}`} key={agent.id} onClick={() => onSelectAgent(agent.id)}><RuntimePulse gateway={gateway} /><AgentAvatar agent={agent} /><strong>{agent.name}</strong><small>{agent.role}</small><em>{agentDefaultModelLabel(agent, models)}</em><p>{agent.soulExcerpt || agent.soul || agent.scope}</p><span className={gatewayStatusClass(gateway)}>{gatewayStatusLabel(gateway)}</span></button>;
-          })}
+          {agents.map((agent) => <button className={`profile-card ${selectedOrgAgentId === agent.id ? 'active' : ''}`} key={agent.id} onClick={() => onSelectAgent(agent.id)}><AgentAvatar agent={agent} /><strong>{agent.name}</strong><small>{agent.role}</small><em>{agentDefaultModelLabel(agent, models)}</em><p>{agent.soulExcerpt || agent.soul || agent.scope}</p></button>)}
           <button className="profile-card profile-card-add" onClick={onCreate}><span className="profile-add-icon"><Plus size={22} /></span><strong>新建 Agent</strong><small>创建新的 Hermes Profile</small><p>填写基础资料后，可在下方继续编辑笔记、用户画像和灵魂。</p></button>
         </div>
-        {selectedAgent && <AgentProfileDetail agent={selectedAgent} models={models} gateway={gatewayForAgent(selectedAgent, hermesRuntime)} onChanged={onProfilesChanged} onUpdateAgent={onUpdateAgent} onDelete={() => onDeleteAgent(selectedAgent.id)} profileEditor={profileEditor} onRefreshHermesRuntime={onRefreshHermesRuntime} onStartProfileGateway={onStartProfileGateway} onStopProfileGateway={onStopProfileGateway} />}
+        {selectedAgent && <AgentProfileDetail agent={selectedAgent} models={models} canDelete={agents.length > 1} onChanged={onProfilesChanged} onUpdateAgent={onUpdateAgent} onDelete={() => onDeleteAgent(selectedAgent.id)} profileEditor={profileEditor} />}
       </div>
     </section>
   );
 }
-
-function gatewayForAgent(agent: Agent, runtime: HermesRuntimeStatus | null) {
-  const profileName = agent.profileName || agent.id;
-  return runtime?.gateways?.find((gateway) => gateway.profileName === profileName) || null;
-}
-
-function gatewayStatusLabel(gateway: HermesRuntimeStatus['gateways'][number] | null) {
-  if (gateway?.error) return '网关异常';
-  if (gateway?.running) return '网关运行中';
-  return '网关未运行';
-}
-
-function gatewayStatusClass(gateway: HermesRuntimeStatus['gateways'][number] | null) {
-  if (gateway?.error) return 'gateway-status error';
-  if (gateway?.running) return 'gateway-status running';
-  return 'gateway-status idle';
-}
-
-function RuntimePulse({ gateway }: { gateway: HermesRuntimeStatus['gateways'][number] | null }) {
-  return <span className={`runtime-pulse ${gateway?.error ? 'error' : gateway?.running ? 'running' : 'idle'}`} aria-label={gatewayStatusLabel(gateway)} title={gatewayStatusLabel(gateway)} />;
-}
-
-type GatewayOperation = 'refreshing' | 'starting' | 'restarting' | 'stopping';
 
 function AgentRuntimePolicyPanel({ agent, onUpdateAgent }: { agent: Agent; onUpdateAgent: (agentId: string, payload: Partial<Agent>) => Promise<void> }) {
   const [runtimes, setRuntimes] = useState<RuntimeDefinition[]>(runtimeSeed);
@@ -14656,8 +14711,8 @@ function AgentRuntimePolicyPanel({ agent, onUpdateAgent }: { agent: Agent; onUpd
   </section>;
 }
 
-function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, onDelete, profileEditor, onRefreshHermesRuntime, onStartProfileGateway, onStopProfileGateway }: { agent: Agent; models: ModelProfile[]; gateway: HermesRuntimeStatus['gateways'][number] | null; onChanged: () => Promise<void>; onUpdateAgent: (agentId: string, payload: Partial<Agent>) => Promise<void>; onDelete: () => Promise<void>; profileEditor: ProfileEditorControls; onRefreshHermesRuntime: () => Promise<unknown>; onStartProfileGateway: (profileName: string) => Promise<void>; onStopProfileGateway: (profileName: string) => Promise<void> }) {
-  const [tab, setTab] = useState<'notes' | 'user' | 'soul'>('notes');
+function AgentProfileDetail({ agent, models, canDelete, onChanged, onUpdateAgent, onDelete, profileEditor }: { agent: Agent; models: ModelProfile[]; canDelete: boolean; onChanged: () => Promise<void>; onUpdateAgent: (agentId: string, payload: Partial<Agent>) => Promise<void>; onDelete: () => Promise<void>; profileEditor: ProfileEditorControls }) {
+  const [tab, setTab] = useState<'notes' | 'user' | 'soul' | 'runtime'>('notes');
   const [avatarError, setAvatarError] = useState('');
   const [avatarSaving, setAvatarSaving] = useState(false);
   const [avatarCropFile, setAvatarCropFile] = useState<File | null>(null);
@@ -14667,25 +14722,21 @@ function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, 
   const [nameDraft, setNameDraft] = useState(agent.name);
   const [nameSaving, setNameSaving] = useState(false);
   const [nameError, setNameError] = useState('');
-  const [runtimeConfigOpen, setRuntimeConfigOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
-  const [gatewayOperations, setGatewayOperations] = useState<Record<string, GatewayOperation>>({});
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const tabs = [
     { id: 'notes', label: '笔记' },
     { id: 'user', label: '用户画像' },
     { id: 'soul', label: '灵魂' },
+    { id: 'runtime', label: '内核' },
   ] as const;
   const editableProfileName = agent.source === 'hermes-profile' && agent.profileName ? agent.profileName : '';
-  const runtimeProfileName = agent.profileName || agent.id;
-  const gatewayOperation = gatewayOperations[runtimeProfileName] || null;
-  const gatewayBusy = Boolean(gatewayOperation);
-  const gatewayOperationLabel = gatewayOperation === 'refreshing' ? '正在刷新网关状态' : gatewayOperation === 'restarting' ? '网关重启中' : gatewayOperation === 'starting' ? '网关启动中' : gatewayOperation === 'stopping' ? '网关停止中' : '';
   useEffect(() => {
     setNameDraft(agent.name);
     setNameEditing(false);
     setNameError('');
   }, [agent.id, agent.name]);
+  useEffect(() => { setTab('notes'); }, [agent.id]);
   function openEditor(kind: ProfileEditableKind, title: string) {
     if (!editableProfileName) return;
     void profileEditor.open({ agentId: agent.id, agentName: agent.name, profileName: editableProfileName, kind, title });
@@ -14696,17 +14747,16 @@ function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, 
     setTab(nextTab);
   }
   function chooseAvatar(file: File | undefined) {
-    if (!file || !editableProfileName) return;
+    if (!file) return;
     setAvatarError('');
     setAvatarCropFile(file);
     if (avatarInputRef.current) avatarInputRef.current.value = '';
   }
 
   async function uploadAvatar(data: string) {
-    if (!editableProfileName) return;
     setAvatarSaving(true);
     try {
-      const res = await fetch(`/api/hermes-profiles/${encodeURIComponent(editableProfileName)}/avatar`, {
+      const res = await fetch(`/api/agents/${encodeURIComponent(agent.id)}/avatar`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ mimeType: 'image/png', data }),
@@ -14755,47 +14805,6 @@ function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, 
       setNameSaving(false);
     }
   }
-  async function refreshGatewayStatus() {
-    if (gatewayBusy) return;
-    setGatewayOperations((current) => ({ ...current, [runtimeProfileName]: 'refreshing' }));
-    try {
-      await onRefreshHermesRuntime();
-    } finally {
-      setGatewayOperations((current) => {
-        const next = { ...current };
-        delete next[runtimeProfileName];
-        return next;
-      });
-    }
-  }
-  async function startGateway() {
-    if (gatewayBusy) return;
-    const operation: GatewayOperation = gateway?.running ? 'restarting' : 'starting';
-    setGatewayOperations((current) => ({ ...current, [runtimeProfileName]: operation }));
-    try {
-      await onStartProfileGateway(runtimeProfileName);
-    } finally {
-      setGatewayOperations((current) => {
-        const next = { ...current };
-        delete next[runtimeProfileName];
-        return next;
-      });
-    }
-  }
-  async function stopGateway() {
-    if (gatewayBusy) return;
-    setGatewayOperations((current) => ({ ...current, [runtimeProfileName]: 'stopping' }));
-    try {
-      await onStopProfileGateway(runtimeProfileName);
-      await onRefreshHermesRuntime();
-    } finally {
-      setGatewayOperations((current) => {
-        const next = { ...current };
-        delete next[runtimeProfileName];
-        return next;
-      });
-    }
-  }
   async function deleteAgent() {
     if (deleting) return;
     setDeleting(true);
@@ -14808,7 +14817,7 @@ function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, 
   return (
     <section className="agent-profile-detail">
       <div className="agent-profile-hero">
-        <button className="agent-profile-avatar" style={agent.avatarUrl ? undefined : { background: agent.color }} onClick={() => avatarInputRef.current?.click()} disabled={!editableProfileName || avatarSaving} title={editableProfileName ? '上传头像' : '保存为 Hermes Profile 后可上传头像'} aria-label="上传头像">
+        <button className="agent-profile-avatar" style={agent.avatarUrl ? undefined : { background: agent.color }} onClick={() => avatarInputRef.current?.click()} disabled={avatarSaving} title="上传头像" aria-label="上传头像">
           {agent.avatarUrl ? <img src={agent.avatarUrl} alt="" /> : agent.name.slice(0, 1)}
         </button>
         <input ref={avatarInputRef} className="file-input" type="file" accept="image/png,image/jpeg,image/webp,image/gif" onChange={(event) => chooseAvatar(event.target.files?.[0])} />
@@ -14841,7 +14850,7 @@ function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, 
           {nameError && <div className="inline-error">{nameError}</div>}
           {avatarError && <div className="inline-error">{avatarError}</div>}
         </div>
-        <button className="secondary-btn danger-btn agent-delete-btn" onClick={() => void deleteAgent()} disabled={deleting}><Trash2 size={15} />{deleting ? '正在删除' : '删除'}</button>
+        <button className="secondary-btn danger-btn agent-delete-btn" onClick={() => void deleteAgent()} disabled={deleting || !canDelete} title={canDelete ? '删除 Agent' : '至少需要保留一个 Agent'}><Trash2 size={15} />{deleting ? '正在删除' : '删除'}</button>
       </div>
       <div className="agent-profile-toolbar">
         <div className="agent-tabs">
@@ -14866,43 +14875,38 @@ function AgentProfileDetail({ agent, models, gateway, onChanged, onUpdateAgent, 
       </div>
       {modelError && <div className="inline-error">{modelError}</div>}
       {avatarCropFile && <AvatarCropModal file={avatarCropFile} title={`裁剪 ${agent.name} 的头像`} saving={avatarSaving} onCancel={() => setAvatarCropFile(null)} onSave={(data) => void uploadAvatar(data)} />}
-      <AgentRuntimePolicyPanel agent={agent} onUpdateAgent={onUpdateAgent} />
-      <div className="agent-runtime-row" aria-live="polite">
-        <span>
-          {gatewayBusy ? <LoaderCircle className="spin" size={14} aria-hidden="true" /> : <RuntimePulse gateway={gateway} />}
-          <strong>{gatewayOperationLabel || gatewayStatusLabel(gateway)}</strong>
-          <small>{runtimeProfileName}</small>
-          {!gatewayBusy && gateway?.error && <em>{gateway.error}</em>}
-        </span>
-        <div>
-          <button className="secondary-btn" onClick={() => void refreshGatewayStatus()} disabled={gatewayBusy}>{gatewayOperation === 'refreshing' ? '刷新中' : '刷新状态'}</button>
-          <button className="secondary-btn" onClick={() => void startGateway()} disabled={gatewayBusy}>{gatewayOperation === 'restarting' ? '重启中' : gatewayOperation === 'starting' ? '启动中' : gateway?.running ? '重启网关' : '启动网关'}</button>
-          <button className="secondary-btn" onClick={() => void stopGateway()} disabled={gatewayBusy || !agent.profileName}>{gatewayOperation === 'stopping' ? '停止中' : '停止网关'}</button>
-        </div>
-      </div>
-      <div className={runtimeConfigOpen ? 'agent-runtime-config open' : 'agent-runtime-config'}>
-        <button className="agent-runtime-config-toggle" onClick={() => setRuntimeConfigOpen((value) => !value)} aria-expanded={runtimeConfigOpen}>
-          <span>
-            <strong>Hermes 原生配置</strong>
-            <small>{runtimeProfileName ? `正在编辑：${runtimeProfileName}` : '这个 Agent 暂时没有绑定 Hermes Profile。'}</small>
-          </span>
-          <ChevronDown size={16} />
-        </button>
-        {runtimeConfigOpen && (
-          runtimeProfileName ? (
-            <HermesProfileConfigEditor profileName={runtimeProfileName} compact />
-          ) : (
-            <div className="empty-state">这个 Agent 暂时没有绑定 Hermes Profile。</div>
-          )
-        )}
-      </div>
       <div className="agent-tab-panel">
-        {tab === 'notes' && <EditableTextPanel agentId={agent.id} title="笔记" kind="notes" profileName={editableProfileName} text={agent.memory || ''} fallback={agent.memoryExcerpt || '这个 Profile 暂时没有 MEMORY.md 可展示。'} onEdit={() => openEditor('notes', '笔记')} editor={profileEditor} />}
-        {tab === 'user' && <EditableTextPanel agentId={agent.id} title="用户画像" kind="user" profileName={editableProfileName} text={agent.userProfile || ''} fallback={agent.userProfileExcerpt || '这个 Profile 暂时没有 USER.md 可展示。'} onEdit={() => openEditor('user', '用户画像')} editor={profileEditor} />}
-        {tab === 'soul' && <EditableTextPanel agentId={agent.id} title="灵魂" kind="soul" profileName={editableProfileName} text={agent.soul || ''} fallback={agent.soulExcerpt || '这个 Profile 暂时没有 SOUL.md 可展示。'} onEdit={() => openEditor('soul', '灵魂')} editor={profileEditor} />}
+        {tab === 'notes' && <FrakioAgentTextPanel title="Agent 笔记" text={agent.notes || ''} fallback="记录只属于这个 Agent 的维护说明。" onSave={(notes) => onUpdateAgent(agent.id, { notes } as Partial<Agent>)} />}
+        {tab === 'user' && <div className="text-panel editable-panel"><div className="panel-edit-head"><strong>用户画像</strong><span>Frakio 用户层</span></div><p>用户画像与个人偏好由“个人资料”和“记忆中心”统一管理，并投影给当前 Agent 使用。</p></div>}
+        {tab === 'soul' && <FrakioAgentTextPanel title="Soul" text={agent.soul || ''} fallback="定义这个 Agent 的人格和长期行为原则。" confirmLabel="确认修改 Soul" onSave={(soul) => onUpdateAgent(agent.id, { soul, confirmSoul: true } as Partial<Agent>)} />}
+        {tab === 'runtime' && <AgentRuntimePolicyPanel agent={agent} onUpdateAgent={onUpdateAgent} />}
       </div>
     </section>
   );
+}
+
+function FrakioAgentTextPanel({ title, text, fallback, confirmLabel = '保存', onSave }: { title: string; text: string; fallback: string; confirmLabel?: string; onSave: (value: string) => Promise<void> }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(text);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState('');
+  useEffect(() => { if (!editing) setDraft(text); }, [text, editing]);
+  async function save() {
+    setSaving(true);
+    setError('');
+    try {
+      await onSave(draft.trim());
+      setEditing(false);
+    } catch (saveError) {
+      setError(saveError instanceof Error ? saveError.message : '保存失败。');
+    } finally {
+      setSaving(false);
+    }
+  }
+  return <div className="text-panel editable-panel">
+    <div className="panel-edit-head"><strong>{title}</strong>{!editing && <button className="secondary-btn" onClick={() => setEditing(true)}><Pencil size={15} />编辑</button>}</div>
+    {editing ? <div className="inline-profile-editor"><textarea className="inline-profile-editor-textarea" value={draft} onChange={(event) => setDraft(event.target.value)} disabled={saving} autoFocus /><div className="inline-profile-editor-footer"><div className="inline-profile-editor-status">{error ? <span className="error">{error}</span> : <span>保存后同步到所有 Runtime</span>}</div><div className="panel-edit-actions"><button className="secondary-btn" onClick={() => { setDraft(text); setEditing(false); }} disabled={saving}>取消</button><button className="send-btn" onClick={() => void save()} disabled={saving || draft.trim() === text.trim()}>{saving ? '保存中' : confirmLabel}</button></div></div></div> : <p>{text || fallback}</p>}
+  </div>;
 }
 
 function EditableTextPanel({ agentId, title, kind, profileName, text, fallback, onEdit, editor }: { agentId: string; title: string; kind: 'notes' | 'user' | 'soul'; profileName: string; text: string; fallback: string; onEdit: () => void; editor: ProfileEditorControls }) {

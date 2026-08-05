@@ -461,6 +461,29 @@
   justify-content: flex-end;
 }
 
+.hermes-advanced-profile-config {
+  border-top: 1px solid var(--settings-row-border);
+  padding: 12px 16px 2px;
+}
+
+.hermes-advanced-profile-config > summary {
+  cursor: pointer;
+  color: var(--settings-title);
+  font-size: 13px;
+  font-weight: 650;
+  list-style-position: inside;
+}
+
+.hermes-advanced-profile-config-body {
+  display: grid;
+  gap: 12px;
+  padding-top: 10px;
+}
+
+.hermes-advanced-profile-config-body .agent-config-editor {
+  margin-top: 2px;
+}
+
 .frakio-settings-toggle-row {
   cursor: pointer;
   user-select: none;

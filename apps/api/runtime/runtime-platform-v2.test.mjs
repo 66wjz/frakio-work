@@ -113,6 +113,18 @@ test('Execution Realm changes when Provider credentials or Runtime Build changes
   assert.notEqual(first.revision, buildChanged.revision);
 });
 
+test('Execution Realm changes when protocol bridge or capability path changes', () => {
+  const input = {
+    runtimeId: 'codex', runtimeBinding: { runtimeBuildId: 'build-a' }, agentId: 'agent-a', skillSetRevision: 'skills-a', runtimeConfigRevision: 'config-a',
+    modelRoute: { providerId: 'provider-a', credentialRevision: 'credential-a', routeRevision: 'route-a', harnessApiMode: 'openai_responses', upstreamApiMode: 'chat_completions', bridgeId: 'responses-chat-v1', capabilities: { tools: 'bridge' } },
+  };
+  const first = createRuntimeExecutionRealm(input);
+  const bridgeChanged = createRuntimeExecutionRealm({ ...input, modelRoute: { ...input.modelRoute, bridgeId: 'responses-chat-v2' } });
+  const capabilityChanged = createRuntimeExecutionRealm({ ...input, modelRoute: { ...input.modelRoute, capabilities: { tools: 'unsupported' } } });
+  assert.notEqual(first.revision, bridgeChanged.revision);
+  assert.notEqual(first.revision, capabilityChanged.revision);
+});
+
 test('Context Delta only projects sources added after the applied watermark', () => {
   const firstPacket = {
     memory: [{ id: 'memory-a', updatedAt: '1', fact: 'A' }],
@@ -138,6 +150,36 @@ test('Context Delta only projects sources added after the applied watermark', ()
   assert.deepEqual(projected.memory.map((item) => item.id), ['memory-b']);
   assert.deepEqual(projected.projectKnowledge, []);
   assert.deepEqual(projected.handoff.recentConversation.map((item) => item.messageId), ['message-b']);
+});
+
+test('removing a recalled memory opens a fresh native session', async (t) => {
+  const { store } = await storeFixture('frakio-runtime-memory-removal-');
+  t.after(() => store.close());
+  store.upsertSession({
+    runtimeId: 'codex', threadId: 'thread-1', agentId: 'iris', workspaceId: 'workspace-1', laneType: 'chat', laneId: 'thread-1',
+    nativeSessionId: 'old-native', profileRevision: 'profile-1', metadata: { contextMemoryEntryIds: ['memory-forgotten'] },
+  });
+  let disposed = false;
+  const adapter = { async disposeSession() { disposed = true; } };
+  const registry = {
+    get() { return { id: 'codex', capabilities: { tools: true, approvals: true } }; },
+    async detect() { return { installed: true, status: 'ready', checkedAt: new Date().toISOString() }; },
+  };
+  const platform = createRuntimePlatform({
+    store, registry, adapters: new Map([['codex', adapter]]),
+    contextFactory: async () => ({ memory: [], handoff: { recentConversation: [] } }),
+    skillResolver: async () => ({}),
+  });
+  const prepared = await platform.prepare({
+    runtimeId: 'codex', threadId: 'thread-1', agent: { id: 'iris', runtimePolicy: {} }, workspace: { id: 'workspace-1' },
+    profileSnapshot: { revision: 'profile-1' }, permissionMode: 'smart',
+  });
+  assert.equal(disposed, true);
+  assert.equal(prepared.session.nativeSessionId, '');
+  assert.equal(prepared.session.checkpoint.reason, 'memory_context_removed');
+  assert.equal(prepared.contextDelta.full, true);
+  assert.equal(prepared.executionRealm.runtimeId, 'codex');
+  assert.equal(typeof prepared.modelRoute, 'object');
 });
 
 test('Permission Broker preserves product semantics and hard boundaries', () => {
@@ -339,7 +381,7 @@ test('schema v4 sessions migrate idempotently into chat lanes', async () => {
   legacy.close();
 
   const migrated = createRuntimeStore(file);
-  assert.equal(migrated.schemaVersion, 12);
+  assert.equal(migrated.schemaVersion, 13);
   assert.ok(migrated.migrationBackupPath);
   await access(migrated.migrationBackupPath);
   assert.equal(migrated.getSession('legacy-session').laneType, 'chat');

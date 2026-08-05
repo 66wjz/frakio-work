@@ -451,3 +451,28 @@ test('Claude channel uses an isolated Agent SDK realm and canonical stream event
   assert.equal(capturedOptions.env.CLAUDE_CONFIG_DIR, path.join(root, 'claude-home', 'claude-test-realm'));
   assert.equal(capturedOptions.env.ANTHROPIC_AUTH_TOKEN, 'realm-token');
 });
+
+test('Claude channel preserves the Provider failure returned by the SDK', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-claude-failure-'));
+  const queryFactory = () => {
+    const generator = (async function* () {
+      yield { type: 'system', subtype: 'init', session_id: 'claude-session-failed' };
+      yield { type: 'result', subtype: 'error_during_execution', session_id: 'claude-session-failed', is_error: true, result: 'Provider rejected the request.' };
+    })();
+    generator.interrupt = async () => {};
+    generator.close = () => {};
+    return generator;
+  };
+  const bridge = createClaudeAgentSdkBridge({ runtimeHomeRoot: path.join(root, 'claude-home'), queryFactory });
+  t.after(() => bridge.close());
+  const terminal = new Promise((resolve) => bridge.on('event', ({ event }) => {
+    if (event.type === 'run.failed') resolve(event);
+  }));
+  await bridge.startRun({
+    runId: 'claude-run-failed', sessionId: 'claude-frakio-failed', cwd: root, permissionMode: 'manual',
+    profileSnapshot: { name: 'Victor', role: 'Engineer' }, contextPacket: { memory: [], knowledge: [] }, prompt: 'Hello', model: 'claude-test',
+    runtimeBinding: { executablePath: process.execPath }, executionRealm: { revision: 'claude-failed-realm' },
+    launchSpec: { baseUrl: 'http://127.0.0.1:8787/frakio', token: 'realm-token', modelId: 'claude-test' },
+  });
+  assert.equal((await terminal).payload.error, 'Provider rejected the request.');
+});

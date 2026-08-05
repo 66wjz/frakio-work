@@ -311,7 +311,7 @@ Responsibility:
 ${snapshot.scope || 'Complete the assigned task and report verifiable results.'}
 
 User profile context:
-${snapshot.userProfile || 'No additional user profile was provided.'}
+${contextPacket?.userProfile ? JSON.stringify(contextPacket.userProfile) : 'No additional user profile was provided.'}
 
 Portable accepted memory:
 ${memory}

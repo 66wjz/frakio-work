@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import { Readable } from 'node:stream';
+import { pipeBridgedResponse, transformBridgeRequest } from './protocol-bridge.mjs';
 
 function bearer(value) {
   return /^bearer\s/i.test(String(value || '')) ? String(value) : `Bearer ${value}`;
@@ -11,9 +12,9 @@ export function createRuntimeModelGateway({ origin }) {
 
   function issue({ executionRealm, route, credential }) {
     const realmRevision = String(executionRealm?.revision || '');
-    if (!realmRevision || !route?.targetUrl || !credential) {
-      throw Object.assign(new Error('Runtime Model Route 不完整。'), { status: 409, code: 'RUNTIME_MODEL_ROUTE_MISSING' });
-    }
+    if (!realmRevision) throw Object.assign(new Error('Runtime Execution Realm 缺少 revision。'), { status: 409, code: 'RUNTIME_REALM_MISSING', stage: 'materialize' });
+    if (!route?.targetUrl) throw Object.assign(new Error('模型 Provider 缺少有效的目标地址。'), { status: 409, code: 'RUNTIME_TARGET_URL_MISSING', stage: 'materialize' });
+    if (!credential) throw Object.assign(new Error('Runtime Model Route 缺少可用凭据。'), { status: 409, code: 'RUNTIME_CREDENTIAL_MISSING', stage: 'materialize' });
     const existingToken = realmTokens.get(realmRevision);
     const existing = existingToken ? tokens.get(existingToken) : null;
     if (existing?.route?.routeRevision === route.routeRevision) return existing.launchSpec;
@@ -50,10 +51,11 @@ export function createRuntimeModelGateway({ origin }) {
     const entry = tokens.get(String(req.params.token || ''));
     if (!entry) return res.status(401).json({ error: 'Runtime Realm token 已失效。' });
     const requestedPath = String(req.params.operation || '');
-    const expectedPath = entry.route.apiMode === 'anthropic_messages' ? 'messages' : 'responses';
+    const harnessApiMode = entry.route.harnessApiMode || entry.route.apiMode;
+    const expectedPath = harnessApiMode === 'anthropic_messages' ? 'messages' : 'responses';
     if (requestedPath.replace(/^\/+/, '') !== expectedPath) return res.status(404).json({ error: 'Runtime Model Route 不支持该协议路径。' });
     const headers = { 'content-type': 'application/json', accept: req.headers.accept || 'text/event-stream, application/json' };
-    if (entry.route.apiMode === 'anthropic_messages') {
+    if (entry.route.upstreamApiMode === 'anthropic_messages' || entry.route.apiMode === 'anthropic_messages') {
       headers['anthropic-version'] = String(req.headers['anthropic-version'] || '2023-06-01');
       if (entry.route.authType === 'oauth') headers.authorization = bearer(entry.credential);
       else if (entry.route.authType !== 'none') headers['x-api-key'] = entry.credential;
@@ -65,9 +67,10 @@ export function createRuntimeModelGateway({ origin }) {
       const upstream = await fetch(entry.route.targetUrl, {
         method: 'POST',
         headers,
-        body: JSON.stringify({ ...(req.body || {}), model: entry.route.modelId }),
+        body: JSON.stringify(transformBridgeRequest(req.body || {}, entry.route)),
         signal: req.signal,
       });
+      if (entry.route.compatibility === 'bridged') return await pipeBridgedResponse(upstream, res, entry.route);
       res.status(upstream.status);
       for (const name of ['content-type', 'request-id', 'x-request-id', 'openai-processing-ms']) {
         const value = upstream.headers.get(name);

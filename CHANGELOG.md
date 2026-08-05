@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.2.3 — 2026-08-05
+
+Codex 与 Claude Code 现在通过 Frakio Runtime Host 恢复原生 Harness 会话链路。Responses、Chat Completions 与 Anthropic Messages 之间可按模型路由直连或桥接，Runtime Preflight 会在发送前检查模型、凭据、协议和权限；启动或流式失败会恢复输入区并显示可重试原因，不再静默停在运行中。
+
+Memory、Skill 与宿主上下文投射统一覆盖 Hermes、Pi、Codex 和 Claude。Runtime Center 区分二进制、Adapter、模型路由与真实对话验证状态，便于定位本机安装、托管版本和模型链路的问题。
+
+Web 工作台与桌面端对齐了顶部控制区：侧栏收拢和新建对话可在浏览器中使用；进入具体对话后可打开 Thread 范围的右侧资源栏，新对话和设置页不显示无上下文面板。
+
 ## 1.2.2 — 2026-08-04
 
 运行中的会话现在可以在刷新页面、切换窗口或应用重启后恢复。Host Run 会保存可重放的正文、工具活动、审批和上下文压缩状态；启动中、执行中和已结束的运行会准确同步到对话与侧栏，不再因为界面重连而误判为结束。

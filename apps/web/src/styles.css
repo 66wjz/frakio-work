@@ -24,6 +24,11 @@ body:has(.mac-desktop-shell) #root { background: transparent; }
   min-width: 0;
 }
 
+.managed-web-shell .workbench-window-controls {
+  top: 11px;
+  left: 16px;
+}
+
 @media (max-width: 760px) {
   .managed-web-shell {
     --sidebar-width: min(82vw, 292px);
@@ -7385,24 +7390,6 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   background: #fff;
   text-align: left;
 }
-.runtime-pulse {
-  position: absolute;
-  top: 12px;
-  right: 12px;
-  width: 10px;
-  height: 10px;
-  border-radius: 999px;
-  background: #a8b1ad;
-}
-.runtime-pulse.running {
-  background: #16a37b;
-  box-shadow: 0 0 0 0 rgba(22, 163, 123, .35);
-  animation: runtime-pulse 1.8s ease-out infinite;
-}
-.runtime-pulse.error {
-  background: #f59e0b;
-  box-shadow: 0 0 0 3px rgba(245, 158, 11, .14);
-}
 @keyframes runtime-pulse {
   0% { box-shadow: 0 0 0 0 rgba(22, 163, 123, .38); }
   70% { box-shadow: 0 0 0 9px rgba(22, 163, 123, 0); }
@@ -7433,40 +7420,11 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   font-size: 13px;
   line-height: 1.45;
 }
-.profile-card .gateway-status {
-  display: inline-flex;
-  align-items: center;
-  width: fit-content;
-  min-height: 22px;
-  border-radius: 999px;
-  padding: 0 8px;
-  color: #687773;
-  background: #f2f5f4;
-  font-size: 12px;
-}
-.profile-card .gateway-status.running {
-  color: #0f766e;
-  background: #edf8f2;
-}
-.profile-card .gateway-status.error {
-  color: #9a5a08;
-  background: #fff7e6;
-}
 .profile-card-add {
   align-content: center;
   justify-items: start;
   border-style: dashed;
   color: #30423d;
-}
-.agent-runtime-row {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 12px;
-  align-items: center;
-  border: 1px solid #e2e9e5;
-  border-radius: 8px;
-  padding: 10px 12px;
-  background: #fbfcfb;
 }
 .agent-runtime-policy {
   display: grid;
@@ -7494,43 +7452,6 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .agent-runtime-policy-item label { min-width: 0; flex: 1; align-items: center; gap: 8px; }
 .agent-runtime-policy-item label input { width: auto; height: auto; }
 .agent-runtime-policy-item label > span { min-width: 0; }
-.agent-runtime-row > span {
-  position: relative;
-  display: grid;
-  grid-template-columns: 16px auto minmax(0, 1fr);
-  column-gap: 8px;
-  row-gap: 2px;
-  align-items: center;
-  min-width: 0;
-}
-.agent-runtime-row .runtime-pulse {
-  position: static;
-  grid-row: 1 / 3;
-}
-.agent-runtime-row strong {
-  color: #263832;
-  font-size: 13px;
-}
-.agent-runtime-row small {
-  overflow: hidden;
-  color: #7a8782;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 12px;
-}
-.agent-runtime-row em {
-  grid-column: 2 / -1;
-  overflow-wrap: anywhere;
-  color: #a34b3f;
-  font-size: 12px;
-  font-style: normal;
-}
-.agent-runtime-row > div {
-  display: flex;
-  flex-wrap: wrap;
-  justify-content: end;
-  gap: 8px;
-}
 .profile-card-add:hover {
   border-color: #0f766e;
   background: #f7fbf9;
@@ -7712,6 +7633,7 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   margin-top: 4px;
 }
 .agent-tab-panel { min-height: 140px; }
+.agent-tab-panel .agent-runtime-policy { margin: 0; }
 .profile-summary-grid {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -9922,7 +9844,6 @@ textarea {
 .module-panel,
 .module-row,
 .module-card,
-.agent-runtime-row,
 .agent-runtime-config {
   border-color: var(--line);
   background: rgb(255 255 255 / 78%);
@@ -10547,8 +10468,7 @@ textarea:focus-visible {
 
 .model-card-top small,
 .update-card-head em,
-.platform-title em.configured,
-.profile-card .gateway-status.running {
+.platform-title em.configured {
   color: #0b8f67;
 }
 
@@ -11573,11 +11493,13 @@ textarea:focus-visible {
 .desktop-shell.workspace-create-mode .workspace-create-window-dots { display: none; }
 
 .desktop-shell.workspace-create-mode .desktop-window-controls,
+.desktop-shell.workspace-create-mode .workbench-window-controls,
 .desktop-shell.workspace-create-mode .desktop-right-rail-toggle {
   display: none;
 }
 
-.desktop-window-controls {
+.desktop-window-controls,
+.workbench-window-controls {
   position: fixed;
   top: 13px;
   left: 119px;
@@ -11861,6 +11783,8 @@ textarea:focus-visible {
 .desktop-shell .top-actions *,
 .desktop-shell .desktop-window-controls,
 .desktop-shell .desktop-window-controls *,
+.desktop-shell .workbench-window-controls,
+.desktop-shell .workbench-window-controls *,
 .desktop-shell button,
 .desktop-shell select,
 .desktop-shell input,
@@ -12135,14 +12059,14 @@ textarea:focus-visible {
   height: 32px;
 }
 
-.mac-window-toolbar .desktop-window-controls {
+.mac-window-toolbar .workbench-window-controls {
   top: 11px;
   z-index: 3;
   height: 28px;
   gap: 8px;
 }
 
-.mac-window-toolbar .desktop-window-control {
+.mac-window-toolbar .workbench-window-controls .desktop-window-control {
   width: 28px;
   height: 28px;
   cursor: pointer;
@@ -16555,6 +16479,14 @@ body:has(.mac-desktop-shell) :is(.provider-model-menu, .mention-menu, .provider-
 .knowledge-vault-list-row strong { overflow: hidden; color: var(--text, #202624); font-size: 13px; text-overflow: ellipsis; white-space: nowrap; }
 .knowledge-vault-list-row small { overflow: hidden; color: var(--muted-text, #7b8581); font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
 .knowledge-vault-icon { display: grid; width: 32px; height: 32px; place-items: center; border: 1px solid var(--line, #e1e5e3); border-radius: 7px; color: #4c6259; background: #f7f9f8; }
+.knowledge-vault-icon img { width: 100%; height: 100%; border-radius: inherit; object-fit: cover; }
+.knowledge-vault-icon.large { width: 42px; height: 42px; }
+.knowledge-vault-avatar-form { display: flex; align-items: center; gap: 9px; }
+.vault-switcher-icon { display: grid; width: 16px; height: 16px; place-items: center; overflow: hidden; border-radius: 4px; }
+.vault-switcher-icon img, .vault-switcher-menu-avatar { width: 16px; height: 16px; border-radius: 4px; object-fit: cover; }
+.vault-switcher-menu { min-width: 224px; }
+.vault-switcher-menu [role='menuitem'] { display: flex; align-items: center; gap: 8px; }
+.vault-switcher-menu [role='menuitem'] span { flex: 1; }
 .knowledge-state { border: 1px solid #d8e5dd; border-radius: 999px; padding: 3px 7px; color: #3f6f55; background: #f4faf6; font-size: 10px; white-space: nowrap; }
 .knowledge-state.warning { border-color: #eadfbd; color: #856b2c; background: #fffaf0; }
 .knowledge-vault-detail { display: grid; min-height: 0; }

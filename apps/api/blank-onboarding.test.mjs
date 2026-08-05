@@ -28,7 +28,7 @@ async function startTestApp(t, prefix) {
   return { parent, home, hermesHome, baseUrl, writeHeaders: { cookie, 'x-frakio-request': '1' } };
 }
 
-test('fresh install stays blank until Hermes profiles are explicitly synchronized', async (t) => {
+test('fresh install creates a personal vault while models and Agents remain unconfigured', async (t) => {
   const ctx = await startTestApp(t, 'frakio-blank-install-');
   const profileDir = path.join(ctx.hermesHome, 'profiles', 'local-agent');
   await mkdir(profileDir, { recursive: true });
@@ -43,10 +43,23 @@ test('fresh install stays blank until Hermes profiles are explicitly synchronize
   assert.deepEqual(agents.agents, []);
   assert.deepEqual(models.models, []);
   assert.deepEqual(conversations.conversations, []);
-  assert.deepEqual(vaults.vaults, []);
+  assert.equal(vaults.vaults.length, 1);
+  assert.equal(vaults.vaults[0].kind, 'personal');
+  assert.equal(vaults.vaults[0].name, '个人资料库');
+  assert.equal(vaults.personalVaultId, vaults.vaults[0].id);
+  assert.equal(vaults.onboarding.status, 'model_connection');
   assert.equal(state.ui.defaultAgentId, '');
   assert.equal(state.ui.defaultModel, '');
   assert.equal(state.ui.agentMentionMaxDepth, 2);
+
+  for (const endpoint of ['connect-model', 'resume', 'advance', 'confirm', 'skip-vault']) {
+    const response = await fetch(`${ctx.baseUrl}/api/onboarding/${endpoint}`, {
+      method: 'POST',
+      headers: { ...ctx.writeHeaders, 'content-type': 'application/json' },
+      body: '{}',
+    });
+    assert.equal(response.status, 404);
+  }
 
   const mentionLimitResponse = await fetch(`${ctx.baseUrl}/api/state/ui`, {
     method: 'PATCH',
@@ -78,6 +91,7 @@ test('fresh install stays blank until Hermes profiles are explicitly synchronize
   });
   assert.equal(conversationResponse.status, 200);
   const conversation = await conversationResponse.json();
+  assert.equal(conversation.thread.vaultId, vaults.personalVaultId);
   assert.deepEqual(conversation.thread.messages, []);
   assert.deepEqual(conversation.thread.agentRunOverrides, {
     'local-agent': { reasoningEffort: 'high', speedMode: 'fast' },
@@ -223,7 +237,9 @@ test('legacy cleanup removes only untouched built-in content and creates an idem
   assert.deepEqual(cleaned.agents.map((agent) => agent.id), ['max']);
   assert.deepEqual(cleaned.models.map((model) => model.id), []);
   assert.deepEqual(cleaned.threads, []);
-  assert.deepEqual(cleaned.vaults, []);
+  assert.equal(cleaned.vaults.length, 1);
+  assert.equal(cleaned.vaults[0].kind, 'personal');
+  assert.equal(cleaned.personalVaultId, cleaned.vaults[0].id);
   assert.equal(cleaned.ui.defaultAgentId, 'max');
   assert.equal(cleaned.ui.defaultModel, '');
   assert.equal(cleaned.workspaces[0].activeThreadId, null);

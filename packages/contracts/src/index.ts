@@ -74,9 +74,64 @@ export type AgentRuntimePolicy = {
   permissionProfileId: string;
 };
 
+export type AgentOwnership = {
+  identity: 'frakio';
+  memory: 'frakio';
+  runtimeProfile: 'hermes' | 'none';
+};
+
+export type MemoryScope = 'user' | 'agent' | 'vault' | 'thread';
+export type MemoryStatus = 'candidate' | 'accepted' | 'paused' | 'superseded' | 'rejected' | 'forgotten';
+
+export type MemoryEvent = {
+  id: string;
+  idempotencyKey: string;
+  memoryId: string;
+  type: 'memory.proposed' | 'memory.accepted' | 'memory.updated' | 'memory.forgotten' | 'memory.purged' | 'projection.published' | string;
+  actorType: 'user' | 'runtime' | 'policy' | 'system' | string;
+  actorId: string;
+  payload: Record<string, unknown>;
+  status: 'pending' | 'completed' | 'failed';
+  error: string;
+  createdAt: string;
+  processedAt: string | null;
+};
+
+export type ContextReceipt = {
+  id: string;
+  threadId: string;
+  runId: string;
+  runtimeId: RuntimeId | '';
+  agentId: string;
+  query: string;
+  memoryRevision: string;
+  included: Array<{ id: string; scope: MemoryScope; kind: MemoryEntry['kind']; reason: string }>;
+  excluded: Array<{ id: string; reason: string }>;
+  createdAt: string;
+};
+
+export type HermesProjectionState = {
+  profileName: string;
+  agentId: string;
+  agentRevision: string;
+  memoryRevision: string;
+  contentHash: string;
+  files: Record<string, string>;
+  status: 'pending' | 'ready' | 'failed';
+  error: string;
+  generatedAt: string | null;
+  updatedAt: string;
+};
+
 export type RuntimeModelCompatibility = {
   status: 'ready' | 'partial' | 'unsupported' | 'missing_credentials';
   credentialStatus: 'ready' | 'missing' | 'not_required';
+  compatibility: 'direct' | 'bridged' | 'unsupported';
+  bridgeId: string;
+  harnessApiMode: string;
+  upstreamApiMode: string;
+  capabilities: Record<string, 'native' | 'bridge' | 'auxiliary' | 'unsupported'>;
+  degradations: string[];
   usableModelIds: string[];
   unsupportedModelIds: string[];
   reason: string;
@@ -156,7 +211,12 @@ export type RuntimeModelRoute = {
   modelId: string;
   apiMode: 'anthropic_messages' | 'codex_responses' | 'openai_responses' | 'chat_completions' | 'bedrock_converse' | string;
   protocol?: 'anthropic-messages' | 'openai-responses' | 'openai-chat';
-  compatibility: 'direct' | 'bridge' | 'unsupported';
+  compatibility: 'direct' | 'bridged' | 'unsupported';
+  harnessApiMode?: string;
+  upstreamApiMode?: string;
+  bridgeId?: string;
+  capabilities?: Record<string, 'native' | 'bridge' | 'auxiliary' | 'unsupported'>;
+  degradations?: string[];
   credentialRevision: string;
   providerCredentialRevision?: string;
   routeRevision: string;
@@ -309,8 +369,15 @@ export type RuntimeLaunchSpec = {
   runtimeBinding: RuntimeBinding | null;
   executionRealm: RuntimeExecutionRealm;
   modelRoute: RuntimeModelRoute;
+  mcpServers?: Record<string, { type?: 'stdio'; command: string; args?: string[]; env?: Record<string, string> }>;
   cwd: string;
   prompt: string;
+  content?: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image'; attachmentId: string; name: string; mimeType: string; filePath: string; source?: 'native' | 'auxiliary' }
+    | { type: 'document'; attachmentId: string; name: string; mimeType: string; filePath: string; source?: 'native' | 'auxiliary' }
+    | { type: 'file_reference'; attachmentId: string; name: string; mimeType: string; filePath: string }
+  >;
   permissionMode: string;
 };
 
@@ -491,7 +558,7 @@ export type RunReceipt = {
   completedAt: string | null;
 };
 
-export type MemoryEntryStatus = 'candidate' | 'accepted' | 'superseded' | 'rejected';
+export type MemoryEntryStatus = MemoryStatus;
 
 export type MemoryProvenance = {
   runtimeId?: RuntimeId;
@@ -503,15 +570,30 @@ export type MemoryProvenance = {
 
 export type MemoryEntry = {
   id: string;
-  scope: 'user' | 'agent' | 'workspace';
+  scope: MemoryScope;
   subjectId: string;
+  kind: 'personal_fact' | 'preference' | 'agent_experience' | 'project_fact' | 'project_decision' | 'project_rule' | 'fact';
   fact: string;
+  origin: string;
+  sourceAgentId: string;
+  sourceSessionId: string;
+  sourceMessageId: string;
+  threadId: string;
+  vaultId: string;
   provenance: MemoryProvenance[];
   confidence: number;
   status: MemoryEntryStatus;
+  reason?: string;
+  statusReason?: string;
+  pausedAt?: string | null;
   validFrom: string | null;
   validUntil: string | null;
   supersedesId: string | null;
+  createdRevision: string;
+  lastRecalledAt: string | null;
+  recallCount: number;
+  deletedAt: string | null;
+  deletionReason: string;
   createdAt: string;
   updatedAt: string;
 };

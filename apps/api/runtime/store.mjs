@@ -4,7 +4,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { reduceRunPresentation } from './presentation.mjs';
 
-const SCHEMA_VERSION = 12;
+const SCHEMA_VERSION = 13;
 
 function timestamp() {
   return new Date().toISOString();
@@ -293,6 +293,45 @@ export function createRuntimeStore(filePath) {
       completed_at TEXT
     );
     CREATE INDEX IF NOT EXISTS memory_review_jobs_status_idx ON memory_review_jobs(status, next_attempt_at, updated_at);
+    CREATE TABLE IF NOT EXISTS memory_events (
+      id TEXT PRIMARY KEY,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      memory_id TEXT NOT NULL DEFAULT '',
+      type TEXT NOT NULL,
+      actor_type TEXT NOT NULL DEFAULT 'system',
+      actor_id TEXT NOT NULL DEFAULT '',
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'completed',
+      error TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      processed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS memory_events_memory_idx ON memory_events(memory_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS memory_context_receipts (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      run_id TEXT NOT NULL DEFAULT '',
+      runtime_id TEXT NOT NULL DEFAULT '',
+      agent_id TEXT NOT NULL DEFAULT '',
+      query TEXT NOT NULL DEFAULT '',
+      memory_revision TEXT NOT NULL DEFAULT '',
+      included_json TEXT NOT NULL DEFAULT '[]',
+      excluded_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS memory_context_receipts_thread_idx ON memory_context_receipts(thread_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS hermes_projections (
+      profile_name TEXT PRIMARY KEY,
+      agent_id TEXT NOT NULL DEFAULT '',
+      agent_revision TEXT NOT NULL DEFAULT '',
+      memory_revision TEXT NOT NULL DEFAULT '',
+      content_hash TEXT NOT NULL DEFAULT '',
+      files_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'pending',
+      error TEXT NOT NULL DEFAULT '',
+      generated_at TEXT,
+      updated_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS knowledge_commits (
       id TEXT PRIMARY KEY,
       workspace_id TEXT NOT NULL,
@@ -605,6 +644,14 @@ export function createRuntimeStore(filePath) {
     ['sync_block_hash', "TEXT NOT NULL DEFAULT ''"],
     ['sync_state', "TEXT NOT NULL DEFAULT 'none'"],
     ['synced_at', 'TEXT'],
+    ['source_runtime_id', "TEXT NOT NULL DEFAULT ''"],
+    ['source_session_id', "TEXT NOT NULL DEFAULT ''"],
+    ['source_message_id', "TEXT NOT NULL DEFAULT ''"],
+    ['created_revision', "TEXT NOT NULL DEFAULT ''"],
+    ['last_recalled_at', 'TEXT'],
+    ['recall_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['deleted_at', 'TEXT'],
+    ['deletion_reason', "TEXT NOT NULL DEFAULT ''"],
   ];
   for (const [column, definition] of memoryColumnMigrations) {
     if (!memoryColumns.has(column)) db.exec(`ALTER TABLE memory_entries ADD COLUMN ${column} ${definition}`);
@@ -715,6 +762,10 @@ export function createRuntimeStore(filePath) {
     threadId: row.thread_id || '',
     vaultId: row.vault_id || '',
     sourceHash: row.source_hash || '',
+    sourceRuntimeId: row.source_runtime_id || '',
+    sourceSessionId: row.source_session_id || '',
+    sourceMessageId: row.source_message_id || '',
+    createdRevision: row.created_revision || '',
     fact: row.fact,
     reason: row.reason || '',
     statusReason: row.status_reason || '',
@@ -725,6 +776,10 @@ export function createRuntimeStore(filePath) {
     validFrom: row.valid_from,
     validUntil: row.valid_until,
     supersedesId: row.supersedes_id,
+    lastRecalledAt: row.last_recalled_at,
+    recallCount: Number(row.recall_count || 0),
+    deletedAt: row.deleted_at,
+    deletionReason: row.deletion_reason || '',
     sync: {
       vaultId: row.sync_vault_id || '',
       relativePath: row.sync_relative_path || '',
@@ -754,6 +809,46 @@ export function createRuntimeStore(filePath) {
     createdAt: row.created_at,
     updatedAt: row.updated_at,
     completedAt: row.completed_at,
+  });
+
+  const mapMemoryEvent = (row) => row && ({
+    id: row.id,
+    idempotencyKey: row.idempotency_key,
+    memoryId: row.memory_id || '',
+    type: row.type,
+    actorType: row.actor_type || 'system',
+    actorId: row.actor_id || '',
+    payload: json(row.payload_json),
+    status: row.status,
+    error: row.error || '',
+    createdAt: row.created_at,
+    processedAt: row.processed_at,
+  });
+
+  const mapMemoryReceipt = (row) => row && ({
+    id: row.id,
+    threadId: row.thread_id,
+    runId: row.run_id || '',
+    runtimeId: row.runtime_id || '',
+    agentId: row.agent_id || '',
+    query: row.query || '',
+    memoryRevision: row.memory_revision || '',
+    included: json(row.included_json, []),
+    excluded: json(row.excluded_json, []),
+    createdAt: row.created_at,
+  });
+
+  const mapHermesProjection = (row) => row && ({
+    profileName: row.profile_name,
+    agentId: row.agent_id || '',
+    agentRevision: row.agent_revision || '',
+    memoryRevision: row.memory_revision || '',
+    contentHash: row.content_hash || '',
+    files: json(row.files_json),
+    status: row.status,
+    error: row.error || '',
+    generatedAt: row.generated_at,
+    updatedAt: row.updated_at,
   });
 
   const mapKnowledgeSource = (row) => row && ({
@@ -1536,14 +1631,16 @@ export function createRuntimeStore(filePath) {
         INSERT INTO memory_entries(
           id, scope, subject_id, normalized_fact, kind, origin, source_agent_id, thread_id, vault_id, source_hash, fact, reason, status_reason,
           provenance_json, confidence, status, paused_at, valid_from, valid_until, supersedes_id,
-          sync_vault_id, sync_relative_path, sync_block_hash, sync_state, synced_at, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          sync_vault_id, sync_relative_path, sync_block_hash, sync_state, synced_at,
+          source_runtime_id, source_session_id, source_message_id, created_revision, deleted_at, deletion_reason, created_at, updated_at
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id, input.scope, input.subjectId, normalizedFact, input.kind || 'fact', input.origin || 'unknown',
         input.sourceAgentId || '', input.threadId || '', input.vaultId || '', input.sourceHash || '', String(input.fact).trim(),
         input.reason || '', input.statusReason || '', encode(input.provenance || []), Math.max(0, Math.min(1, Number(input.confidence ?? 0.5))),
         input.status || 'candidate', input.pausedAt || null, input.validFrom || null, input.validUntil || null,
         input.supersedesId || null, input.sync?.vaultId || '', input.sync?.relativePath || '', input.sync?.blockHash || '', input.sync?.state || 'none', input.sync?.syncedAt || null,
+        input.sourceRuntimeId || '', input.sourceSessionId || '', input.sourceMessageId || '', input.createdRevision || '', input.deletedAt || null, input.deletionReason || '',
         current, current,
       );
       return api.getMemory(id);
@@ -1551,7 +1648,7 @@ export function createRuntimeStore(filePath) {
     updateMemory(id, patch) {
       const current = db.prepare('SELECT * FROM memory_entries WHERE id = ?').get(id);
       if (!current) return null;
-      const nextStatus = ['candidate', 'accepted', 'paused', 'superseded', 'rejected'].includes(patch.status) ? patch.status : current.status;
+      const nextStatus = ['candidate', 'accepted', 'paused', 'superseded', 'rejected', 'forgotten'].includes(patch.status) ? patch.status : current.status;
       const nextFact = patch.fact === undefined ? current.fact : String(patch.fact || '').trim();
       if (!nextFact) throw new Error('Memory fact is required.');
       const nextNormalized = nextFact.toLowerCase().replace(/\s+/g, ' ');
@@ -1563,7 +1660,8 @@ export function createRuntimeStore(filePath) {
       db.prepare(`
         UPDATE memory_entries SET scope=?, subject_id=?, fact=?, normalized_fact=?, kind=?, origin=?, source_agent_id=?, thread_id=?, vault_id=?,
           reason=?, status_reason=?, status=?, confidence=?, paused_at=?, valid_from=?, valid_until=?, supersedes_id=?,
-          sync_vault_id=?, sync_relative_path=?, sync_block_hash=?, sync_state=?, synced_at=?, updated_at=? WHERE id=?
+          sync_vault_id=?, sync_relative_path=?, sync_block_hash=?, sync_state=?, synced_at=?,
+          source_runtime_id=?, source_session_id=?, source_message_id=?, created_revision=?, deleted_at=?, deletion_reason=?, updated_at=? WHERE id=?
       `).run(
         nextScope,
         nextSubjectId,
@@ -1587,10 +1685,73 @@ export function createRuntimeStore(filePath) {
         sync.blockHash === undefined ? current.sync_block_hash : String(sync.blockHash || ''),
         sync.state === undefined ? current.sync_state : String(sync.state || 'none'),
         sync.syncedAt === undefined ? current.synced_at : sync.syncedAt || null,
+        patch.sourceRuntimeId === undefined ? current.source_runtime_id : String(patch.sourceRuntimeId || ''),
+        patch.sourceSessionId === undefined ? current.source_session_id : String(patch.sourceSessionId || ''),
+        patch.sourceMessageId === undefined ? current.source_message_id : String(patch.sourceMessageId || ''),
+        patch.createdRevision === undefined ? current.created_revision : String(patch.createdRevision || ''),
+        patch.deletedAt === undefined ? current.deleted_at : patch.deletedAt || null,
+        patch.deletionReason === undefined ? current.deletion_reason : String(patch.deletionReason || ''),
         timestamp(), id,
       );
       return api.getMemory(id);
     },
+    touchMemoryRecall(ids = [], recalledAt = timestamp()) {
+      const unique = [...new Set(ids.map(String).filter(Boolean))];
+      if (!unique.length) return 0;
+      const update = db.prepare('UPDATE memory_entries SET last_recalled_at=?, recall_count=recall_count+1 WHERE id=?');
+      api.transaction(() => unique.forEach((id) => update.run(recalledAt, id)));
+      return unique.length;
+    },
+    deleteMemory(id) {
+      return db.prepare('DELETE FROM memory_entries WHERE id = ?').run(id).changes > 0;
+    },
+    putMemoryEvent(input) {
+      const key = String(input.idempotencyKey || '').trim();
+      if (!key) throw new Error('Memory event idempotency key is required.');
+      const existing = db.prepare('SELECT * FROM memory_events WHERE idempotency_key = ?').get(key);
+      if (existing) return mapMemoryEvent(existing);
+      const createdAt = input.createdAt || timestamp();
+      db.prepare(`INSERT INTO memory_events(id,idempotency_key,memory_id,type,actor_type,actor_id,payload_json,status,error,created_at,processed_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`).run(
+        input.id || `memory_event_${randomUUID()}`, key, input.memoryId || '', input.type, input.actorType || 'system', input.actorId || '', encode(input.payload), input.status || 'completed', input.error || '', createdAt, input.processedAt || (input.status === 'pending' ? null : createdAt),
+      );
+      return mapMemoryEvent(db.prepare('SELECT * FROM memory_events WHERE idempotency_key = ?').get(key));
+    },
+    listMemoryEvents({ memoryId = '', status = '', limit = 100 } = {}) {
+      const clauses = []; const args = [];
+      if (memoryId) { clauses.push('memory_id=?'); args.push(memoryId); }
+      if (status) { clauses.push('status=?'); args.push(status); }
+      args.push(Math.max(1, Math.min(500, Number(limit) || 100)));
+      return db.prepare(`SELECT * FROM memory_events ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY created_at DESC LIMIT ?`).all(...args).map(mapMemoryEvent);
+    },
+    putMemoryReceipt(input) {
+      const createdAt = input.createdAt || timestamp();
+      const id = input.id || `memory_receipt_${randomUUID()}`;
+      db.prepare(`INSERT INTO memory_context_receipts(id,thread_id,run_id,runtime_id,agent_id,query,memory_revision,included_json,excluded_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`).run(
+        id, input.threadId, input.runId || '', input.runtimeId || '', input.agentId || '', input.query || '', input.memoryRevision || '', encode(input.included || []), encode(input.excluded || []), createdAt,
+      );
+      return mapMemoryReceipt(db.prepare('SELECT * FROM memory_context_receipts WHERE id=?').get(id));
+    },
+    listMemoryReceipts({ threadId = '', limit = 100 } = {}) {
+      const args = []; const where = threadId ? (args.push(threadId), 'WHERE thread_id=?') : '';
+      args.push(Math.max(1, Math.min(500, Number(limit) || 100)));
+      return db.prepare(`SELECT * FROM memory_context_receipts ${where} ORDER BY created_at DESC LIMIT ?`).all(...args).map(mapMemoryReceipt);
+    },
+    memoryRevision({ scope = '', subjectId = '' } = {}) {
+      const clauses = []; const args = [];
+      if (scope) { clauses.push('scope=?'); args.push(scope); }
+      if (subjectId) { clauses.push('subject_id=?'); args.push(subjectId); }
+      const row = db.prepare(`SELECT COUNT(*) AS count, COALESCE(MAX(updated_at),'') AS updated_at FROM memory_entries ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''}`).get(...args);
+      return `${Number(row?.count || 0)}:${row?.updated_at || ''}`;
+    },
+    putHermesProjection(input) {
+      const updatedAt = timestamp();
+      db.prepare(`INSERT INTO hermes_projections(profile_name,agent_id,agent_revision,memory_revision,content_hash,files_json,status,error,generated_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?,?) ON CONFLICT(profile_name) DO UPDATE SET agent_id=excluded.agent_id,agent_revision=excluded.agent_revision,memory_revision=excluded.memory_revision,content_hash=excluded.content_hash,files_json=excluded.files_json,status=excluded.status,error=excluded.error,generated_at=excluded.generated_at,updated_at=excluded.updated_at`).run(
+        input.profileName, input.agentId || '', input.agentRevision || '', input.memoryRevision || '', input.contentHash || '', encode(input.files), input.status || 'ready', input.error || '', input.generatedAt || updatedAt, updatedAt,
+      );
+      return mapHermesProjection(db.prepare('SELECT * FROM hermes_projections WHERE profile_name=?').get(input.profileName));
+    },
+    getHermesProjection(profileName) { return mapHermesProjection(db.prepare('SELECT * FROM hermes_projections WHERE profile_name=?').get(profileName)); },
+    listHermesProjections() { return db.prepare('SELECT * FROM hermes_projections ORDER BY updated_at DESC').all().map(mapHermesProjection); },
     putMemoryReview(input) {
       const current = timestamp();
       const triggerKey = String(input.triggerKey || '').trim();

@@ -63,19 +63,13 @@ test('Hermes Default stays hidden and protected while named profiles remain inde
     fetch(`${baseUrl}/api/agents/iris`, { method: 'DELETE', headers: writeHeaders }),
   ]);
   const deleted = await deleteResponse.json();
-  assert.equal(deleteResponse.status, 200, JSON.stringify(deleted));
-  assert.equal(concurrentDeleteResponse.status, 200);
-  assert.equal(deleted.gateway.stopped, true);
-  assert.equal(deleted.autoStart.removed, true);
+  assert.equal(deleteResponse.status, 409, JSON.stringify(deleted));
+  assert.equal(concurrentDeleteResponse.status, 409);
+  assert.equal(deleted.code, 'last_agent_protected');
   await access(path.join(hermesHome, 'root-marker'));
-  await assert.rejects(access(irisHome));
+  await access(path.join(irisHome, 'config.yaml'));
   const state = JSON.parse(await readFile(path.join(home, 'data', 'workbench-state.json'), 'utf8'));
-  assert.deepEqual(state.agents.map((agent) => agent.id), []);
-  assert.deepEqual(state.integrations.hermesAgent.gatewayAutoStart.include, ['default']);
-  assert.deepEqual(state.integrations.hermesAgent.gatewayAutoStart.exclude, []);
-  assert.deepEqual(state.integrations.hermesAgent.agentCreationRequests, {});
-  assert.equal(state.integrations.hermesAgent.selectedProfile, 'default');
-  assert.equal(state.integrations.hermesStudio.selectedProfile, 'default');
+  assert.deepEqual(state.agents.map((agent) => agent.id), ['iris']);
 });
 
 test('reserved names are rejected and a legacy reserved profile can be stopped, renamed, and deleted', async (t) => {
@@ -125,12 +119,10 @@ test('reserved names are rejected and a legacy reserved profile can be stopped, 
   assert.equal(renamedState.integrations.hermesStudio.selectedProfile, 'test-b');
 
   const deleted = await fetch(`${baseUrl}/api/agents/test`, { method: 'DELETE', headers });
-  assert.equal(deleted.status, 200, await deleted.text());
-  await assert.rejects(access(path.join(hermesHome, 'profiles', 'test-b')));
+  assert.equal(deleted.status, 409, await deleted.text());
+  await access(path.join(hermesHome, 'profiles', 'test-b', 'config.yaml'));
   const deletedState = JSON.parse(await readFile(path.join(home, 'data', 'workbench-state.json'), 'utf8'));
-  assert.deepEqual(deletedState.agents, []);
-  assert.deepEqual(deletedState.integrations.hermesAgent.gatewayAutoStart.include, ['default']);
-  assert.deepEqual(deletedState.integrations.hermesAgent.gatewayAutoStart.exclude, []);
+  assert.equal(deletedState.agents.length, 1);
 
   const rejected = await fetch(`${baseUrl}/api/agents`, { method: 'POST', headers, body: JSON.stringify({ name: 'test', runtimePolicy: { defaultRuntimeId: 'hermes', allowedRuntimeIds: ['hermes'] } }) });
   assert.equal(rejected.status, 400);

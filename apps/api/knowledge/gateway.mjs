@@ -50,6 +50,7 @@ function defaultManifest(vault, { existing = false, managementMode, autonomy } =
     immutableRoots: ['来源'],
     tagTaxonomy: [],
     templateId: '',
+    presentation: { avatarAssetPath: '' },
     maintenanceModel: { profile: 'curator', fallback: 'default' },
     curatorPresentation: { displayName: '无上的霸王龙', avatarAssetPath: '' },
     curatorExecution: { mode: 'auto', provider: '', model: '', timeout: 600, source: 'global' },
@@ -75,6 +76,9 @@ function normalizeManifest(vault, raw = {}, options = {}) {
     immutableRoots: Array.isArray(raw.immutableRoots) ? raw.immutableRoots.map(normalizeRelative) : base.immutableRoots,
     tagTaxonomy: Array.isArray(raw.tagTaxonomy) ? raw.tagTaxonomy.map(String) : base.tagTaxonomy,
     maintenanceModel: { ...base.maintenanceModel, ...(raw.maintenanceModel || {}) },
+    presentation: {
+      avatarAssetPath: /^\.frakio\/assets\/vault-avatar\.(png|jpe?g|webp|gif)$/i.test(String(raw.presentation?.avatarAssetPath || '').trim()) ? String(raw.presentation.avatarAssetPath).trim() : '',
+    },
     curatorPresentation: {
       displayName: String(raw.curatorPresentation?.displayName || base.curatorPresentation.displayName).trim().slice(0, 48) || base.curatorPresentation.displayName,
       avatarAssetPath: /^\.frakio\/assets\/curator-avatar\.(png|jpe?g|webp|gif)$/i.test(String(raw.curatorPresentation?.avatarAssetPath || '').trim()) ? String(raw.curatorPresentation.avatarAssetPath).trim() : '',
@@ -451,6 +455,27 @@ export function createKnowledgeGateway({ store }) {
       const relativePath = manifest.curatorPresentation?.avatarAssetPath || '.frakio/assets/curator-avatar.png';
       await unlink(resolveInsideRoot(root, path.join(root, relativePath))).catch(() => {});
       return writeManifest(vault, { ...manifest, curatorPresentation: { ...manifest.curatorPresentation, avatarAssetPath: '' } });
+    },
+    async writeVaultAvatar(vault, buffer, extension = 'png') {
+      if (!Buffer.isBuffer(buffer) || !buffer.length || buffer.length > 3 * 1024 * 1024) throw new Error('头像大小需小于 3MB。');
+      const root = path.resolve(vault.path);
+      const safeExtension = ['png', 'jpg', 'jpeg', 'webp', 'gif'].includes(String(extension).toLowerCase()) ? String(extension).toLowerCase() : 'png';
+      const assetsRoot = resolveInsideRoot(root, path.join(root, '.frakio/assets'));
+      await mkdir(assetsRoot, { recursive: true });
+      for (const entry of await readdir(assetsRoot, { withFileTypes: true }).catch(() => [])) {
+        if (entry.isFile() && /^vault-avatar\.(png|jpe?g|webp|gif)$/i.test(entry.name)) await unlink(path.join(assetsRoot, entry.name)).catch(() => {});
+      }
+      const relativePath = `.frakio/assets/vault-avatar.${safeExtension}`;
+      await atomicWrite(resolveInsideRoot(root, path.join(root, relativePath)), buffer);
+      const manifest = await readManifest(vault);
+      return writeManifest(vault, { ...manifest, presentation: { ...manifest.presentation, avatarAssetPath: relativePath } });
+    },
+    async removeVaultAvatar(vault) {
+      const root = path.resolve(vault.path);
+      const manifest = await readManifest(vault);
+      const relativePath = manifest.presentation?.avatarAssetPath || '.frakio/assets/vault-avatar.png';
+      await unlink(resolveInsideRoot(root, path.join(root, relativePath))).catch(() => {});
+      return writeManifest(vault, { ...manifest, presentation: { ...manifest.presentation, avatarAssetPath: '' } });
     },
     async search(vault, query, { limit = 20 } = {}) {
       const clean = String(query || '').trim().toLowerCase();
