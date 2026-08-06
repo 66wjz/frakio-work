@@ -7,6 +7,8 @@ import {
   mergeThreadWithPendingMessages,
   normalizeApprovalPresentation,
   normalizeClarificationPresentation,
+  runtimeEventKey,
+  shouldApplyRuntimeEvent,
 } from '../web/src/run-ui-state.mjs';
 
 test('run presentation normalizes recovered approval and clarification identifiers', () => {
@@ -37,6 +39,16 @@ test('run UI rejects old revisions and duplicate runtime cursors', () => {
   assert.equal(canApplyRunSnapshot('run-1', 'run-2', 'running'), true);
 });
 
+test('live and recovered SSE share one native event idempotency rule', () => {
+  const seen = new Set();
+  const native = { event: 'message.delta', hostRunId: 'host-1', runtimeCursor: 9, nativeEventKey: 'native-9' };
+  assert.equal(runtimeEventKey(native), 'native-9');
+  assert.equal(shouldApplyRuntimeEvent(seen, native), true);
+  assert.equal(shouldApplyRuntimeEvent(seen, { ...native, cursor: 90 }), false);
+  assert.equal(shouldApplyRuntimeEvent(seen, { event: 'message.delta', hostRunId: 'host-2', runtimeCursor: 9 }), true);
+  assert.equal(shouldApplyRuntimeEvent(seen, { event: 'message.delta', hostRunId: 'host-2', runtimeCursor: 9 }), false);
+});
+
 test('stale thread snapshots retain pending optimistic messages until server confirmation', () => {
   const optimistic = { id: 'thread-1', messages: [{ id: 'client-message-1', content: '你好' }] };
   const stale = { id: 'thread-1', messages: [] };
@@ -44,4 +56,23 @@ test('stale thread snapshots retain pending optimistic messages until server con
 
   assert.deepEqual(mergeThreadWithPendingMessages(optimistic, stale, ['client-message-1']).messages, optimistic.messages);
   assert.deepEqual(mergeThreadWithPendingMessages(optimistic, confirmed, ['client-message-1']).messages, confirmed.messages);
+});
+
+test('older thread snapshots cannot remove a newer completed Agent reply', () => {
+  const current = {
+    id: 'thread-1',
+    updatedAt: '2026-08-06T03:32:04.000Z',
+    messages: [
+      { id: 'user-1', agentId: 'user', content: '叫 Victor' },
+      { id: 'iris-1', agentId: 'iris', content: 'Victor 出来一下' },
+      { id: 'victor-1', agentId: 'victor', content: '收到，我在。' },
+    ],
+  };
+  const stale = {
+    id: 'thread-1',
+    updatedAt: '2026-08-06T03:32:03.000Z',
+    messages: current.messages.slice(0, 2),
+  };
+
+  assert.deepEqual(mergeThreadWithPendingMessages(current, stale).messages, current.messages);
 });

@@ -22,6 +22,10 @@ function sourceIds(packet = {}) {
     ...(packet.projectRules || []).map((entry) => `rule:${packet.vault?.id || 'project'}:${entry.relativePath}:${sourceVersion(entry)}`),
     ...(packet.handoff?.recentConversation || []).map((entry) => `message:${entry.messageId || ''}`),
     ...(packet.handoff?.acceptedDecisions || []).map((entry) => `decision:${entry.messageId || ''}`),
+    ...Object.entries(packet.sharedState || {}).flatMap(([kind, entries]) => (entries || []).map((entry) => `state:${kind}:${entry.id}:${entry.revision || 0}:${entry.status || 'active'}:${entry.scope || 'thread'}:${entry.authority || 'inferred'}`)),
+    ...(packet.recentConversation || []).map((entry) => `message:${entry.messageId || ''}`),
+    ...(packet.relevantHistory || []).map((entry) => `history:${entry.messageId || ''}`),
+    ...(packet.artifactReferences || []).map((entry) => `artifact:${entry.id || entry.path || ''}`),
   ].filter(Boolean))).sort();
 }
 
@@ -39,6 +43,10 @@ function deltaPacket(packet, previousIds) {
       recentConversation: (packet.handoff?.recentConversation || []).filter((entry) => include('message:', entry.messageId || '')),
       acceptedDecisions: (packet.handoff?.acceptedDecisions || []).filter((entry) => include('decision:', entry.messageId || '')),
     },
+    sharedState: Object.fromEntries(Object.entries(packet.sharedState || {}).map(([kind, entries]) => [kind, (entries || []).filter((entry) => include('state:', `${kind}:${entry.id}:${entry.revision || 0}:${entry.status || 'active'}:${entry.scope || 'thread'}:${entry.authority || 'inferred'}`))])),
+    recentConversation: (packet.recentConversation || []).filter((entry) => include('message:', entry.messageId || '')),
+    relevantHistory: (packet.relevantHistory || []).filter((entry) => include('history:', entry.messageId || '')),
+    artifactReferences: (packet.artifactReferences || []).filter((entry) => include('artifact:', entry.id || entry.path || '')),
   };
 }
 
@@ -53,6 +61,11 @@ export function compileContextDelta(packet = {}, session = null, { profileRevisi
     projectRules: packet.projectRules || [],
     handoff: { ...(packet.handoff || {}), createdAt: undefined },
     delivery: packet.delivery || null,
+    schemaVersion: packet.schemaVersion || 1,
+    sharedState: packet.sharedState || {},
+    recentConversation: packet.recentConversation || [],
+    relevantHistory: packet.relevantHistory || [],
+    conflicts: packet.conflicts || [],
   });
   const previous = String(session?.contextWatermark || session?.metadata?.contextWatermark || '');
   const changed = forceFull || !previous || previous !== packetHash || session?.profileRevision !== profileRevision;

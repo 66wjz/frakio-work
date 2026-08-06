@@ -49,8 +49,16 @@ export function mergeThreadWithPendingMessages(current, incoming, pendingMessage
   if (!current || !incoming || current.id !== incoming.id) return incoming;
   const incomingIds = new Set((incoming.messages || []).map((message) => message.id));
   const pendingIds = new Set(pendingMessageIds);
-  const pending = (current.messages || []).filter((message) => pendingIds.has(message.id) && !incomingIds.has(message.id));
-  return pending.length ? { ...incoming, messages: [...(incoming.messages || []), ...pending] } : incoming;
+  const currentUpdatedAt = Date.parse(current.updatedAt || '');
+  const incomingUpdatedAt = Date.parse(incoming.updatedAt || '');
+  const incomingIsStale = Number.isFinite(currentUpdatedAt)
+    && Number.isFinite(incomingUpdatedAt)
+    && incomingUpdatedAt < currentUpdatedAt;
+  const preserved = (current.messages || []).filter((message) => (
+    !incomingIds.has(message.id)
+    && (pendingIds.has(message.id) || incomingIsStale)
+  ));
+  return preserved.length ? { ...incoming, messages: [...(incoming.messages || []), ...preserved] } : incoming;
 }
 
 export function canApplyPresentation(currentRevision, nextRevision) {
@@ -60,6 +68,27 @@ export function canApplyPresentation(currentRevision, nextRevision) {
 export function canApplyRuntimeCursor(currentCursor, nextCursor) {
   const cursor = Number(nextCursor || 0);
   return !cursor || cursor > Number(currentCursor || 0);
+}
+
+// Live SSE and recovery SSE can replay the same native event. Keep this gate
+// shared so both delivery paths use the same idempotency rule.
+export function runtimeEventKey(event = {}) {
+  const explicit = String(event.nativeEventKey || event.native_event_key || '').trim();
+  if (explicit) return explicit;
+  const hostRunId = String(event.hostRunId || event.runId || '').trim();
+  const runtimeCursor = Number(event.runtimeCursor || event.cursor || 0);
+  if (hostRunId && runtimeCursor) return `${hostRunId}:${runtimeCursor}:${String(event.event || '')}`;
+  const eventId = String(event.id || event.eventId || '').trim();
+  if (eventId) return eventId;
+  return '';
+}
+
+export function shouldApplyRuntimeEvent(seenKeys, event = {}) {
+  const key = runtimeEventKey(event);
+  if (!key) return true;
+  if (seenKeys.has(key)) return false;
+  seenKeys.add(key);
+  return true;
 }
 
 export function canApplyRunSnapshot(terminalRunId, nextRunId, nextStatus) {

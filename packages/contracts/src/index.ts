@@ -5,6 +5,12 @@ export type ApiError = {
 };
 
 export type RuntimeId = 'hermes' | 'pi' | 'codex' | 'claude' | (string & {});
+export type HarnessId = 'native' | 'hermes' | 'codex' | 'claude';
+
+export type AgentExecutionPolicy = {
+  defaultHarnessId: HarnessId;
+  permissionProfileId: string;
+};
 
 export type RuntimeCapability = {
   streaming: boolean;
@@ -72,6 +78,15 @@ export type AgentRuntimePolicy = {
   defaultRuntimeId: RuntimeId;
   allowedRuntimeIds: RuntimeId[];
   permissionProfileId: string;
+  defaultHarnessId?: HarnessId;
+};
+
+export type ThreadAgentHarnessBinding = {
+  agentId: string;
+  harnessId: HarnessId;
+  boundAt: string;
+  source: 'thread_created' | 'legacy_migration' | 'explicit_migration';
+  bindingRevision: number;
 };
 
 export type AgentOwnership = {
@@ -107,6 +122,83 @@ export type ContextReceipt = {
   memoryRevision: string;
   included: Array<{ id: string; scope: MemoryScope; kind: MemoryEntry['kind']; reason: string }>;
   excluded: Array<{ id: string; reason: string }>;
+  createdAt: string;
+};
+
+export type ThreadContextAuthority = 'user_confirmed' | 'tool_verified' | 'system_recorded' | 'agent_proposed' | 'inferred';
+
+export type ThreadContextEvent = {
+  id: string;
+  threadId: string;
+  cursor: number;
+  eventType: 'message.created' | 'message.corrected' | 'message.tombstoned' | 'tool.completed' | 'task.changed' | 'artifact.changed' | 'handoff.created' | 'handoff.completed' | 'handoff.failed' | string;
+  actorType: 'user' | 'agent' | 'tool' | 'system';
+  actorId: string;
+  sourceId: string;
+  sourceRevision: number;
+  parentEventId: string;
+  visibility: 'public' | 'internal';
+  scope: 'thread' | 'workspace' | 'personal';
+  authority: ThreadContextAuthority;
+  payload: Record<string, unknown>;
+  createdAt: string;
+};
+
+export type ThreadStateItem = {
+  id: string;
+  type: 'goal' | 'decision' | 'requirement' | 'constraint' | 'task' | 'artifact' | 'finding' | 'risk' | 'open_question';
+  status: 'active' | 'resolved' | 'superseded' | 'tombstoned';
+  statement: string;
+  authority: ThreadContextAuthority;
+  scope: 'thread' | 'workspace';
+  sourceEventIds: string[];
+  sourceMessageIds: string[];
+  relatedTaskIds: string[];
+  relatedArtifactIds: string[];
+  supersedes: string[];
+  ownerAgentId: string;
+  revision: number;
+  updatedAt: string;
+};
+
+export type HandoffEnvelope = {
+  id: string;
+  routeId: string;
+  turnId: string;
+  sourceAgentId: string;
+  targetAgentId: string;
+  sourceMessageId: string;
+  parentMessageId: string;
+  reason: 'agent_mention' | 'structured_handoff';
+  objective: string;
+  requestedOutput: string;
+  constraints: string[];
+  relevantStateIds: string[];
+  relevantTaskIds: string[];
+  relevantArtifactIds: string[];
+  sourceExcerpt: string;
+  depth: number;
+  createdAt: string;
+};
+
+export type ContextReceiptV2 = {
+  id: string;
+  packetId: string;
+  packetHash: string;
+  threadId: string;
+  runId: string;
+  runtimeId: RuntimeId | '';
+  agentId: string;
+  schemaVersion: 2;
+  stateRevision: number;
+  cursor: { from: number; to: number };
+  deliveryMode: 'native_session' | 'frakio_full' | 'frakio_delta';
+  budget: Record<string, unknown>;
+  included: Array<{ kind: string; count: number }>;
+  excluded: Array<{ kind?: string; id?: string; reason: string }>;
+  conflicts: Array<Record<string, unknown>>;
+  warnings: Array<{ code: string; message: string }>;
+  sourceReceiptIds: string[];
   createdAt: string;
 };
 
@@ -704,6 +796,10 @@ export type ConversationOverview = {
     workspaceRoot: string;
     gitBranch: string;
     gitAvailable: boolean;
+  };
+  context?: {
+    personal: { enabled: boolean; source: 'thread' | 'workspace' | 'direct'; label: string; name: string };
+    project: { name: string; ruleCount: number } | null;
   };
   plan: { title: string; status: string; taskCount: number } | null;
   sources: ConversationSource[];

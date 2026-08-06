@@ -30,6 +30,24 @@ function responseInputMessages(input = []) {
   return messages;
 }
 
+function validateChatToolHistory(messages = []) {
+  const pending = new Set();
+  for (const message of messages) {
+    if (message.role === 'assistant') {
+      for (const tool of message.tool_calls || []) if (tool.id) pending.add(tool.id);
+      continue;
+    }
+    if (message.role === 'tool') {
+      if (!message.tool_call_id || !pending.has(message.tool_call_id)) {
+        throw Object.assign(new Error('工具结果缺少相邻的 assistant tool_call。'), { code: 'PROTOCOL_HISTORY_CORRUPT', status: 409 });
+      }
+      pending.delete(message.tool_call_id);
+      continue;
+    }
+    if (pending.size) throw Object.assign(new Error('assistant tool_calls 后必须先提供全部 tool results。'), { code: 'PROTOCOL_HISTORY_CORRUPT', status: 409 });
+  }
+}
+
 function anthropicMessagesToChat(body = {}) {
   const messages = [];
   if (body.system) messages.push({ role: 'system', content: text(body.system) });
@@ -76,10 +94,11 @@ export function transformBridgeRequest(body = {}, route = {}) {
   for (const key of ['thinking', 'cache_control', 'betas']) delete clean[key];
   if (harness === upstream || (harness === 'openai_responses' && upstream === 'codex_responses')) return clean;
   if (harness === 'openai_responses' && upstream === 'chat_completions') {
+    const messages = responseInputMessages(body.input);
+    validateChatToolHistory(messages);
     return {
       model: route.modelId,
-      messages: responseInputMessages(body.input),
-      ...(body.instructions ? { messages: [{ role: 'system', content: body.instructions }, ...responseInputMessages(body.input)] } : {}),
+      messages: body.instructions ? [{ role: 'system', content: body.instructions }, ...messages] : messages,
       ...(body.tools ? { tools: chatTools(body.tools) } : {}),
       ...(body.tool_choice ? { tool_choice: body.tool_choice } : {}),
       stream: body.stream !== false,

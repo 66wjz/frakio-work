@@ -194,10 +194,25 @@ export function createRuntimePlatform({ store, registry, packageManager = null, 
         checkpoint: { ...existing.checkpoint, previousNativeSessionId: existing.nativeSessionId, reason: 'skill_revision_changed' },
       });
     }
+    const currentStateSourceIds = Object.entries(packet.sharedState || {}).flatMap(([kind, entries]) => (entries || []).map((entry) => `state:${kind}:${entry.id}:${entry.revision || 0}:${entry.status || 'active'}:${entry.scope || 'thread'}:${entry.authority || 'inferred'}`));
+    const previousStateSourceIds = Array.isArray(existing?.metadata?.contextStateSourceIds) ? existing.metadata.contextStateSourceIds.map(String) : [];
+    const currentStateSourceSet = new Set(currentStateSourceIds);
+    const stateSourceRemoved = previousStateSourceIds.some((sourceId) => !currentStateSourceSet.has(sourceId));
+    if (existing?.nativeSessionId && stateSourceRemoved) {
+      await Promise.resolve(adapter?.disposeSession?.(existing.id)).catch(() => {});
+      existing = store.upsertSession({
+        ...existing,
+        nativeSessionId: '',
+        lifecycleState: 'recovering',
+        resumeStrategy: 'handoff_resumed',
+        checkpoint: { ...existing.checkpoint, previousNativeSessionId: existing.nativeSessionId, reason: 'thread_state_removed_or_rescoped' },
+      });
+    }
     const contextDelta = compileContextDelta(packet, existing, {
       profileRevision: input.profileSnapshot.revision,
       forceFull: !deltaEnabled || !existing?.nativeSessionId,
     });
+    if (packet.contextReceiptId) store.updateContextReceiptDelivery(packet.contextReceiptId, !contextDelta.changed ? 'native_session' : contextDelta.full ? 'frakio_full' : 'frakio_delta');
     const checkpointCandidate = !existing?.nativeSessionId && Boolean(existing?.checkpoint && Object.keys(existing.checkpoint).length);
     const activated = sessions.activate({
       runtimeId: input.runtimeId,
@@ -217,6 +232,7 @@ export function createRuntimePlatform({ store, registry, packageManager = null, 
         ...(existing?.metadata || {}),
         handoff: packet.handoff || {},
         contextSourceIds: contextDelta.sourceIds,
+        contextStateSourceIds: currentStateSourceIds,
         contextMemoryEntryIds: (packet.memory || []).map((entry) => String(entry.id || '')).filter(Boolean),
         contextMemoryExclusions: Array.isArray(packet.memorySelection?.excluded) ? packet.memorySelection.excluded : [],
         executionRealm,
@@ -234,6 +250,19 @@ export function createRuntimePlatform({ store, registry, packageManager = null, 
       lifecycleState: existing?.nativeSessionId ? 'restoring' : checkpointCandidate ? 'recovering' : 'opening',
       resumeStrategy: checkpointCandidate ? 'handoff_resumed' : existing?.nativeSessionId ? '' : 'new_session',
     });
+    if (input.state?.features?.agentContextCursor !== false && packet.schemaVersion === 2) {
+      store.upsertAgentContextCursor({
+        threadId: input.threadId,
+        agentId: input.agent.id,
+        harnessId: input.runtimeId === 'pi' ? 'native' : input.runtimeId,
+        sessionId: session.id,
+        eventCursor: packet.cursor?.to || 0,
+        stateRevision: packet.cursor?.stateRevision || 0,
+        profileRevision: input.profileSnapshot.revision,
+        memoryRevision: packet.memorySelection?.revision || '',
+        sourceIds: contextDelta.sourceIds,
+      });
+    }
     const existingApplications = existing?.skillSetRevision === resolvedSkills.revision
       ? store.listSkillApplications({ sessionId: session.id })
       : [];
@@ -354,6 +383,7 @@ export function createRuntimePlatform({ store, registry, packageManager = null, 
         ...prepared.session.metadata,
         nativeTurnId: accepted.nativeTurnId || '',
         contextSourceIds: prepared.contextDelta.sourceIds,
+        contextStateSourceIds: Object.entries(prepared.originalContextPacket.sharedState || {}).flatMap(([kind, entries]) => (entries || []).map((entry) => `state:${kind}:${entry.id}:${entry.revision || 0}:${entry.status || 'active'}:${entry.scope || 'thread'}:${entry.authority || 'inferred'}`)),
         contextMemoryEntryIds: (prepared.originalContextPacket.memory || []).map((entry) => String(entry.id || '')).filter(Boolean),
         contextMemoryExclusions: Array.isArray(prepared.originalContextPacket.memorySelection?.excluded) ? prepared.originalContextPacket.memorySelection.excluded : [],
       },

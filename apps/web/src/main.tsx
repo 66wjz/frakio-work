@@ -53,6 +53,7 @@ import {
   mergeThreadWithPendingMessages,
   normalizeApprovalPresentation,
   normalizeClarificationPresentation,
+  shouldApplyRuntimeEvent,
 } from './run-ui-state.mjs';
 import {
   STREAM_REVEAL_ANIMATION_MS,
@@ -300,7 +301,8 @@ type ManagedHermesModulesPayload = {
   profile: ManagedHermesModule[];
 };
 type RuntimeId = 'hermes' | 'pi' | 'codex' | 'claude' | string;
-type AgentRuntimePolicy = { defaultRuntimeId: RuntimeId; allowedRuntimeIds: RuntimeId[]; permissionProfileId: string };
+type HarnessId = 'native' | 'hermes' | 'codex' | 'claude';
+type AgentRuntimePolicy = { defaultRuntimeId: RuntimeId; allowedRuntimeIds: RuntimeId[]; permissionProfileId: string; defaultHarnessId?: HarnessId };
 type RuntimeModelCompatibility = { status: 'ready' | 'partial' | 'unsupported' | 'missing_credentials'; credentialStatus: 'ready' | 'missing' | 'not_required'; compatibility?: 'direct' | 'bridged' | 'unsupported'; bridgeId?: string; harnessApiMode?: string; upstreamApiMode?: string; capabilities?: Record<string, 'native' | 'bridge' | 'auxiliary' | 'unsupported'>; degradations?: string[]; usableModelIds: string[]; unsupportedModelIds: string[]; reason: string };
 type RuntimeModelCatalogEntry = { id: string; name: string; provider?: string; defaultModelId?: string; models: string[]; compatibility: RuntimeModelCompatibility };
 type RuntimeModelCatalog = { runtimeId: string; source: string; models: RuntimeModelCatalogEntry[]; usableModelCount?: number };
@@ -339,7 +341,7 @@ function isRuntimeReady(runtime: RuntimeDefinition | undefined) {
 }
 
 function RuntimeLabel({ runtimeId, showName = true, className = '' }: { runtimeId: RuntimeId; showName?: boolean; className?: string }) {
-  const visual = runtimeVisuals[runtimeId] || { iconUrl: '', label: runtimeLabels[runtimeId] || runtimeId };
+  const visual = runtimeId === 'native' ? { iconUrl: piRuntimeLogoUrl, label: 'Frakio Native' } : runtimeVisuals[runtimeId] || { iconUrl: '', label: runtimeLabels[runtimeId] || runtimeId };
   return <span className={`runtime-label ${className}`.trim()}>
     {visual.iconUrl ? <img src={visual.iconUrl} alt="" aria-hidden="true" /> : <Cpu size={16} aria-hidden="true" />}
     {showName && <span>{visual.label}</span>}
@@ -473,7 +475,7 @@ type VaultSummary = {
 };
 type WorkMessageArtifact = { id: string; name: string; kind?: string; path: string; relativePath?: string; size?: number };
 type ChatEvent = { id: string; agentId: string; agentName: string; role: string; content: string; attachments?: Attachment[]; context?: MessageContext; changeSetId?: string; changeSummary?: { fileCount: number; additions: number; deletions: number }; workArtifacts?: WorkMessageArtifact[]; workFinalWorkflowId?: string; memoryIds?: string[]; handoffs?: Array<{ routeId: string; targetAgentId: string; targetAgentName: string; status: 'pending' | 'starting' | 'running' | 'completed' | 'failed' | 'recorded'; error?: string }>; reasoning?: string; externalRunId?: string; turnId?: string; mentionDepth?: number; parentMessageId?: string; routeReason?: string; runtimeId?: string; runtimeName?: string; modelId?: string; profileRevision?: string; resumeStrategy?: 'native_resumed' | 'handoff_resumed' | 'new_session' | 'unsupported' | 'failed' | ''; permissionCoverage?: 'host_enforced' | 'native_enforced' | 'partial' | 'unobservable' | ''; appliedSkillCount?: number; contentType?: 'plan' | 'plan_feedback' | string; planId?: string; planRevision?: number; processingDurationMs?: number; feedback?: 'up' | 'down' | null; createdAt?: string };
-type RuntimeSessionSummary = { id: string; runtimeId: RuntimeId; laneType: 'chat' | 'work_task'; laneId: string; lifecycleState: 'opening' | 'active' | 'parked' | 'restoring' | 'recovering' | 'stale' | 'closed' | 'failed'; nativeSessionId?: string; resumeStrategy?: string; lastError?: string };
+type RuntimeSessionSummary = { id: string; runtimeId: RuntimeId; agentId?: string; laneType: 'chat' | 'work_task'; laneId: string; lifecycleState: 'opening' | 'active' | 'parked' | 'restoring' | 'recovering' | 'stale' | 'closed' | 'failed'; nativeSessionId?: string; resumeStrategy?: string; lastError?: string };
 type AttachmentDraft = { localId: string; file: File; previewUrl: string; status: 'uploading' | 'ready' | 'error'; attachment?: Attachment; error?: string };
 const attachmentAcceptValue = [
   '.png', '.jpg', '.jpeg', '.gif', '.webp', '.bmp', '.tiff', '.tif', '.heic', '.svg', '.ico',
@@ -505,6 +507,7 @@ type ContextPacket = {
   policy: string;
 };
 type ThreadMode = 'workspace' | 'direct';
+type ConversationContext = { personal: { enabled: boolean; mode: 'inherit' | 'on' | 'off'; source: 'thread' | 'workspace' | 'direct'; label: string; vaultId?: string | null; vaultName?: string }; project: { id: string; name: string } | null; label: string };
 type PermissionMode = 'manual' | 'smart' | 'off';
 type AgentModelOverrides = Record<string, string>;
 type AgentRunOverride = { reasoningEffort?: string; speedMode?: string };
@@ -527,10 +530,13 @@ type Thread = {
   followMode?: FollowMode;
   title: string;
   vaultId: string | null;
+  personalKnowledgeMode?: 'inherit' | 'on' | 'off';
+  context?: ConversationContext;
   selectedAgents: string[];
   agentModelOverrides?: AgentModelOverrides;
   agentRunOverrides?: AgentRunOverrides;
   agentRuntimeOverrides?: AgentRuntimeOverrides;
+  agentHarnessBindings?: Record<string, { harnessId: HarnessId; boundAt?: string; bindingRevision?: number }>;
   runtimeId?: RuntimeId;
   permissionMode: PermissionMode;
   updatedAt: string;
@@ -554,7 +560,7 @@ type Thread = {
   forkedFromMessageId?: string | null;
   branchRootThreadId?: string | null;
 };
-type ThreadSummary = { id: string; spaceId?: string | null; workspaceId: string | null; workspaceRootPath?: string; title: string; mode: ThreadMode; executionMode?: 'chat' | 'work'; collaborationMode?: CollaborationMode; activePlanId?: string; workerOutputMode?: 'summary' | 'all'; primaryAgentId: string | null; primaryAgentName?: string; defaultAgentId?: string | null; activeAgentId?: string | null; participantAgentIds: string[]; followMode?: FollowMode; permissionMode?: PermissionMode; agentModelOverrides?: AgentModelOverrides; agentRunOverrides?: AgentRunOverrides; agentRuntimeOverrides?: AgentRuntimeOverrides; runtimeId?: RuntimeId; vaultId: string | null; vaultName: string; updatedAt: string; preview: string; engine?: 'simulate' | 'hermes-studio' | 'model-provider' | 'workspace-group' | 'hermes-agent'; artifactCount?: number; lastArtifactName?: string; runStatus?: 'idle' | 'running' | 'failed'; archivedAt?: string | null; pinnedAt?: string | null; forkedFromThreadId?: string | null; forkedFromMessageId?: string | null; branchRootThreadId?: string | null };
+type ThreadSummary = { id: string; spaceId?: string | null; workspaceId: string | null; workspaceRootPath?: string; title: string; mode: ThreadMode; executionMode?: 'chat' | 'work'; collaborationMode?: CollaborationMode; activePlanId?: string; workerOutputMode?: 'summary' | 'all'; primaryAgentId: string | null; primaryAgentName?: string; defaultAgentId?: string | null; activeAgentId?: string | null; participantAgentIds: string[]; followMode?: FollowMode; permissionMode?: PermissionMode; agentModelOverrides?: AgentModelOverrides; agentRunOverrides?: AgentRunOverrides; agentRuntimeOverrides?: AgentRuntimeOverrides; agentHarnessBindings?: Record<string, { harnessId: HarnessId }>; runtimeId?: RuntimeId; vaultId: string | null; vaultName: string; personalKnowledgeMode?: 'inherit' | 'on' | 'off'; context?: ConversationContext; updatedAt: string; preview: string; engine?: 'simulate' | 'hermes-studio' | 'model-provider' | 'workspace-group' | 'hermes-agent'; artifactCount?: number; lastArtifactName?: string; runStatus?: 'idle' | 'running' | 'failed'; archivedAt?: string | null; pinnedAt?: string | null; forkedFromThreadId?: string | null; forkedFromMessageId?: string | null; branchRootThreadId?: string | null };
 type ActiveHermesRun = { runId: string; hostRunId?: string; sessionId: string; threadId: string; turnId?: string };
 type ThreadRunState = {
   runId: string;
@@ -614,6 +620,7 @@ type RunUiState = {
   clarificationSubmitting: boolean;
   clarificationError: string;
   error: string;
+  errorCode: string;
   stopping: boolean;
   changeSet: RunChangeSet | null;
   compaction: { operationId: string; status: 'running' | 'completed' | 'failed'; tokensBefore?: number; tokensAfterEstimate?: number; error?: string; originalContextPreserved?: boolean } | null;
@@ -622,6 +629,26 @@ type RunUiState = {
   lastRuntimeCursor: number;
   terminalRunId: string;
 };
+
+type RunPresentationUi = RunUiState & {
+  hostRunId: string;
+  turnId: string;
+  agentId: string;
+  agentName: string;
+  completed: boolean;
+};
+
+function createRunPresentation(overrides: Partial<RunPresentationUi> = {}): RunPresentationUi {
+  return {
+    ...createRunUiState(),
+    hostRunId: '',
+    turnId: '',
+    agentId: '',
+    agentName: '',
+    completed: false,
+    ...overrides,
+  };
+}
 
 function createRunUiState(overrides: Partial<RunUiState> = {}): RunUiState {
   return {
@@ -641,6 +668,7 @@ function createRunUiState(overrides: Partial<RunUiState> = {}): RunUiState {
     clarificationSubmitting: false,
     clarificationError: '',
     error: '',
+    errorCode: '',
     stopping: false,
     changeSet: null,
     compaction: null,
@@ -716,7 +744,7 @@ type LaunchMaterialSnapshot = { activeSpaceId: string; theme: SpaceTheme; dark: 
 type SpaceDraft = { name: string; iconKind: SpaceIconKind; iconValue: string; theme: SpaceTheme };
 type SpaceIconKind = 'dot' | 'emoji' | 'icon';
 type Space = { id: string; name: string; iconKind: SpaceIconKind; iconValue: string; theme: SpaceTheme; createdAt: string; updatedAt: string; archivedAt?: string | null; lastOpenedAt?: string | null };
-type Workspace = { id: string; spaceId?: string | null; name: string; rootPath: string; vaultId: string | null; primaryVaultId?: string | null; sharedVaultIds?: string[]; writableVaultIds?: string[]; environment: 'local'; activeThreadId: string | null; createdAt: string; updatedAt: string; archivedAt?: string | null; pinnedAt?: string | null; activeThread?: ThreadSummary | null; threads?: ThreadSummary[] };
+type Workspace = { id: string; spaceId?: string | null; name: string; rootPath: string; vaultId: string | null; primaryVaultId?: string | null; sharedVaultIds?: string[]; writableVaultIds?: string[]; personalKnowledgeDefault?: 'on' | 'off'; environment: 'local'; activeThreadId: string | null; createdAt: string; updatedAt: string; archivedAt?: string | null; pinnedAt?: string | null; activeThread?: ThreadSummary | null; threads?: ThreadSummary[] };
 type PinnedNav = Record<string, boolean>;
 type RailConfirm = { kind: 'thread' | 'workspace'; id: string; title: string } | null;
 type RenameDialogTarget = { kind: 'thread' | 'workspace'; id: string; title: string } | null;
@@ -1311,6 +1339,7 @@ function App() {
   const [projectModalOpen, setProjectModalOpen] = useState(false);
   const [projectModalPurpose, setProjectModalPurpose] = useState<'create' | 'convert'>('create');
   const [projectMode, setProjectMode] = useState<'create' | 'existing'>('create');
+  const [projectKnowledgeProfile, setProjectKnowledgeProfile] = useState<'personal' | 'team'>('personal');
   const [projectName, setProjectName] = useState('');
   const [projectRootPath, setProjectRootPath] = useState('');
   const [projectParentPath, setProjectParentPath] = useState(defaultProjectParentPath);
@@ -1364,8 +1393,10 @@ function App() {
   const [vaultBusy, setVaultBusy] = useState<Record<string, 'index' | 'delete' | 'keep' | 'detach'>>({});
   const [modelError, setModelError] = useState('');
   const [runUiByThreadId, setRunUiByThreadId] = useState<Record<string, RunUiState>>({});
+  const [runPresentationsByThreadId, setRunPresentationsByThreadId] = useState<Record<string, Record<string, RunPresentationUi>>>({});
   const liveRunSubscriptionKeysRef = useRef<Set<string>>(new Set());
-  const recoveredRunSubscriptionsRef = useRef<Map<string, { events: EventSource | null; retryTimer: number | null; lastCursor: number; presentationCursor: number; attempts: number }>>(new Map());
+  const recoveredRunSubscriptionsRef = useRef<Map<string, { events: EventSource | null; retryTimer: number | null; lastCursor: number; presentationCursor: number; attempts: number; seenEventKeys: Set<string> }>>(new Map());
+  const liveRunEventKeysRef = useRef<Map<string, Set<string>>>(new Map());
   const [newChatStarting, setNewChatStarting] = useState(false);
   const [runTick, setRunTick] = useState(0);
   const [workflowControlInProgress, setWorkflowControlInProgress] = useState(false);
@@ -1392,18 +1423,37 @@ function App() {
   const isRunning = Boolean(activeRunUi?.isRunning);
   const runStartedAt = activeRunUi?.startedAt || null;
   const runTarget = activeRunUi?.target || null;
-  const activeHermesRun = activeRunUi?.activeRun || null;
   const runDraft = activeRunUi?.draft || '';
   const runActivityGroups = activeRunUi?.activityGroups || [];
   const runPresentationPhase = activeRunUi?.presentationPhase || 'thinking';
-  const runApproval = activeRunUi?.approval || null;
-  const approvalSubmitting = Boolean(activeRunUi?.approvalSubmitting);
-  const approvalError = activeRunUi?.approvalError || '';
-  const runClarification = activeRunUi?.clarification || null;
-  const clarificationSubmitting = Boolean(activeRunUi?.clarificationSubmitting);
-  const clarificationError = activeRunUi?.clarificationError || '';
   const runError = activeRunUi?.error || '';
+  const runErrorCode = activeRunUi?.errorCode || '';
   const runStopping = Boolean(activeRunUi?.stopping);
+  const liveRunPresentations = activeThread?.id
+    ? Object.values(runPresentationsByThreadId[activeThread.id] || {}).filter((run) => {
+      const persisted = (activeThread.messages || []).some((message) => message.externalRunId === run.hostRunId || message.externalRunId === run.activeRun?.runId);
+      return !persisted || !run.completed;
+    })
+    : [];
+  // Decisions are owned by the Run that requested them. A child Agent must
+  // never replace another Agent's approval or clarification in the Thread UI.
+  const activeDecisionPresentation = liveRunPresentations.find((run) => run.approval || run.clarification) || null;
+  const decisionRunUi = activeDecisionPresentation || activeRunUi;
+  const activeHermesRun = decisionRunUi?.activeRun || null;
+  const runApproval = decisionRunUi?.approval || null;
+  const approvalSubmitting = Boolean(decisionRunUi?.approvalSubmitting);
+  const approvalError = decisionRunUi?.approvalError || '';
+  const runClarification = decisionRunUi?.clarification || null;
+  const clarificationSubmitting = Boolean(decisionRunUi?.clarificationSubmitting);
+  const clarificationError = decisionRunUi?.clarificationError || '';
+
+  function updateDecisionRunUi(update: Partial<RunUiState> | ((current: RunUiState) => RunUiState)) {
+    if (activeDecisionPresentation?.hostRunId && activeThread?.id) {
+      updateRunPresentation(activeThread.id, activeDecisionPresentation.hostRunId, update as Partial<RunPresentationUi> | ((current: RunPresentationUi) => RunPresentationUi));
+      return;
+    }
+    if (activeThread?.id) updateRunUi(activeThread.id, update);
+  }
 
   useEffect(() => {
     activeThreadIdRef.current = activeThread?.id || '';
@@ -1445,6 +1495,20 @@ function App() {
     });
   }
 
+  function updateRunPresentation(threadId: string, hostRunId: string, update: Partial<RunPresentationUi> | ((current: RunPresentationUi) => RunPresentationUi)) {
+    if (!threadId || !hostRunId) return;
+    setRunPresentationsByThreadId((current) => {
+      const threadRuns = current[threadId] || {};
+      const previous = threadRuns[hostRunId] || createRunPresentation({ hostRunId });
+      const next = typeof update === 'function' ? update(previous) : { ...previous, ...update };
+      return { ...current, [threadId]: { ...threadRuns, [hostRunId]: next } };
+    });
+  }
+
+  function ensureRunPresentation(threadId: string, hostRunId: string, run: Partial<RunPresentationUi> = {}) {
+    updateRunPresentation(threadId, hostRunId, (current) => ({ ...current, ...run, hostRunId }));
+  }
+
   function resetRunUi(threadId: string, overrides: Partial<RunUiState> = {}) {
     updateRunUi(threadId, createRunUiState(overrides));
   }
@@ -1461,7 +1525,7 @@ function App() {
     recoveredRunSubscriptionsRef.current.delete(key);
   }
 
-  function applyTerminalRunUi(threadId: string, error = '', runId = '', runtimeCursor = 0) {
+  function applyTerminalRunUi(threadId: string, error = '', runId = '', runtimeCursor = 0, errorCode = '') {
     updateRunUi(threadId, (current) => ({
       ...current,
       isRunning: false,
@@ -1476,6 +1540,7 @@ function App() {
       clarification: null,
       clarificationSubmitting: false,
       error,
+      errorCode,
       terminalRunId: String(runId || current.activeRun?.hostRunId || current.activeRun?.runId || ''),
       lastRuntimeCursor: Math.max(current.lastRuntimeCursor, Number(runtimeCursor || 0)),
     }));
@@ -1487,10 +1552,20 @@ function App() {
     const active = Boolean(run && ['queued', 'running', 'interrupting'].includes(run.status));
     const runIdentity = String(run?.runId || '');
     if (!active) {
+      if (runIdentity) updateRunPresentation(threadId, runIdentity, (current) => ({
+        ...current,
+        isRunning: false,
+        completed: true,
+        error: run?.status === 'failed' ? run.error || '运行失败。' : current.error,
+        errorCode: run?.status === 'failed' ? String((run as any).failureClass || '') : current.errorCode,
+        presentationRevision: Math.max(current.presentationRevision, Number(presentation?.revision || 0)),
+        lastRuntimeCursor: Math.max(current.lastRuntimeCursor, Number(presentation?.lastCursor || 0)),
+      }));
       updateRunUi(threadId, (current) => {
         if (current.startPending && !run) return current;
         return createRunUiState({
           error: run?.status === 'failed' ? run.error || '运行失败。' : '',
+          errorCode: run?.status === 'failed' ? String((run as any).failureClass || '') : '',
           terminalRunId: String(run?.runId || current.terminalRunId || ''),
           presentationRevision: Math.max(current.presentationRevision, Number(presentation?.revision || 0)),
           lastRuntimeCursor: Math.max(current.lastRuntimeCursor, Number(presentation?.lastCursor || 0)),
@@ -1502,6 +1577,47 @@ function App() {
     const parsedStartedAt = run?.startedAt ? Date.parse(run.startedAt) : Number.NaN;
     const normalizedApproval = normalizeApprovalPresentation(presentation?.approval);
     const normalizedClarification = normalizeClarificationPresentation(presentation?.clarification);
+    if (run) {
+      const recoveredTarget: ChatRunTarget | null = targetAgent ? { kind: 'agent', agent: targetAgent } : null;
+      updateRunPresentation(threadId, run.runId, (current) => {
+        const nextRevision = Number(presentation?.revision || 0);
+        const nextCursor = Number(presentation?.lastCursor || 0);
+        if (presentation && (!canApplyPresentation(current.presentationRevision, nextRevision)
+          || (nextRevision === current.presentationRevision && nextCursor < current.lastRuntimeCursor))) return current;
+        return {
+        ...current,
+        hostRunId: run.runId,
+        turnId: run.turnId || '',
+        agentId: run.agentId || '',
+        agentName: targetAgent?.name || 'Agent',
+        isRunning: true,
+        startPending: false,
+        startedAt: Number.isFinite(parsedStartedAt) ? parsedStartedAt : Date.now(),
+        target: recoveredTarget,
+        activeRun: {
+          runId: run.nativeRunId || run.runId,
+          hostRunId: run.runId,
+          sessionId: run.sessionId || '',
+          threadId,
+          turnId: run.turnId || '',
+        },
+        stopping: run.status === 'interrupting',
+        draft: presentation?.content || '',
+        activityGroups: presentation?.activityGroups || [],
+        approval: normalizedApproval.approval,
+        clarification: normalizedClarification.clarification,
+        compaction: presentation?.compaction || null,
+        presentationRevision: Number(presentation?.revision || 0),
+        lastRuntimeCursor: Number(presentation?.lastCursor || 0),
+        presentationPhase: run.phase === 'approval' || normalizedApproval.approval || normalizedClarification.clarification
+          ? 'waiting-input'
+          : presentation?.content ? 'responding' : presentation?.activityGroups?.length ? 'activity' : 'thinking',
+        error: '',
+        errorCode: '',
+        completed: false,
+        };
+      });
+    }
     updateRunUi(threadId, (current) => {
       if (!canApplyRunSnapshot(current.terminalRunId, runIdentity, run?.status || '')) return current;
       if (presentation && (!canApplyPresentation(current.presentationRevision, presentation.revision)
@@ -1556,7 +1672,7 @@ function App() {
     if (!run.turnId || !['queued', 'running', 'interrupting'].includes(run.status)) return;
     const key = runSubscriptionKey(threadId, run.turnId, run.runId);
     if (liveRunSubscriptionKeysRef.current.has(key) || recoveredRunSubscriptionsRef.current.has(key)) return;
-    const subscription = { events: null as EventSource | null, retryTimer: null as number | null, lastCursor: 0, presentationCursor: initialCursor, attempts: 0 };
+    const subscription = { events: null as EventSource | null, retryTimer: null as number | null, lastCursor: 0, presentationCursor: initialCursor, attempts: 0, seenEventKeys: new Set<string>() };
     recoveredRunSubscriptionsRef.current.set(key, subscription);
     const connect = () => {
       if (!recoveredRunSubscriptionsRef.current.has(key) || liveRunSubscriptionKeysRef.current.has(key)) {
@@ -1574,35 +1690,75 @@ function App() {
         if (cursorValue) subscription.lastCursor = cursorValue;
         subscription.attempts = 0;
         const data = JSON.parse(event.data || '{}');
+        if (!shouldApplyRuntimeEvent(subscription.seenEventKeys, data)) return;
+        if (data.event === 'run.started') {
+          const incomingHostRunId = String(data.hostRunId || data.runId || run.runId);
+          const routedAgent = agents.find((agent) => agent.id === data.agentId) || null;
+          ensureRunPresentation(threadId, incomingHostRunId, {
+            hostRunId: incomingHostRunId,
+            turnId: String(data.turnId || run.turnId),
+            agentId: String(data.agentId || routedAgent?.id || ''),
+            agentName: String(data.agentName || routedAgent?.name || 'Agent'),
+            activeRun: {
+              runId: String(data.nativeRunId || data.runId || incomingHostRunId),
+              hostRunId: incomingHostRunId,
+              sessionId: String(data.sessionId || ''),
+              threadId,
+              turnId: String(data.turnId || run.turnId),
+            },
+            target: routedAgent ? { kind: 'agent', agent: routedAgent } : null,
+            isRunning: true,
+            startPending: false,
+            startedAt: Date.now(),
+            presentationPhase: 'thinking',
+            completed: false,
+          });
+          return;
+        }
         if (data.event === 'message.delta') {
           const delta = String(data.delta || '');
           const runtimeCursor = Math.max(0, Number(data.runtimeCursor || 0) || 0);
-          if (delta) updateRunUi(threadId, (current) => canApplyRuntimeCursor(current.lastRuntimeCursor, runtimeCursor)
+          const incomingHostRunId = String(data.hostRunId || data.runId || run.runId);
+          if (delta) updateRunPresentation(threadId, incomingHostRunId, (current) => canApplyRuntimeCursor(current.lastRuntimeCursor, runtimeCursor)
+            ? { ...current, draft: current.draft + delta, lastRuntimeCursor: Math.max(current.lastRuntimeCursor, runtimeCursor), presentationPhase: 'responding' }
+            : current);
+          if (delta && incomingHostRunId === run.runId) updateRunUi(threadId, (current) => canApplyRuntimeCursor(current.lastRuntimeCursor, runtimeCursor)
             ? { ...current, draft: current.draft + delta, lastRuntimeCursor: Math.max(current.lastRuntimeCursor, runtimeCursor), presentationPhase: 'responding' }
             : current);
           return;
         }
         if (data.event === 'tool.running' || data.event === 'tool.started' || data.event === 'tool.updated' || data.event === 'tool.completed') {
           const activityEvent = data.event === 'tool.completed' ? data : { ...data, event: 'tool.running' };
-          updateRunUi(threadId, (current) => ({ ...current, activityGroups: mergeRunActivityEvent(current.activityGroups, activityEvent), presentationPhase: 'activity' }));
+          const incomingHostRunId = String(data.hostRunId || data.runId || run.runId);
+          updateRunPresentation(threadId, incomingHostRunId, (current) => ({ ...current, activityGroups: mergeRunActivityEvent(current.activityGroups, activityEvent), presentationPhase: 'activity' }));
+          if (incomingHostRunId === run.runId) updateRunUi(threadId, (current) => ({ ...current, activityGroups: mergeRunActivityEvent(current.activityGroups, activityEvent), presentationPhase: 'activity' }));
           return;
         }
         if (data.event === 'context.compaction.started' || data.event === 'context.compaction.completed' || data.event === 'context.compaction.failed') {
           const operationId = String(data.operationId || `compaction:${data.runId || run.runId}`);
+          const incomingHostRunId = String(data.hostRunId || data.runId || run.runId);
           const failed = data.event === 'context.compaction.failed';
           const status = data.event === 'context.compaction.started' ? 'running' as const : failed ? 'failed' as const : 'completed' as const;
-          updateRunUi(threadId, (current) => {
+          function updateCompaction<T extends RunUiState>(current: T): T {
             const record = { operationId, status, tokensBefore: Number(data.tokensBefore) || undefined, tokensAfterEstimate: Number(data.tokensAfterEstimate) || undefined, error: failed ? String(data.error || '上下文压缩失败。') : undefined, originalContextPreserved: failed ? data.originalContextPreserved !== false : undefined };
             const records = current.compactionRecords.some((item) => item.operationId === operationId)
               ? current.compactionRecords.map((item) => item.operationId === operationId ? { ...item, ...record } : item)
               : [...current.compactionRecords, record];
-            return { ...current, compaction: record, compactionRecords: records, presentationPhase: 'activity' };
-          });
+            return { ...current, compaction: record, compactionRecords: records, presentationPhase: 'activity' } as T;
+          }
+          updateRunPresentation(threadId, incomingHostRunId, updateCompaction);
+          if (incomingHostRunId === run.runId) updateRunUi(threadId, updateCompaction);
           return;
         }
         if (data.event === 'approval.request' || data.event === 'approval.requested') {
           const normalized = normalizeApprovalPresentation(data);
-          updateRunUi(threadId, {
+          const incomingHostRunId = String(data.hostRunId || data.runId || run.runId);
+          updateRunPresentation(threadId, incomingHostRunId, {
+            presentationPhase: 'waiting-input',
+            approval: normalized.approval,
+            approvalError: normalized.missingId ? '审批信息同步不完整，正在重新获取。' : '',
+          });
+          if (incomingHostRunId === run.runId) updateRunUi(threadId, {
             presentationPhase: 'waiting-input',
             approval: normalized.approval,
             approvalError: normalized.missingId ? '审批信息同步不完整，正在重新获取。' : '',
@@ -1610,11 +1766,59 @@ function App() {
           if (normalized.missingId) void reconcileThreadRun(threadId, true);
           return;
         }
-        if (data.event === 'run.completed' || data.event === 'run.failed' || data.event === 'run.cancelled' || data.event === 'turn.completed' || data.event === 'turn.failed' || data.event === 'turn.cancelled') {
+        if (data.event === 'clarify.request' || data.event === 'clarify.requested') {
+          const normalized = normalizeClarificationPresentation(data);
+          const incomingHostRunId = String(data.hostRunId || data.runId || run.runId);
+          updateRunPresentation(threadId, incomingHostRunId, {
+            presentationPhase: 'waiting-input',
+            clarification: normalized.clarification,
+            clarificationError: normalized.missingId ? '提问信息同步不完整，正在重新获取。' : '',
+          });
+          if (incomingHostRunId === run.runId) updateRunUi(threadId, {
+            presentationPhase: 'waiting-input',
+            clarification: normalized.clarification,
+            clarificationError: normalized.missingId ? '提问信息同步不完整，正在重新获取。' : '',
+          });
+          if (normalized.missingId) void reconcileThreadRun(threadId, true);
+          return;
+        }
+        if (data.event === 'approval.responded' || data.event === 'clarify.responded') {
+          const incomingHostRunId = String(data.hostRunId || data.runId || run.runId);
+          function updateDecision<T extends RunUiState>(current: T): T {
+            return {
+              ...current,
+              presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event, { hasActivity: current.activityGroups.length > 0 }),
+              ...(data.event === 'approval.responded'
+                ? { approval: null, approvalError: '', approvalSubmitting: false }
+                : { clarification: null, clarificationError: '', clarificationSubmitting: false }),
+            } as T;
+          }
+          updateRunPresentation(threadId, incomingHostRunId, updateDecision);
+          if (incomingHostRunId === run.runId) updateRunUi(threadId, updateDecision);
+          return;
+        }
+        if (data.event === 'run.completed' || data.event === 'run.failed' || data.event === 'run.cancelled') {
+          if (data.thread) adoptThreadSnapshot(threadId, data.thread as Thread);
+          const incomingHostRunId = String(data.hostRunId || data.runId || run.runId);
+          updateRunPresentation(threadId, incomingHostRunId, (current) => ({
+            ...current,
+            isRunning: false,
+            completed: true,
+            approval: null,
+            approvalSubmitting: false,
+            clarification: null,
+            clarificationSubmitting: false,
+            error: data.event === 'run.failed' ? String(data.error || '运行失败。') : '',
+            presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event),
+          }));
+          void reconcileThreadRun(threadId, true);
+          return;
+        }
+        if (data.event === 'turn.completed' || data.event === 'turn.failed' || data.event === 'turn.cancelled') {
           if (data.thread) adoptThreadSnapshot(threadId, data.thread as Thread);
           applyTerminalRunUi(
             threadId,
-            data.event === 'run.failed' || data.event === 'turn.failed' ? String(data.error || '运行失败。') : '',
+            data.event === 'turn.failed' ? String(data.error || '运行失败。') : '',
             String(data.hostRunId || data.runId || run.runId),
             Number(data.runtimeCursor || 0),
           );
@@ -3368,6 +3572,7 @@ function App() {
     setProjectRootPath('');
     setProjectParentPath('');
     setProjectError('');
+    setProjectKnowledgeProfile('personal');
     setProjectModalOpen(true);
   }
 
@@ -3446,9 +3651,10 @@ function App() {
   }
 
   async function createWorkspaceProject() {
+    const personalKnowledgeDefault = projectKnowledgeProfile === 'team' ? 'off' : 'on';
     const payload = projectMode === 'existing'
-      ? { mode: projectMode, rootPath: projectRootPath.trim(), spaceId: activeSpaceId }
-      : { mode: projectMode, name: projectName.trim(), parentPath: projectParentPath.trim() || undefined, spaceId: activeSpaceId };
+      ? { mode: projectMode, rootPath: projectRootPath.trim(), spaceId: activeSpaceId, personalKnowledgeDefault }
+      : { mode: projectMode, name: projectName.trim(), parentPath: projectParentPath.trim() || undefined, spaceId: activeSpaceId, personalKnowledgeDefault };
     await submitWorkspaceProject(payload);
   }
 
@@ -3461,9 +3667,7 @@ function App() {
       return;
     }
     setProjectRootPath(folderPath);
-    const payload = { mode: 'existing', name: projectNameFromPath(folderPath), rootPath: folderPath, spaceId: activeSpaceId };
-    if (projectModalPurpose === 'convert') await submitConvertToProject(payload);
-    else await submitWorkspaceProject({ mode: 'existing', rootPath: folderPath, spaceId: activeSpaceId });
+    setProjectName(projectNameFromPath(folderPath));
   }
 
   async function chooseProjectParentFolder() {
@@ -3795,12 +3999,29 @@ function App() {
     await refreshLeftRail();
   }
 
+  async function migrateThreadAgentToNative(threadId: string, agentId: string) {
+    const response = await fetch(`/api/threads/${threadId}/agents/${agentId}/harness-migration`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targetHarnessId: 'native', confirm: true }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) {
+      updateRunUi(threadId, (current) => ({ ...current, error: data.error || '迁移到 Frakio Native 失败。', errorCode: data.code || 'HARNESS_MIGRATION_FAILED' }));
+      return;
+    }
+    if (data.thread) setActiveThread((current) => current?.id === threadId ? data.thread : current);
+    updateRunUi(threadId, (current) => ({ ...current, error: '', errorCode: '' }));
+    await refreshLeftRail();
+  }
+
   async function convertActiveConversationToProject() {
     if (!activeThread || activeThread.mode !== 'direct') return;
     const fallbackName = activeThread.title && activeThread.title !== '新的对话' ? activeThread.title : '新的项目';
+    const personalKnowledgeDefault = projectKnowledgeProfile === 'team' ? 'off' : 'on';
     const payload = projectMode === 'existing'
-      ? { mode: projectMode, name: projectName.trim() || projectNameFromPath(projectRootPath.trim()) || fallbackName, rootPath: projectRootPath.trim(), spaceId: activeSpaceId }
-      : { mode: projectMode, name: projectName.trim() || fallbackName, parentPath: projectParentPath.trim() || undefined, spaceId: activeSpaceId };
+      ? { mode: projectMode, name: projectName.trim() || projectNameFromPath(projectRootPath.trim()) || fallbackName, rootPath: projectRootPath.trim(), spaceId: activeSpaceId, personalKnowledgeDefault }
+      : { mode: projectMode, name: projectName.trim() || fallbackName, parentPath: projectParentPath.trim() || undefined, spaceId: activeSpaceId, personalKnowledgeDefault };
     await submitConvertToProject(payload);
   }
 
@@ -3815,6 +4036,7 @@ function App() {
     options: { suppressUserMessage?: boolean; planExecutionId?: string; messageContext?: MessageContext; clientMessageId?: string } = {},
   ): Promise<Thread | null> {
     resetRunUi(threadId, { isRunning: true, startPending: true, startedAt, target });
+    setRunPresentationsByThreadId((current) => ({ ...current, [threadId]: {} }));
     const messageContext = options.messageContext || { browserAnnotations: [], reviewComments: [] };
     const hasMessageContext = Boolean(messageContext.browserAnnotations.length || messageContext.reviewComments.length);
     const clientMessageId = options.clientMessageId || `client-message-${startedAt}`;
@@ -3913,26 +4135,23 @@ function App() {
       liveRunSubscriptionKeysRef.current.add(subscriptionKey);
       clearRecoveredRunSubscription(subscriptionKey);
       const events = new EventSource(`/api/threads/${threadId}/turns/${turnId}/events`);
+      const liveEventKeys = new Set<string>();
+      liveRunEventKeysRef.current.set(subscriptionKey, liveEventKeys);
       let settled = false;
       let terminalReceived = false;
       let lastEventCursor = 0;
       let lastRuntimeCursor = 0;
       let finalizationTimer: number | null = null;
-      let handoffTimer: number | null = null;
       let streamedDraft = '';
       let activeStreamRunId = run.runId;
-      let pendingHandoff: Thread | null = null;
-      const bufferedTurnEvents: any[] = [];
-      let drainingBufferedTurnEvents = false;
       const finish = (error?: Error) => {
         if (settled) return;
         settled = true;
         if (finalizationTimer !== null) window.clearTimeout(finalizationTimer);
-        if (handoffTimer !== null) window.clearTimeout(handoffTimer);
         finalizationTimer = null;
-        handoffTimer = null;
         events.close();
         liveRunSubscriptionKeysRef.current.delete(subscriptionKey);
+        liveRunEventKeysRef.current.delete(subscriptionKey);
         updateRunUi(threadId, {
           approval: null,
           approvalSubmitting: false,
@@ -3972,25 +4191,42 @@ function App() {
       };
       const processTurnEvent = (data: any) => {
         if (terminalReceived) return;
+        if (!shouldApplyRuntimeEvent(liveEventKeys, data)) return;
         if (data.event === 'run.started') {
-          activeStreamRunId = String(data.runId || activeStreamRunId);
-          streamedDraft = '';
-          lastRuntimeCursor = 0;
+          const incomingRunId = String(data.runId || activeStreamRunId);
+          const incomingHostRunId = String(data.hostRunId || (incomingRunId === activeStreamRunId ? run.hostRunId : incomingRunId));
+          const isRootRun = incomingRunId === activeStreamRunId;
+          if (isRootRun) {
+            activeStreamRunId = incomingRunId;
+            streamedDraft = '';
+            lastRuntimeCursor = 0;
+          }
           const routedAgent = agents.find((agent) => agent.id === data.agentId);
-          updateRunUi(threadId, {
+          const routedTarget: ChatRunTarget | null = routedAgent ? { kind: 'agent', agent: routedAgent } : null;
+          const identity = {
             activeRun: {
-              runId: activeStreamRunId,
-              hostRunId: run.hostRunId,
+              runId: incomingRunId,
+              hostRunId: incomingHostRunId,
               sessionId: String(data.sessionId || ''),
               threadId,
               turnId,
             },
-            target: routedAgent ? { kind: 'agent', agent: routedAgent } : null,
+            target: routedTarget,
+            agentId: String(data.agentId || routedAgent?.id || ''),
+            agentName: String(data.agentName || routedAgent?.name || 'Agent'),
+            turnId,
+            hostRunId: incomingHostRunId,
             draft: '',
             activityGroups: [],
             hideStatus: false,
-            presentationPhase: 'thinking',
-          });
+            isRunning: true,
+            startPending: false,
+            startedAt: Date.now(),
+            presentationPhase: 'thinking' as const,
+            completed: false,
+          };
+          ensureRunPresentation(threadId, incomingHostRunId, identity);
+          if (isRootRun) updateRunUi(threadId, identity);
           return;
         }
         if (data.event === 'context.compaction.started') {
@@ -4025,25 +4261,41 @@ function App() {
         }
         if (data.event === 'message.delta') {
           const delta = String(data.delta || '');
-          if (data.runId && data.runId !== activeStreamRunId) {
-            activeStreamRunId = String(data.runId);
-            streamedDraft = '';
-            lastRuntimeCursor = 0;
-            updateRunUi(threadId, { draft: '', activityGroups: [], hideStatus: false });
-          }
+          const incomingRunId = String(data.runId || activeStreamRunId);
+          const incomingHostRunId = String(data.hostRunId || (incomingRunId === activeStreamRunId ? run.hostRunId : incomingRunId));
           const runtimeCursor = Math.max(0, Number(data.runtimeCursor || 0) || 0);
-          if (runtimeCursor && runtimeCursor <= lastRuntimeCursor) return;
-          if (runtimeCursor) lastRuntimeCursor = runtimeCursor;
-          streamedDraft += delta;
-          updateRunUi(threadId, (current) => ({
-            ...current,
-            draft: current.draft + delta,
-            lastRuntimeCursor: Math.max(current.lastRuntimeCursor, runtimeCursor),
-            presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event, { delta }),
-          }));
+          if (incomingRunId === activeStreamRunId) {
+            if (runtimeCursor && runtimeCursor <= lastRuntimeCursor) return;
+            if (runtimeCursor) lastRuntimeCursor = runtimeCursor;
+            streamedDraft += delta;
+            updateRunUi(threadId, (current) => ({
+              ...current,
+              draft: current.draft + delta,
+              lastRuntimeCursor: Math.max(current.lastRuntimeCursor, runtimeCursor),
+              presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event, { delta }),
+            }));
+          }
+          updateRunPresentation(threadId, incomingHostRunId, (current) => {
+            if (runtimeCursor && runtimeCursor <= current.lastRuntimeCursor) return current;
+            return {
+              ...current,
+              draft: current.draft + delta,
+              lastRuntimeCursor: Math.max(current.lastRuntimeCursor, runtimeCursor),
+              isRunning: true,
+              presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event, { delta }),
+            };
+          });
           return;
         }
         if (data.event === 'tool.running') {
+          const incomingRunId = String(data.runId || activeStreamRunId);
+          const incomingHostRunId = String(data.hostRunId || (incomingRunId === activeStreamRunId ? run.hostRunId : incomingRunId));
+          updateRunPresentation(threadId, incomingHostRunId, (current) => ({
+            ...current,
+            activityGroups: mergeRunActivityEvent(current.activityGroups, data),
+            presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event),
+          }));
+          if (incomingRunId !== activeStreamRunId) return;
           updateRunUi(threadId, (current) => ({
             ...current,
             activityGroups: mergeRunActivityEvent(current.activityGroups, data),
@@ -4052,6 +4304,14 @@ function App() {
           return;
         }
         if (data.event === 'tool.completed') {
+          const incomingRunId = String(data.runId || activeStreamRunId);
+          const incomingHostRunId = String(data.hostRunId || (incomingRunId === activeStreamRunId ? run.hostRunId : incomingRunId));
+          updateRunPresentation(threadId, incomingHostRunId, (current) => ({
+            ...current,
+            activityGroups: mergeRunActivityEvent(current.activityGroups, data),
+            presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event),
+          }));
+          if (incomingRunId !== activeStreamRunId) return;
           updateRunUi(threadId, (current) => ({
             ...current,
             activityGroups: mergeRunActivityEvent(current.activityGroups, data),
@@ -4065,8 +4325,23 @@ function App() {
         }
         if (data.event === 'approval.request') {
           const normalized = normalizeApprovalPresentation(data);
+          const approvalHostRunId = String(data.hostRunId || data.runId || run.hostRunId || activeStreamRunId);
+          const approvalAgent = agents.find((agent) => agent.id === data.agentId) || null;
+          updateRunPresentation(threadId, approvalHostRunId, {
+            presentationPhase: 'waiting-input',
+            approval: normalized.approval,
+            approvalError: normalized.missingId ? '审批信息同步不完整，正在重新获取。' : '',
+          });
           updateRunUi(threadId, {
             presentationPhase: 'waiting-input',
+            activeRun: {
+              runId: String(data.nativeRunId || data.runId || approvalHostRunId),
+              hostRunId: approvalHostRunId,
+              sessionId: String(data.sessionId || ''),
+              threadId,
+              turnId,
+            },
+            target: approvalAgent ? { kind: 'agent', agent: approvalAgent } : null,
             clarification: null,
             clarificationError: '',
             clarificationSubmitting: false,
@@ -4079,8 +4354,23 @@ function App() {
         }
         if (data.event === 'clarify.request') {
           const normalized = normalizeClarificationPresentation(data);
+          const clarificationHostRunId = String(data.hostRunId || data.runId || run.hostRunId || activeStreamRunId);
+          const clarificationAgent = agents.find((agent) => agent.id === data.agentId) || null;
+          updateRunPresentation(threadId, clarificationHostRunId, {
+            presentationPhase: 'waiting-input',
+            clarification: normalized.clarification,
+            clarificationError: normalized.missingId ? '提问信息同步不完整，正在重新获取。' : '',
+          });
           updateRunUi(threadId, {
             presentationPhase: 'waiting-input',
+            activeRun: {
+              runId: String(data.nativeRunId || data.runId || clarificationHostRunId),
+              hostRunId: clarificationHostRunId,
+              sessionId: String(data.sessionId || ''),
+              threadId,
+              turnId,
+            },
+            target: clarificationAgent ? { kind: 'agent', agent: clarificationAgent } : null,
             approval: null,
             approvalError: '',
             approvalSubmitting: false,
@@ -4092,6 +4382,14 @@ function App() {
           return;
         }
         if (data.event === 'clarify.responded') {
+          const clarificationHostRunId = String(data.hostRunId || data.runId || run.hostRunId || activeStreamRunId);
+          updateRunPresentation(threadId, clarificationHostRunId, (current) => ({
+            ...current,
+            presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event, { hasActivity: current.activityGroups.length > 0 }),
+            clarification: null,
+            clarificationError: '',
+            clarificationSubmitting: false,
+          }));
           updateRunUi(threadId, (current) => ({
             ...current,
             presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event, { hasActivity: current.activityGroups.length > 0 }),
@@ -4102,6 +4400,14 @@ function App() {
           return;
         }
         if (data.event === 'approval.responded') {
+          const approvalHostRunId = String(data.hostRunId || data.runId || run.hostRunId || activeStreamRunId);
+          updateRunPresentation(threadId, approvalHostRunId, (current) => ({
+            ...current,
+            presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event, { hasActivity: current.activityGroups.length > 0 }),
+            approval: null,
+            approvalError: '',
+            approvalSubmitting: false,
+          }));
           updateRunUi(threadId, (current) => ({
             ...current,
             presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event, { hasActivity: current.activityGroups.length > 0 }),
@@ -4112,23 +4418,30 @@ function App() {
           return;
         }
         if (data.event === 'run.completed') {
-          updateRunUi(threadId, (current) => ({ ...current, activityGroups: current.activityGroups.map((group) => ({
+          const completedRunId = String(data.runId || activeStreamRunId);
+          const completedHostRunId = String(data.hostRunId || (completedRunId === activeStreamRunId ? run.hostRunId : completedRunId));
+          updateRunPresentation(threadId, completedHostRunId, (current) => ({ ...current, activityGroups: current.activityGroups.map((group) => ({
             ...group,
             status: group.status === 'running' ? 'completed' : group.status,
             items: group.items.map((item) => item.status === 'running' ? { ...item, status: 'completed' } : item),
-            })), presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event) }));
+            })), presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event), isRunning: false, completed: true, approval: null, approvalSubmitting: false, clarification: null, clarificationSubmitting: false }));
+          if (completedRunId === activeStreamRunId) updateRunUi(threadId, (current) => ({ ...current, activityGroups: current.activityGroups.map((group) => ({
+            ...group,
+            status: group.status === 'running' ? 'completed' : group.status,
+            items: group.items.map((item) => item.status === 'running' ? { ...item, status: 'completed' } : item),
+          })), presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event) }));
           if (data.thread) {
             const threadFromServer = data.thread as Thread;
-            const completedRunId = String(data.runId || activeStreamRunId);
             const hasAssistantResult = threadFromServer.messages.some((message) => (
               message.agentId !== 'user'
               && message.agentId !== 'system'
               && (message.externalRunId === completedRunId || message.content.trim() === String(data.output || '').trim())
               && message.content.trim()
             ));
-            const nextThread = appendMissingRunMessages(threadFromServer, completedRunId, hasAssistantResult ? '' : streamedDraft);
+            const completedDraft = completedRunId === activeStreamRunId ? streamedDraft : '';
+            const nextThread = appendMissingRunMessages(threadFromServer, completedRunId, hasAssistantResult ? '' : completedDraft);
             completedThread = nextThread;
-            scheduleHandoff(nextThread);
+            adoptThreadSnapshot(threadId, nextThread);
             const group = (threadFromServer as any).activeRunGroup;
             const hasPendingRoute = Array.isArray(group?.routes) && group.routes.some((route: any) => ['pending', 'starting', 'running'].includes(route.status));
             const hasActiveRoute = Object.keys(group?.activeRuns || {}).length > 0;
@@ -4142,23 +4455,41 @@ function App() {
           const finalThread = (data.thread as Thread | undefined) || completedThread;
           if (finalThread) completedThread = finalThread;
           finishAfterReveal(() => {
-            if (finalThread) setActiveThread((current) => current?.id === finalThread.id ? finalThread : current);
+            if (finalThread) adoptThreadSnapshot(threadId, finalThread);
             applyTerminalRunUi(threadId, '', String(data.hostRunId || data.runId || run.hostRunId || activeStreamRunId), Number(data.runtimeCursor || 0));
             updateRunUi(threadId, { draft: '' });
           });
           return;
         }
         if (data.event === 'run.failed' || data.event === 'run.cancelled') {
+          const failedRunId = String(data.runId || activeStreamRunId);
+          const failedHostRunId = String(data.hostRunId || (failedRunId === activeStreamRunId ? run.hostRunId : failedRunId));
           const formatted = formatHermesRuntimeError(data.error || (data.event === 'run.cancelled' ? '已停止。' : '运行失败。'), activeComposerProfileName, data.details);
+          updateRunPresentation(threadId, failedHostRunId, (current) => ({
+            ...current,
+            isRunning: false,
+            completed: true,
+            approval: null,
+            approvalSubmitting: false,
+            clarification: null,
+            clarificationSubmitting: false,
+            error: data.event === 'run.failed' ? formatted : '',
+            errorCode: data.event === 'run.failed' ? String(data.code || data.failureClass || '') : '',
+            presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event),
+          }));
+          if (failedRunId !== activeStreamRunId) {
+            if (data.thread) adoptThreadSnapshot(threadId, data.thread as Thread);
+            return;
+          }
           updateRunUi(threadId, (current) => ({ ...current, activityGroups: current.activityGroups.map((group) => ({
             ...group,
             status: group.status === 'running' ? (data.event === 'run.failed' ? 'failed' : 'cancelled') : group.status,
             items: group.items.map((item) => item.status === 'running' ? { ...item, status: data.event === 'run.failed' ? 'failed' : 'cancelled' } : item),
-          })), presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event), error: data.event === 'run.failed' ? formatted : '' }));
+          })), presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event), error: data.event === 'run.failed' ? formatted : '', errorCode: data.event === 'run.failed' ? String(data.code || data.failureClass || '') : '' }));
           if (data.thread) {
             const nextThread = appendMissingRunMessages(data.thread as Thread, String(data.runId || activeStreamRunId), streamedDraft);
             completedThread = nextThread;
-            scheduleHandoff(nextThread);
+            adoptThreadSnapshot(threadId, nextThread);
           }
           return;
         }
@@ -4168,8 +4499,8 @@ function App() {
             ? formatHermesRuntimeError(data.error || '运行失败。', activeComposerProfileName, data.details)
             : '';
           finishAfterReveal(() => {
-            if (finalThread) setActiveThread((current) => current?.id === finalThread.id ? finalThread : current);
-            applyTerminalRunUi(threadId, formatted, String(data.hostRunId || data.runId || run.hostRunId || activeStreamRunId), Number(data.runtimeCursor || 0));
+            if (finalThread) adoptThreadSnapshot(threadId, finalThread);
+            applyTerminalRunUi(threadId, formatted, String(data.hostRunId || data.runId || run.hostRunId || activeStreamRunId), Number(data.runtimeCursor || 0), String(data.code || data.failureClass || ''));
             updateRunUi(threadId, { draft: '' });
           }, data.event === 'turn.failed' ? new Error(formatted) : undefined);
           return;
@@ -4178,48 +4509,10 @@ function App() {
           if (data.thread) {
             const nextThread = data.thread as Thread;
             completedThread = nextThread;
-            setActiveThread((current) => current?.id === nextThread.id ? nextThread : current);
+            adoptThreadSnapshot(threadId, nextThread);
           }
           return;
         }
-      };
-      const handoffDelay = () => {
-        const reducedMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-        return uiSettings.streamingResponses !== false && !reducedMotion && streamedDraft.trim()
-          ? STREAM_REVEAL_MAX_LAG_MS
-          : 0;
-      };
-      const flushBufferedTurnEvents = () => {
-        if (pendingHandoff || drainingBufferedTurnEvents) return;
-        drainingBufferedTurnEvents = true;
-        while (bufferedTurnEvents.length && !pendingHandoff && !terminalReceived) {
-          processTurnEvent(bufferedTurnEvents.shift());
-        }
-        drainingBufferedTurnEvents = false;
-      };
-      const publishHandoff = () => {
-        const nextThread = pendingHandoff;
-        pendingHandoff = null;
-        handoffTimer = null;
-        if (!nextThread) return;
-        setActiveThread((current) => current?.id === nextThread.id ? nextThread : current);
-        updateRunUi(threadId, {
-          draft: '',
-          hideStatus: true,
-          isRunning: true,
-        });
-        streamedDraft = '';
-        flushBufferedTurnEvents();
-      };
-      const scheduleHandoff = (nextThread: Thread) => {
-        pendingHandoff = nextThread;
-        if (handoffTimer !== null) window.clearTimeout(handoffTimer);
-        const delay = handoffDelay();
-        if (delay === 0) {
-          publishHandoff();
-          return;
-        }
-        handoffTimer = window.setTimeout(publishHandoff, delay);
       };
       events.onmessage = (event) => {
         if (terminalReceived) return;
@@ -4227,10 +4520,6 @@ function App() {
         if (eventCursor && eventCursor <= lastEventCursor) return;
         if (eventCursor) lastEventCursor = eventCursor;
         const data = JSON.parse(event.data || '{}');
-        if (pendingHandoff) {
-          bufferedTurnEvents.push(data);
-          return;
-        }
         processTurnEvent(data);
       };
     });
@@ -4240,42 +4529,51 @@ function App() {
   async function approveActiveRun(choice: 'once' | 'session' | 'always' | 'deny') {
     if (!activeHermesRun) return;
     if (!runApproval?.id) {
-      updateRunUi(activeHermesRun.threadId, { approvalError: '这次审批缺少 approval_id，请重新发起任务。' });
+      updateDecisionRunUi({ approvalError: '这次审批缺少 approval_id，请重新发起任务。' });
       return;
     }
-    updateRunUi(activeHermesRun.threadId, { approvalSubmitting: true, approvalError: '' });
+    updateDecisionRunUi({ approvalSubmitting: true, approvalError: '' });
     try {
-      const res = await fetch(`/api/threads/${activeHermesRun.threadId}/runs/${activeHermesRun.runId}/approval`, {
+      const hostRunId = activeHermesRun.hostRunId || activeHermesRun.runId;
+      const res = await fetch(`/api/runtime-runs/${hostRunId}/approve`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ choice, approvalId: runApproval.id, sessionId: activeHermesRun.sessionId }),
+        body: JSON.stringify({
+          decision: choice,
+          approvalId: runApproval.id,
+          hostRunId,
+          sessionId: activeHermesRun.sessionId,
+          turnId: activeHermesRun.turnId || '',
+          harnessId: decisionRunUi?.target?.kind === 'agent' ? (decisionRunUi.target.agent.runtimePolicy?.defaultHarnessId || (decisionRunUi.target.agent.runtimePolicy?.defaultRuntimeId === 'pi' ? 'native' : decisionRunUi.target.agent.runtimePolicy?.defaultRuntimeId || 'native')) : 'native',
+          presentationRevision: decisionRunUi?.presentationRevision || 0,
+        }),
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok) {
-        updateRunUi(activeHermesRun.threadId, { approvalError: data.error || '审批响应失败。' });
+        updateDecisionRunUi({ approvalError: data.error || '审批响应失败。' });
         return;
       }
       if (data.resolved === false) {
-        updateRunUi(activeHermesRun.threadId, { approvalError: '这次审批已失效，请重新发起任务。' });
+        updateDecisionRunUi({ approvalError: '这次审批已失效，请重新发起任务。' });
         return;
       }
-      updateRunUi(activeHermesRun.threadId, { approval: null });
+      updateDecisionRunUi({ approval: null });
     } finally {
-      updateRunUi(activeHermesRun.threadId, { approvalSubmitting: false });
+      updateDecisionRunUi({ approvalSubmitting: false });
     }
   }
 
   async function respondToActiveClarification(action: 'answer' | 'skip', response = '') {
     if (!activeHermesRun || !runClarification) return;
     if (!runClarification.id) {
-      updateRunUi(activeHermesRun.threadId, { clarificationError: '这次提问缺少 clarify_id，请重新发起任务。' });
+      updateDecisionRunUi({ clarificationError: '这次提问缺少 clarify_id，请重新发起任务。' });
       return;
     }
     if (action === 'answer' && !response.trim()) {
-      updateRunUi(activeHermesRun.threadId, { clarificationError: '请输入回答。' });
+      updateDecisionRunUi({ clarificationError: '请输入回答。' });
       return;
     }
-    updateRunUi(activeHermesRun.threadId, { clarificationSubmitting: true, clarificationError: '' });
+    updateDecisionRunUi({ clarificationSubmitting: true, clarificationError: '' });
     try {
       const res = await fetch(`/api/threads/${activeHermesRun.threadId}/runs/${activeHermesRun.runId}/clarify`, {
         method: 'POST',
@@ -4284,12 +4582,12 @@ function App() {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.resolved === false) {
-        updateRunUi(activeHermesRun.threadId, { clarificationError: data.error || '这次提问已失效，请重新发起任务。' });
+        updateDecisionRunUi({ clarificationError: data.error || '这次提问已失效，请重新发起任务。' });
         return;
       }
-      updateRunUi(activeHermesRun.threadId, { clarification: null });
+      updateDecisionRunUi({ clarification: null });
     } finally {
-      updateRunUi(activeHermesRun.threadId, { clarificationSubmitting: false });
+      updateDecisionRunUi({ clarificationSubmitting: false });
     }
   }
 
@@ -4401,12 +4699,13 @@ function App() {
           clearAttachmentDrafts();
         }, { clientMessageId });
       } catch (error) {
+        const failure = error as Error & { code?: string };
         if (!runAccepted) {
           confirmPendingMessage(thread.id, clientMessageId);
-          applyTerminalRunUi(thread.id, error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。');
+          applyTerminalRunUi(thread.id, error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。', '', 0, failure.code || '');
           setInput((current) => current || text);
         }
-        updateRunUi(thread.id, { error: error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。' });
+        updateRunUi(thread.id, { error: error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。', errorCode: failure.code || '' });
         await refreshHermesRuntime();
       }
       await refreshLeftRail();
@@ -4490,11 +4789,15 @@ function App() {
   }
 
   async function updateThreadVault(vaultId: string | null) {
+    await updateThreadContext({ vaultId });
+  }
+
+  async function updateThreadContext(patch: { vaultId?: string | null; personalKnowledgeMode?: 'inherit' | 'on' | 'off' }) {
     if (!activeThread) return;
     const data = await fetch(`/api/threads/${activeThread.id}`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ vaultId }),
+      body: JSON.stringify(patch),
     }).then((res) => res.json());
     setActiveThread(data.thread);
     await refreshLeftRail();
@@ -4946,12 +5249,13 @@ function App() {
         }, { messageContext: runContext, clientMessageId });
         if (routedThread) setActiveThread((current) => current?.id === threadId ? routedThread : current);
       } catch (error) {
+        const failure = error as Error & { code?: string };
         if (!runAccepted) {
           confirmPendingMessage(threadId, clientMessageId);
-          applyTerminalRunUi(threadId, error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。');
+          applyTerminalRunUi(threadId, error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。', '', 0, failure.code || '');
           setInput((current) => current || text);
         }
-        updateRunUi(threadId, { error: error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。' });
+        updateRunUi(threadId, { error: error instanceof Error ? error.message : '本机 Hermes Bridge 未连接。', errorCode: failure.code || '' });
         await refreshHermesRuntime();
       }
       await refreshLeftRail();
@@ -5309,16 +5613,17 @@ function App() {
                   {rightRailTabs.map((tab) => <button type="button" key={tab} onClick={() => openRightRailTab(tab)}><RightRailTabIcon tab={tab} size={15} /><span>{rightRailTabMeta[tab].title}</span></button>)}
                 </div>}
               </div>}
+              {isMacConversationShell && activeThread && <ConversationExternalControls
+                thread={activeThread}
+                vaults={vaults}
+                personalVaultId={personalVaultId}
+                overviewOpen={overviewOpen}
+                onOverview={() => setOverviewOpen((open) => !open)}
+                onUpdate={updateThreadContext}
+                onOpenSources={() => { setOverviewOpen(false); openRightRailTab('sources'); }}
+                onOpenReview={() => { setOverviewOpen(false); openRightRailTab('review'); }}
+              />}
               <div className="mac-window-rail-actions">
-                {rightRailOpen && activeThread && <IconTooltipButton
-                  active={overviewOpen}
-                  ariaLabel="会话摘要"
-                  className="desktop-window-control mac-window-rail-button"
-                  onClick={() => setOverviewOpen((open) => !open)}
-                  tooltip="会话摘要"
-                >
-                  <Library size={15} />
-                </IconTooltipButton>}
                 <IconTooltipButton
                   active={rightRailOpen}
                   ariaLabel={rightRailOpen ? '收起右侧栏' : '展开右侧栏'}
@@ -5366,16 +5671,6 @@ function App() {
         </>
       )}
       {!isDesktopShell && !isSettingsNav && workbenchLeftActions}
-      {!isDesktopShell && !isSettingsNav && rightRailKind && (
-        <IconTooltipButton
-          className={rightRailOpen ? 'desktop-window-control desktop-right-rail-toggle active' : 'desktop-window-control desktop-right-rail-toggle'}
-          onClick={toggleRightRail}
-          ariaLabel={rightRailOpen ? '收起资源' : '展开资源'}
-          tooltip={rightRailOpen ? '收起资源' : '展开资源'}
-        >
-          {rightRailOpen ? <PanelRightOpen size={15} /> : <PanelRight size={15} />}
-        </IconTooltipButton>
-      )}
       {isSettingsNav ? (
         <SettingsRail
           activeSection={settingsSection}
@@ -5828,12 +6123,11 @@ function App() {
               <RuntimeSwitcher
                 thread={activeThread}
                 activeAgent={activeComposerAgent}
+                agents={agents}
                 isRunning={activeThread.runStatus === 'running'}
                 onRuntimeChange={updateThreadAgentRuntimeOverride}
                 onOpenRuntimeCenter={() => openSettingsSection('runtimes')}
               />
-              <VaultSwitcher vaults={vaults} personalVaultId={personalVaultId} activeVaultId={activeThread.vaultId} onChange={updateThreadVault} />
-              <button className={overviewOpen ? 'top-icon-btn active' : 'top-icon-btn'} type="button" onClick={() => setOverviewOpen((open) => !open)} aria-label="会话摘要" title="会话摘要"><Library size={16} /></button>
               <ThreadActionsMenu
                 thread={activeThread}
                 workspace={activeWorkspace}
@@ -5978,6 +6272,7 @@ function App() {
             <header className="new-chat-panel-header">
               <RuntimeSwitcher
                 activeAgent={newChatAgent}
+                agents={newChatAgent ? [newChatAgent] : []}
                 currentRuntimeId={newChatRuntimeId}
                 isRunning={newChatStarting}
                 onRuntimeChange={async (_agentId, runtimeId) => { setNewChatRuntimeOverride(runtimeId); }}
@@ -6217,6 +6512,16 @@ function App() {
           />
         ) : (
           <>
+            {!isMacConversationShell && activeThread && <ConversationExternalControls
+              thread={activeThread}
+              vaults={vaults}
+              personalVaultId={personalVaultId}
+              overviewOpen={overviewOpen}
+              onOverview={() => setOverviewOpen((open) => !open)}
+              onUpdate={updateThreadContext}
+              onOpenSources={() => { setOverviewOpen(false); openRightRailTab('sources'); }}
+              onOpenReview={() => { setOverviewOpen(false); openRightRailTab('review'); }}
+            />}
             <section className="council">
               {isMacConversationShell && (
                 <header className="conversation-panel-header">
@@ -6241,19 +6546,12 @@ function App() {
                   {activeThread && <RuntimeSwitcher
                     thread={activeThread}
                     activeAgent={activeComposerAgent}
+                    agents={agents}
                     isRunning={activeThread.runStatus === 'running'}
                     onRuntimeChange={updateThreadAgentRuntimeOverride}
                     onOpenRuntimeCenter={() => openSettingsSection('runtimes')}
                   />}
                 </header>
-              )}
-              {activeThread && overviewOpen && (
-                <ConversationOverviewPopover
-                  threadId={activeThread.id}
-                  onClose={() => setOverviewOpen(false)}
-                  onOpenSources={() => { setOverviewOpen(false); openRightRailTab('sources'); }}
-                  onOpenReview={() => { setOverviewOpen(false); openRightRailTab('review'); }}
-                />
               )}
               <div className="thread" ref={threadScrollRef}>
                 <div className="thread-content" ref={threadContentRef}>
@@ -6316,7 +6614,7 @@ function App() {
                             ? <RunTranscriptContent content={message.content} groups={transcript.groups} runFinished={transcript.status !== 'running'} threadId={activeThread?.id} workspaceId={activeThread?.workspaceId} />
                             : <MarkdownMessage content={message.content} threadId={activeThread?.id} workspaceId={activeThread?.workspaceId} />
                         )}
-                        {message.handoffs && message.handoffs.length > 0 && <div className="message-handoffs" aria-label="Agent 转交状态">{message.handoffs.map((handoff) => <span className={`message-handoff ${handoff.status}`} key={handoff.routeId}><Network size={13} />{handoff.status === 'pending' ? `已转交 ${handoff.targetAgentName}` : handoff.status === 'starting' || handoff.status === 'running' ? `${handoff.targetAgentName} 执行中` : handoff.status === 'completed' ? `${handoff.targetAgentName} 已回复` : handoff.status === 'recorded' ? `已通知协调 Agent：建议 ${handoff.targetAgentName} 接手` : `转交 ${handoff.targetAgentName} 失败`}{handoff.status === 'failed' && <button onClick={() => void retryHandoff(handoff.routeId)}>重试</button>}</span>)}</div>}
+                        {message.handoffs?.some((handoff) => handoff.status === 'failed') && <div className="message-handoffs" aria-label="Agent 转交失败">{message.handoffs.filter((handoff) => handoff.status === 'failed').map((handoff) => <span className="message-handoff failed" key={handoff.routeId}><Network size={13} />{`转交 ${handoff.targetAgentName} 失败`}<button onClick={() => void retryHandoff(handoff.routeId)}>重试</button></span>)}</div>}
                         {message.changeSetId && message.changeSummary && message.changeSummary.fileCount > 0 && (
                           <button className="message-change-summary" type="button" onClick={() => openRightRailTab('review')}>
                             <GitCompareArrows size={14} />
@@ -6347,8 +6645,24 @@ function App() {
                 {activeRunUi?.compactionRecords?.map((record) => (
                   <ContextCompactionRecord key={record.operationId} record={record} />
                 ))}
-                {isRunning && !activeRunUi?.hideStatus && (
-                    <ChatRunStatus
+                {liveRunPresentations.length > 0 ? liveRunPresentations.map((presentation) => (
+                  <ChatRunStatus
+                    key={`run:${presentation.hostRunId}`}
+                    target={presentation.target || (agents.find((agent) => agent.id === presentation.agentId) ? { kind: 'agent', agent: agents.find((agent) => agent.id === presentation.agentId)! } : null)}
+                    startedAt={presentation.startedAt || runStartedAt}
+                    tick={runTick}
+                    draft={presentation.draft}
+                    activityGroups={presentation.activityGroups}
+                    presentationPhase={presentation.presentationPhase}
+                    error={presentation.error}
+                    errorCode={presentation.errorCode}
+                    onMigrateToNative={presentation.agentId && activeThread ? () => void migrateThreadAgentToNative(activeThread.id, presentation.agentId) : undefined}
+                    streamingResponses={uiSettings.streamingResponses !== false}
+                    threadId={activeThread?.id}
+                    workspaceId={activeThread?.workspaceId}
+                  />
+                )) : isRunning && !activeRunUi?.hideStatus && (
+                  <ChatRunStatus
                     target={runTarget || (activeComposerAgent ? { kind: 'agent', agent: activeComposerAgent } : null)}
                     startedAt={runStartedAt}
                     tick={runTick}
@@ -6356,10 +6670,12 @@ function App() {
                     activityGroups={runActivityGroups}
                     presentationPhase={runPresentationPhase}
                     error={runError}
+                    errorCode={runErrorCode}
+                    onMigrateToNative={activeThread && runTarget?.kind === 'agent' ? () => void migrateThreadAgentToNative(activeThread.id, runTarget.agent.id) : undefined}
                     streamingResponses={uiSettings.streamingResponses !== false}
                     threadId={activeThread?.id}
-                      workspaceId={activeThread?.workspaceId}
-                    />
+                    workspaceId={activeThread?.workspaceId}
+                  />
                 )}
                 <div ref={threadBottomRef} />
                 </div>
@@ -6588,6 +6904,10 @@ function App() {
               <button className="icon-btn" onClick={() => setProjectModalOpen(false)} aria-label="关闭"><X size={18} /></button>
             </div>
             <div className="project-form">
+              <div className="project-knowledge-profile" role="group" aria-label="项目资料库策略">
+                <button type="button" className={projectKnowledgeProfile === 'personal' ? 'selected' : ''} onClick={() => setProjectKnowledgeProfile('personal')}><strong>个人项目</strong><small>默认使用个人资料库</small></button>
+                <button type="button" className={projectKnowledgeProfile === 'team' ? 'selected' : ''} onClick={() => setProjectKnowledgeProfile('team')}><strong>团队项目</strong><small>默认隔离个人资料库文档</small></button>
+              </div>
               <div className="project-choice-grid">
                 <button className={projectMode === 'create' ? 'selected' : ''} onClick={() => setProjectMode('create')}>
                   <span><Plus size={17} /></span>
@@ -6628,9 +6948,9 @@ function App() {
                 <button className="secondary-btn" onClick={() => setProjectModalOpen(false)}>取消</button>
                 {projectMode === 'create' ? (
                   <button className="send-btn" disabled={!projectParentPath.trim() || !projectName.trim()} onClick={() => projectModalPurpose === 'convert' ? void convertActiveConversationToProject() : void createWorkspaceProject()}>{projectModalPurpose === 'convert' ? '转为项目' : '创建项目'}</button>
-                ) : !canSelectFolder ? (
-                  <button className="send-btn" onClick={() => projectModalPurpose === 'convert' ? void convertActiveConversationToProject() : void createWorkspaceProject()}>选择项目</button>
-                ) : null}
+                ) : (
+                  <button className="send-btn" disabled={!projectRootPath.trim()} onClick={() => projectModalPurpose === 'convert' ? void convertActiveConversationToProject() : void createWorkspaceProject()}>{projectModalPurpose === 'convert' ? '转为项目' : '创建项目'}</button>
+                )}
               </div>
             </div>
           </div>
@@ -7845,9 +8165,10 @@ function KanbanPage({ agents }: { agents: Agent[] }) {
   );
 }
 
-function RuntimeSwitcher({ thread, activeAgent, currentRuntimeId: runtimeIdOverride, isRunning, onRuntimeChange, onOpenRuntimeCenter }: {
-  thread?: Pick<Thread, 'id' | 'agentRuntimeOverrides'> | null;
+function RuntimeSwitcher({ thread, activeAgent, agents = [], currentRuntimeId: runtimeIdOverride, isRunning, onRuntimeChange: _onRuntimeChange, onOpenRuntimeCenter }: {
+  thread?: Pick<Thread, 'id' | 'selectedAgents' | 'agentRuntimeOverrides' | 'agentHarnessBindings' | 'runtimeId'> | null;
   activeAgent: Agent | null;
+  agents?: Agent[];
   currentRuntimeId?: RuntimeId;
   isRunning: boolean;
   onRuntimeChange: (agentId: string, runtimeId: RuntimeId) => Promise<{ message?: string; resumeCandidate?: boolean } | void>;
@@ -7857,9 +8178,22 @@ function RuntimeSwitcher({ thread, activeAgent, currentRuntimeId: runtimeIdOverr
   const [notice, setNotice] = useState('');
   const [runtimes, setRuntimes] = useState<RuntimeDefinition[]>(runtimeSeed);
   const [sessions, setSessions] = useState<RuntimeSessionSummary[]>([]);
-  const policy = activeAgent?.runtimePolicy || { defaultRuntimeId: 'hermes', allowedRuntimeIds: ['hermes'], permissionProfileId: 'default' };
-  const allowedRuntimeIdsKey = policy.allowedRuntimeIds.join('|');
-  const currentRuntimeId = activeAgent ? runtimeIdOverride || thread?.agentRuntimeOverrides?.[activeAgent.id] || policy.defaultRuntimeId : 'hermes';
+  const teamAgentIds = thread
+    ? Array.from(new Set([...(thread.selectedAgents || []), ...Object.keys(thread.agentHarnessBindings || {}), activeAgent?.id || ''].filter(Boolean)))
+    : activeAgent ? [activeAgent.id] : [];
+  const teamAgents = teamAgentIds.map((agentId) => agents.find((agent) => agent.id === agentId) || (activeAgent?.id === agentId ? activeAgent : null)).filter((agent): agent is Agent => Boolean(agent));
+  const teamAgentIdsKey = teamAgents.map((agent) => `${agent.id}:${agent.runtimePolicy?.defaultHarnessId || agent.runtimePolicy?.defaultRuntimeId || ''}`).join('|');
+  const harnessForAgent = (agent: Agent): RuntimeId => {
+    const bound = thread?.agentHarnessBindings?.[agent.id]?.harnessId
+      || thread?.agentRuntimeOverrides?.[agent.id]
+      || thread?.runtimeId
+      || (agent.id === activeAgent?.id ? runtimeIdOverride : '')
+      || agent.runtimePolicy?.defaultHarnessId
+      || agent.runtimePolicy?.defaultRuntimeId
+      || 'native';
+    return bound === 'pi' ? 'native' : bound;
+  };
+  const currentRuntimeId = activeAgent ? harnessForAgent(activeAgent) : 'native';
 
   useEffect(() => {
     if (!open) return;
@@ -7869,8 +8203,8 @@ function RuntimeSwitcher({ thread, activeAgent, currentRuntimeId: runtimeIdOverr
       const payload = await response.json().catch(() => ({}));
       if (!response.ok || cancelled) return;
       setRuntimes((current) => mergeRuntimeDefinitions(current, payload.runtimes || []));
-      if (thread?.id && activeAgent?.id) {
-        const sessionPayload = await fetch(`/api/runtime-sessions?threadId=${encodeURIComponent(thread.id)}&agentId=${encodeURIComponent(activeAgent.id)}&laneType=chat`).then((item) => item.json()).catch(() => ({}));
+      if (thread?.id) {
+        const sessionPayload = await fetch(`/api/runtime-sessions?threadId=${encodeURIComponent(thread.id)}&laneType=chat`).then((item) => item.json()).catch(() => ({}));
         if (!cancelled) setSessions(Array.isArray(sessionPayload.sessions) ? sessionPayload.sessions : []);
       }
       await Promise.all(runtimeSeed.map(async ({ id: runtimeId }) => {
@@ -7880,10 +8214,11 @@ function RuntimeSwitcher({ thread, activeAgent, currentRuntimeId: runtimeIdOverr
     };
     void refresh();
     return () => { cancelled = true; };
-  }, [open, allowedRuntimeIdsKey, thread?.id, activeAgent?.id]);
+  }, [open, teamAgentIdsKey, thread?.id]);
 
-  const currentLabel = runtimeVisuals[currentRuntimeId]?.label || runtimeLabels[currentRuntimeId] || currentRuntimeId;
-  const buttonLabel = activeAgent ? `切换 ${activeAgent.name} 的执行内核，当前为 ${currentLabel}` : '当前对话未选择 Agent';
+  const displayRuntimeId = currentRuntimeId === 'native' ? 'pi' : currentRuntimeId;
+  const currentLabel = currentRuntimeId === 'native' ? 'Frakio Native' : runtimeVisuals[displayRuntimeId]?.label || runtimeLabels[displayRuntimeId] || displayRuntimeId;
+  const buttonLabel = activeAgent ? `团队运行内核，${activeAgent.name} 当前为 ${currentLabel}` : '当前对话未选择 Agent';
 
   return <AppMenu open={open} onOpenChange={setOpen} modal={false}>
     <div className="runtime-switcher">
@@ -7896,34 +8231,29 @@ function RuntimeSwitcher({ thread, activeAgent, currentRuntimeId: runtimeIdOverr
         </button>
       </AppMenuTrigger>
     </div>
-    <AppMenuContent className="runtime-switcher-popover" aria-label="切换执行内核" side="bottom" align="end">
-      <div className="runtime-switcher-summary"><span>{activeAgent ? `${activeAgent.name} 的执行内核` : '执行内核'}</span></div>
-      {activeAgent ? runtimeSeed.map(({ id: runtimeId }) => {
-        const runtime = runtimes.find((item) => item.id === runtimeId);
+    <AppMenuContent className="runtime-switcher-popover" aria-label="团队运行内核" side="bottom" align="end">
+      <div className="runtime-switcher-summary"><span>团队运行内核</span><small>会话创建时已绑定</small></div>
+      {teamAgents.length ? teamAgents.map((agent) => {
+        const runtimeId = harnessForAgent(agent);
+        const runtime = runtimes.find((item) => item.id === (runtimeId === 'native' ? 'pi' : runtimeId));
         const ready = isRuntimeReady(runtime);
-        const allowed = policy.allowedRuntimeIds.includes(runtimeId);
-        const selected = currentRuntimeId === runtimeId;
-        const runtimeSession = sessions.find((session) => session.runtimeId === runtimeId && session.laneId === thread?.id);
+        const runtimeSession = sessions.find((session) => session.runtimeId === (runtimeId === 'native' ? 'pi' : runtimeId) && session.laneId === thread?.id && session.agentId === agent.id);
         const sessionLabel = runtimeSession?.lifecycleState === 'active' ? 'Session 活跃'
           : runtimeSession?.lifecycleState === 'recovering' || runtimeSession?.lifecycleState === 'restoring' ? '等待恢复'
             : runtimeSession?.lifecycleState === 'parked' ? '已停泊'
               : runtimeSession?.lifecycleState === 'stale' ? '需交接恢复'
                 : '';
-        return <AppMenuItem key={runtimeId} className={selected ? 'runtime-switcher-option selected' : 'runtime-switcher-option'} disabled={!ready || !allowed} onSelect={() => {
-          if (!ready || !allowed || selected) return;
-          void onRuntimeChange(activeAgent.id, runtimeId).then((result) => {
-            setNotice(result?.message || '已切换执行内核。');
-            setOpen(false);
-          });
-        }} title={ready ? `切换到 ${runtimeLabels[runtimeId] || runtimeId}` : runtime?.installation?.detail || '请前往 Runtime Center 完成修复'}>
+        return <AppMenuItem key={agent.id} className="runtime-switcher-option selected" disabled title={ready ? `${agent.name} 已绑定 ${runtimeId === 'native' ? 'Frakio Native' : runtimeLabels[runtimeId] || runtimeId}` : runtime?.installation?.detail || '请前往 Runtime Center 完成修复'}>
+          <AgentAvatar agent={agent} size="sm" />
+          <span className="runtime-switcher-agent"><strong>{agent.name}</strong><small>{agent.role}</small></span>
           <RuntimeLabel runtimeId={runtimeId} />
-          {!allowed ? <em>Agent 未启用</em> : !ready && <em>{runtime?.installation?.status === 'checking' ? '检测中' : '不可用'}</em>}
+          {!ready && <em>{runtime?.installation?.status === 'checking' ? '检测中' : '不可用'}</em>}
           {ready && sessionLabel && <em>{sessionLabel}</em>}
-          {ready && selected && <Check size={14} aria-hidden="true" />}
+          <Check size={14} aria-hidden="true" />
         </AppMenuItem>;
-      }) : <span className="provider-model-empty">当前对话没有可切换的 Agent。</span>}
+      }) : <span className="provider-model-empty">当前对话没有 Agent。</span>}
       <div className="runtime-switcher-footer">
-        <small>{notice || '切换后优先恢复该 Agent 的原生 Session，失败时通过 Frakio 交接包继续。'}</small>
+        <small>{notice || 'Harness 在会话创建时固定；如需迁移，请前往 Runtime Center。'}</small>
         <button onClick={() => { setOpen(false); onOpenRuntimeCenter(); }}>打开 Runtime Center</button>
       </div>
     </AppMenuContent>
@@ -7949,7 +8279,7 @@ function ThreadActionsMenu({ thread, workspace, vaults, activeVault, activeAgent
   const [open, setOpen] = useState(false);
   const [titleBusy, setTitleBusy] = useState(false);
   const [titleError, setTitleError] = useState('');
-  const [contextPreview, setContextPreview] = useState<{ sources: Array<{ kind: string; label: string; count: number }>; projectRulePaths: string[] } | null>(null);
+  const [contextPreview, setContextPreview] = useState<{ sources: Array<{ kind: string; label: string; count: number }>; projectRulePaths?: string[]; runtimeId?: string; targetAgentId?: string; cursor?: { from: number; to: number; stateRevision?: number }; stateRevision?: number; budget?: { estimatedTokens?: number; softLimit?: number }; warnings?: Array<{ code?: string; message?: string }> } | null>(null);
   const threadIdRef = useRef(thread.id);
   const popoverId = `thread-actions-popover-${thread.id}`;
   const followLabel = thread.followMode === 'conversation' ? '对话跟随' : '默认跟随';
@@ -7980,6 +8310,18 @@ function ThreadActionsMenu({ thread, workspace, vaults, activeVault, activeAgent
     } finally {
       setTitleBusy(false);
     }
+  }
+
+  async function loadContextInspection() {
+    const result = await requestJson<{ receipts: Array<{ runtimeId: string; agentId: string; stateRevision: number; cursor: { from: number; to: number }; budget: { estimatedTokens?: number; softLimit?: number }; included: Array<{ kind: string; count: number }>; warnings: Array<{ code?: string; message?: string }> }> }>(`/api/threads/${thread.id}/context-receipts?limit=1`);
+    const receipt = result.receipts[0];
+    if (receipt) {
+      const labels: Record<string, string> = { thread_state: '共享会话状态', recent_conversation: '最近公开对话', relevant_history: '相关历史', memory: '记忆', knowledge: '资料与规则', artifacts: '产物引用' };
+      setContextPreview({ runtimeId: receipt.runtimeId, targetAgentId: receipt.agentId, stateRevision: receipt.stateRevision, cursor: receipt.cursor, budget: receipt.budget, warnings: receipt.warnings, sources: receipt.included.map((source) => ({ ...source, label: labels[source.kind] || source.kind })) });
+      return;
+    }
+    const preview = await requestJson<{ sources: Array<{ kind: string; label: string; count: number }>; projectRulePaths?: string[]; runtimeId?: string; targetAgentId?: string; cursor?: { from: number; to: number; stateRevision?: number }; budget?: { estimatedTokens?: number; softLimit?: number }; warnings?: Array<{ code?: string; message?: string }> }>(`/api/threads/${thread.id}/context-preview?agentId=${encodeURIComponent(activeAgent?.id || '')}`);
+    setContextPreview(preview);
   }
 
   return (
@@ -8024,8 +8366,15 @@ function ThreadActionsMenu({ thread, workspace, vaults, activeVault, activeAgent
           </label>
           <div className="thread-menu-section">
             <span>本轮上下文</span>
-            <button onClick={() => void requestJson<{ sources: Array<{ kind: string; label: string; count: number }>; projectRulePaths: string[] }>(`/api/threads/${thread.id}/context-preview?agentId=${encodeURIComponent(activeAgent?.id || '')}`).then(setContextPreview)}><span>查看实际注入来源</span></button>
-            {contextPreview && <div className="thread-context-preview">{contextPreview.sources.map((source) => <small key={source.kind}>{source.label} · {source.count}</small>)}{contextPreview.projectRulePaths.map((rulePath) => <code key={rulePath}>{rulePath}</code>)}</div>}
+            <button onClick={() => void loadContextInspection()}><span>查看实际注入来源</span></button>
+            {contextPreview && <div className="thread-context-preview">
+              {contextPreview.runtimeId && <small>{contextPreview.runtimeId} · 状态 r{contextPreview.stateRevision ?? contextPreview.cursor?.stateRevision ?? 0}</small>}
+              {contextPreview.cursor && <small>事件 {contextPreview.cursor.from}–{contextPreview.cursor.to}</small>}
+              {contextPreview.budget?.estimatedTokens != null && <small>{contextPreview.budget.estimatedTokens} / {contextPreview.budget.softLimit || 0} tokens</small>}
+              {contextPreview.sources.map((source) => <small key={source.kind}>{source.label} · {source.count}</small>)}
+              {(contextPreview.projectRulePaths || []).map((rulePath) => <code key={rulePath}>{rulePath}</code>)}
+              {(contextPreview.warnings || []).map((warning, index) => <small key={`${warning.code || 'warning'}-${index}`}>{warning.message || warning.code}</small>)}
+            </div>}
           </div>
           <button className="thread-menu-wide" onClick={() => { closeMenu(false); onOpenAgents(); }}><UserPlus size={15} />团队成员</button>
       </AppMenuContent>
@@ -8640,6 +8989,7 @@ function ConversationOverviewPopover({ threadId, onClose, onOpenSources, onOpenR
     {error && <div className="resource-error">{error}</div>}
     {overview && <div className="overview-body">
       <section><span className="overview-label">环境</span><div className="overview-fact"><Monitor size={14} /><span><strong>{overview.environment.workspaceName || '未绑定项目'}</strong><small>{overview.environment.gitBranch ? `分支 ${overview.environment.gitBranch}` : overview.environment.workspaceRoot || '当前会话没有本地目录'}</small></span></div></section>
+      {overview.context && <section><span className="overview-label">上下文</span><div className="overview-fact"><BookOpenText size={14} /><span><strong>{overview.context.personal.label}</strong><small>{overview.context.project ? `项目资料库：${overview.context.project.name} · ${overview.context.project.ruleCount} 条规则` : '未挂载项目资料库'}</small></span></div></section>}
       {overview.plan && <section><span className="overview-label">计划</span><div className="overview-fact"><CheckCircle2 size={14} /><span><strong>{overview.plan.title}</strong><small>{overview.plan.taskCount} 个步骤 · {overview.plan.status || '进行中'}</small></span></div></section>}
       <section><span className="overview-label">来源</span>{overview.sources.slice(0, 3).map((source) => <div className="overview-source" key={source.id}>{source.kind === 'link' ? <Link2 size={13} /> : <FileText size={13} />}<span>{source.label}</span></div>)}{!overview.sources.length && <div className="overview-empty">暂无来源</div>}<button className="overview-link" type="button" onClick={onOpenSources}>查看全部 <ChevronRight size={13} /></button></section>
       {overview.artifacts.length > 0 && <section><span className="overview-label">产物</span>{overview.artifacts.slice(0, 3).map((artifact) => <div className="overview-source" key={artifact.id}><File size={13} /><span>{artifact.name}</span></div>)}</section>}
@@ -12261,9 +12611,18 @@ function KnowledgeCenterPage() {
   );
 }
 
-function VaultSwitcher({ vaults, personalVaultId, activeVaultId, onChange }: { vaults: Vault[]; personalVaultId: string | null; activeVaultId: string | null; onChange: (vaultId: string | null) => Promise<void> }) {
-  const active = vaults.find((vault) => vault.id === activeVaultId) || vaults.find((vault) => vault.id === personalVaultId) || null;
-  return <AppMenu modal={false}><AppMenuTrigger asChild><button className="top-icon-btn vault-switcher-trigger" type="button" aria-label="切换资料库" title={`资料库：${active?.name || '未连接'}`}><span className="vault-switcher-icon">{active?.avatarUrl ? <img src={active.avatarUrl} alt="" /> : <BookOpenText size={16} />}</span></button></AppMenuTrigger><AppMenuContent className="vault-switcher-menu" side="bottom" align="end" aria-label="切换资料库"><div className="runtime-switcher-summary">资料库上下文</div><AppMenuItem className={!activeVaultId || activeVaultId === personalVaultId ? 'selected' : ''} onSelect={() => void onChange(personalVaultId)}><BookOpenText size={15} /><span>个人资料库</span>{activeVaultId === personalVaultId && <Check size={14} />}</AppMenuItem><AppMenuItem className={!activeVaultId ? 'selected' : ''} onSelect={() => void onChange(null)}><Minus size={15} /><span>不连接项目资料库</span>{!activeVaultId && <Check size={14} />}</AppMenuItem>{vaults.filter((vault) => vault.kind === 'project').map((vault) => <AppMenuItem key={vault.id} className={activeVaultId === vault.id ? 'selected' : ''} onSelect={() => void onChange(vault.id)}>{vault.avatarUrl ? <img className="vault-switcher-menu-avatar" src={vault.avatarUrl} alt="" /> : <BookOpenText size={15} />}<span>{vault.name}</span>{activeVaultId === vault.id && <Check size={14} />}</AppMenuItem>)}</AppMenuContent></AppMenu>;
+function ConversationExternalControls({ thread, vaults, personalVaultId, overviewOpen, onOverview, onUpdate, onOpenSources, onOpenReview }: { thread: Thread; vaults: Vault[]; personalVaultId: string | null; overviewOpen: boolean; onOverview: () => void; onUpdate: (patch: { vaultId?: string | null; personalKnowledgeMode?: 'inherit' | 'on' | 'off' }) => Promise<void>; onOpenSources: () => void; onOpenReview: () => void }) {
+  const personal = vaults.find((vault) => vault.id === personalVaultId) || null;
+  const project = vaults.find((vault) => vault.id === thread.vaultId) || null;
+  const context = thread.context;
+  const enabled = context?.personal.enabled !== false;
+  const label = context?.label || [enabled ? personal?.name || '个人资料库' : '', project?.name || ''].filter(Boolean).join(' + ') || '仅 Frakio Memory 与身份上下文';
+  const nextPersonalMode = enabled ? 'off' : 'on';
+  return <div className="conversation-external-controls" aria-label="会话上下文控制">
+    <button className={overviewOpen ? 'desktop-window-control conversation-external-icon active' : 'desktop-window-control conversation-external-icon'} type="button" onClick={onOverview} aria-label="会话摘要" title="会话摘要"><Library size={16} /></button>
+    <AppMenu modal={false}><AppMenuTrigger asChild><button className="desktop-window-control conversation-external-icon vault-switcher-trigger" type="button" aria-label="资料库上下文" title={`资料库：${label}`}><span className="vault-switcher-icon">{personal?.avatarUrl ? <img src={personal.avatarUrl} alt="" /> : <BookOpenText size={16} />}</span></button></AppMenuTrigger><AppMenuContent className="vault-switcher-menu conversation-library-menu" side="bottom" align="end" aria-label="资料库上下文"><div className="runtime-switcher-summary">资料库上下文<small>{label}</small></div><div className="context-library-personal"><span className={enabled ? 'context-status-dot on' : 'context-status-dot'} />{personal?.avatarUrl ? <img className="vault-switcher-menu-avatar" src={personal.avatarUrl} alt="" /> : <BookOpenText size={15} />}<span><strong>{personal?.name || '个人资料库'}</strong><small>{context?.personal.label || '个人资料库已启用'}</small></span><button type="button" className={enabled ? 'context-toggle on' : 'context-toggle'} onClick={() => void onUpdate({ personalKnowledgeMode: nextPersonalMode })} aria-label={enabled ? '关闭个人资料库' : '开启个人资料库'}>{enabled ? '开' : '关'}</button></div>{!enabled && <p className="context-library-note">仅关闭个人 Markdown 文档检索；用户画像、Agent Soul 与 Frakio Memory 仍会保留。</p>}<div className="context-library-heading">项目资料库</div><AppMenuItem className={!thread.vaultId ? 'selected' : ''} onSelect={() => void onUpdate({ vaultId: null })}><Minus size={15} /><span>未挂载项目资料库</span>{!thread.vaultId && <Check size={14} />}</AppMenuItem>{vaults.filter((vault) => vault.kind === 'project').map((vault) => <AppMenuItem key={vault.id} className={thread.vaultId === vault.id ? 'selected' : ''} onSelect={() => void onUpdate({ vaultId: vault.id })}>{vault.avatarUrl ? <img className="vault-switcher-menu-avatar" src={vault.avatarUrl} alt="" /> : <BookOpenText size={15} />}<span>{vault.name}</span>{thread.vaultId === vault.id && <Check size={14} />}</AppMenuItem>)}<button className="context-library-sources" type="button" onClick={onOpenSources}>查看本轮实际注入来源 <ChevronRight size={13} /></button></AppMenuContent></AppMenu>
+    {overviewOpen && <ConversationOverviewPopover threadId={thread.id} onClose={onOverview} onOpenSources={onOpenSources} onOpenReview={onOpenReview} />}
+  </div>;
 }
 
 function KnowledgeVaultsPage({ vaults, models, agents, vaultPathInput, setVaultPathInput, vaultError, vaultBusy, newVaultKind, setNewVaultKind, showConnector, setShowConnector, addVault, reindexVault, deleteVault, resolveLegacyVaultBinding }: {
@@ -14642,8 +15001,8 @@ function OrgPage({ agents, models, selectedOrgAgentId, onSelectAgent, onProfiles
           {agents.length > 0 && <label className="org-default-agent">默认 Agent<select value={defaultAgentId} onChange={(event) => onUpdateDefaultAgent(event.target.value)}>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>}
         </div>
         <div className="profile-grid">
-          {agents.map((agent) => <button className={`profile-card ${selectedOrgAgentId === agent.id ? 'active' : ''}`} key={agent.id} onClick={() => onSelectAgent(agent.id)}><AgentAvatar agent={agent} /><strong>{agent.name}</strong><small>{agent.role}</small><em>{agentDefaultModelLabel(agent, models)}</em><p>{agent.soulExcerpt || agent.soul || agent.scope}</p></button>)}
-          <button className="profile-card profile-card-add" onClick={onCreate}><span className="profile-add-icon"><Plus size={22} /></span><strong>新建 Agent</strong><small>创建新的 Hermes Profile</small><p>填写基础资料后，可在下方继续编辑笔记、用户画像和灵魂。</p></button>
+          {agents.map((agent) => <AgentProfileCard agent={agent} models={models} selected={selectedOrgAgentId === agent.id} key={agent.id} onSelect={onSelectAgent} />)}
+          <button className="profile-card profile-card-add" onClick={onCreate}><span className="profile-add-icon"><Plus size={22} /></span><strong>新建 Agent</strong><small>创建一个新的团队成员</small></button>
         </div>
         {selectedAgent && <AgentProfileDetail agent={selectedAgent} models={models} canDelete={agents.length > 1} onChanged={onProfilesChanged} onUpdateAgent={onUpdateAgent} onDelete={() => onDeleteAgent(selectedAgent.id)} profileEditor={profileEditor} />}
       </div>
@@ -14651,11 +15010,26 @@ function OrgPage({ agents, models, selectedOrgAgentId, onSelectAgent, onProfiles
   );
 }
 
+function AgentProfileCard({ agent, models, selected, onSelect }: { agent: Agent; models: ModelProfile[]; selected: boolean; onSelect: (id: string) => void }) {
+  const policy = agent.runtimePolicy || { defaultRuntimeId: 'pi' as RuntimeId, defaultHarnessId: 'native' as HarnessId };
+  const runtimeId = policy.defaultHarnessId || policy.defaultRuntimeId || 'native';
+  return (
+    <button className={`profile-card ${selected ? 'active' : ''}`} onClick={() => onSelect(agent.id)} aria-pressed={selected}>
+      <div className="profile-card-identity"><AgentAvatar agent={agent} /><strong>{agent.name}</strong></div>
+      <small className="profile-card-role">{agent.role || '未定义角色'}</small>
+      <div className="profile-card-meta">
+        <span className="profile-card-model" title={agentDefaultModelLabel(agent, models)}>{agentDefaultModelLabel(agent, models)}</span>
+        <span className="profile-card-runtime" title="当前运行内核"><RuntimeLabel runtimeId={runtimeId} /></span>
+      </div>
+    </button>
+  );
+}
+
 function AgentRuntimePolicyPanel({ agent, onUpdateAgent }: { agent: Agent; onUpdateAgent: (agentId: string, payload: Partial<Agent>) => Promise<void> }) {
   const [runtimes, setRuntimes] = useState<RuntimeDefinition[]>(runtimeSeed);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
-  const policy = agent.runtimePolicy || { defaultRuntimeId: agent.profileName ? 'hermes' : 'pi', allowedRuntimeIds: agent.profileName ? ['hermes', 'pi'] : ['pi'], permissionProfileId: 'default' };
+  const policy = agent.runtimePolicy || { defaultRuntimeId: 'pi', defaultHarnessId: 'native', allowedRuntimeIds: ['pi'], permissionProfileId: 'default' };
   useEffect(() => {
     let cancelled = false;
     const load = async () => {
@@ -14682,31 +15056,18 @@ function AgentRuntimePolicyPanel({ agent, onUpdateAgent }: { agent: Agent; onUpd
       setSaving(false);
     }
   }
-  return <section className="agent-runtime-policy" aria-label="执行内核">
-    <div className="agent-runtime-policy-head"><div><strong>执行内核</strong><small>决定这个 Agent 可以使用哪些执行运行时。</small></div>{saving && <LoaderCircle className="spin" size={15} aria-label="正在保存" />}</div>
-    <label className="agent-runtime-default">默认内核
-      <select value={policy.defaultRuntimeId} disabled={saving} onChange={(event) => {
-        const defaultRuntimeId = event.target.value;
-        void save({ ...policy, defaultRuntimeId, allowedRuntimeIds: Array.from(new Set([...policy.allowedRuntimeIds, defaultRuntimeId])) });
+  return <section className="agent-runtime-policy" aria-label="默认 Harness">
+    <div className="agent-runtime-policy-head"><div><strong>默认 Harness</strong><small>只影响之后创建的会话。已有会话继续使用原来的 Harness。</small></div>{saving && <LoaderCircle className="spin" size={15} aria-label="正在保存" />}</div>
+    <label className="agent-runtime-default">默认 Harness
+      <select value={policy.defaultHarnessId || (policy.defaultRuntimeId === 'pi' ? 'native' : policy.defaultRuntimeId)} disabled={saving} onChange={(event) => {
+        const defaultHarnessId = event.target.value as HarnessId;
+        const defaultRuntimeId = defaultHarnessId === 'native' ? 'pi' : defaultHarnessId;
+        void save({ ...policy, defaultHarnessId, defaultRuntimeId, allowedRuntimeIds: [defaultRuntimeId] });
       }}>
-        {runtimeSeed.map((runtime) => <option key={runtime.id} value={runtime.id} disabled={!isRuntimeReady(runtimes.find((item) => item.id === runtime.id))}>{runtime.name}{isRuntimeReady(runtimes.find((item) => item.id === runtime.id)) ? '' : '（不可用）'}</option>)}
+        <option value="native">Frakio Native</option>
+        {runtimeSeed.filter((runtime) => runtime.id !== 'pi').map((runtime) => <option key={runtime.id} value={runtime.id} disabled={!isRuntimeReady(runtimes.find((item) => item.id === runtime.id))}>{runtime.name}{isRuntimeReady(runtimes.find((item) => item.id === runtime.id)) ? '' : '（不可用）'}</option>)}
       </select>
     </label>
-    <div className="agent-runtime-policy-list">
-      {runtimeSeed.map((runtime) => {
-        const current = runtimes.find((item) => item.id === runtime.id) || runtime;
-        const enabled = policy.allowedRuntimeIds.includes(runtime.id);
-        const isDefault = policy.defaultRuntimeId === runtime.id;
-        const lockedHermes = runtime.id === 'hermes' && Boolean(agent.profileName);
-        const available = isRuntimeReady(current);
-        return <div className="agent-runtime-policy-item" key={runtime.id}>
-          <label><input type="checkbox" checked={enabled} disabled={saving || isDefault || lockedHermes || (!available && !enabled)} onChange={(event) => {
-            const allowedRuntimeIds = event.target.checked ? Array.from(new Set([...policy.allowedRuntimeIds, runtime.id])) : policy.allowedRuntimeIds.filter((runtimeId) => runtimeId !== runtime.id);
-            void save({ ...policy, allowedRuntimeIds });
-          }} /><span><strong><RuntimeLabel runtimeId={runtime.id} /></strong><small>{available ? `${current.installation?.version || '已就绪'} · 使用 Frakio Model Center` : current.installation?.status === 'checking' ? '正在检测' : current.installation?.detail || '请前往 Runtime Center 修复'}</small></span></label>
-        </div>;
-      })}
-    </div>
     {error && <div className="inline-error">{error}</div>}
   </section>;
 }
@@ -16147,6 +16508,8 @@ function ChatRunStatus({
   activityGroups,
   presentationPhase,
   error,
+  errorCode,
+  onMigrateToNative,
   streamingResponses,
   threadId,
   workspaceId,
@@ -16158,6 +16521,8 @@ function ChatRunStatus({
   activityGroups: RunActivityGroup[];
   presentationPhase: RunPresentationPhase;
   error: string;
+  errorCode?: string;
+  onMigrateToNative?: () => void;
   streamingResponses: boolean;
   threadId?: string | null;
   workspaceId?: string | null;
@@ -16179,6 +16544,7 @@ function ChatRunStatus({
   const showPresence = shouldShowRunPresence(presentationPhase) || (!streamingResponses && presentationPhase === 'responding') || waitingForFirstVisibleDraft;
   const exitingInitialPresence = useReplyPresenceHandoff(hasVisibleDraft, reduceMotion);
   const useInitialReplySlot = activityGroups.length === 0 && (showPresence || hasVisibleDraft || exitingInitialPresence);
+  const canMigrateToNative = Boolean(onMigrateToNative && ['RUNTIME_NOT_INSTALLED', 'RUNTIME_BUILD_UNAVAILABLE', 'runtime_unavailable'].includes(String(errorCode || '')));
   const draftTranscript = hasVisibleDraft
     ? <RunTranscriptContent content={visibleDraft} groups={activityGroups} streaming={streamingDraft} streamReveal={reduceMotion ? undefined : revealFrame} runFinished={false} showAwaiting={presentationPhase === 'activity'} threadId={threadId} workspaceId={workspaceId} />
     : null;
@@ -16208,7 +16574,7 @@ function ChatRunStatus({
             {presence}
           </>
         )}
-        {error && <div className="inline-error run-error">{error}</div>}
+        {error && <div className="inline-error run-error">{error}{canMigrateToNative && <button type="button" onClick={onMigrateToNative}>改用 Frakio Native</button>}</div>}
       </div>
     </article>
   );
@@ -16411,7 +16777,7 @@ function MessageActions({ message, copied, feedbackBusy, branching, error, onCop
 }
 
 function AgentEditorModal({ title, models, agent, onClose, onSave }: { title: string; models: ModelProfile[]; agent: Agent | null; onClose: () => void; onSave: (payload: Partial<Agent>) => Promise<void> }) {
-  const emptyAgent: Agent = { id: '', name: '', role: '', model: '', color: '#0f766e', soul: '', scope: '', runtimePolicy: { defaultRuntimeId: 'hermes', allowedRuntimeIds: ['hermes', 'pi'], permissionProfileId: 'default' } };
+  const emptyAgent: Agent = { id: '', name: '', role: '', model: '', color: '#0f766e', soul: '', scope: '', runtimePolicy: { defaultRuntimeId: 'pi', defaultHarnessId: 'native', allowedRuntimeIds: ['pi'], permissionProfileId: 'default' } };
   const [draft, setDraft] = useState<Agent>(agent || emptyAgent);
   const [saving, setSaving] = useState(false);
   useEffect(() => {
@@ -16429,7 +16795,7 @@ function AgentEditorModal({ title, models, agent, onClose, onSave }: { title: st
   return (
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal agent-editor" role="dialog" aria-modal="true" aria-labelledby="agent-editor-title" onClick={(event) => event.stopPropagation()}>
-        <div className="modal-head"><div><h2 id="agent-editor-title">{title}</h2><p>编辑 Agent 的人格、模型、职责和可用运行时。</p></div><button className="icon-btn" onClick={onClose} aria-label="关闭"><X size={18} /></button></div>
+        <div className="modal-head"><div><h2 id="agent-editor-title">{title}</h2><p>编辑 Agent 的人格、模型、职责和默认 Harness。</p></div><button className="icon-btn" onClick={onClose} aria-label="关闭"><X size={18} /></button></div>
         <div className="agent-editor-body">
           <AgentFields draft={draft} setDraft={setDraft} models={models} />
         </div>
@@ -16441,10 +16807,10 @@ function AgentEditorModal({ title, models, agent, onClose, onSave }: { title: st
 
 function AgentFields({ draft, setDraft, models }: { draft: Agent; setDraft: (agent: Agent) => void; models: ModelProfile[] }) {
   const modelChoices = models.flatMap((model) => modelNamesForProvider(model).map((modelName) => ({ value: modelChoiceValue(model, modelName), label: `${model.name} · ${modelName}` })));
-  const policy = draft.runtimePolicy || { defaultRuntimeId: 'hermes', allowedRuntimeIds: ['hermes'], permissionProfileId: 'default' };
+  const policy = draft.runtimePolicy || { defaultRuntimeId: 'pi', defaultHarnessId: 'native', allowedRuntimeIds: ['pi'], permissionProfileId: 'default' };
   const runtimeOptions = [
+    { id: 'native', runtimeId: 'pi', name: 'Frakio Native', description: '默认 Harness，由 Frakio 管理执行引擎' },
     { id: 'hermes', name: 'Hermes Agent', description: '使用 Frakio Model Center' },
-    { id: 'pi', name: 'Pi', description: '使用 Frakio Model Center' },
     { id: 'codex', name: 'Codex', description: '使用 Frakio Model Center' },
     { id: 'claude', name: 'Claude Code', description: '使用 Frakio Model Center' },
   ];
@@ -16456,31 +16822,14 @@ function AgentFields({ draft, setDraft, models }: { draft: Agent; setDraft: (age
       <label>模型<select value={resolveModelChoice(draft.model, models).value} onChange={(event) => setDraft({ ...draft, model: event.target.value })}><option value="">未配置模型</option>{modelChoices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}</select></label>
       <section className="agent-runtime-section" aria-labelledby="agent-runtime-title">
         <div className="agent-runtime-section-head">
-          <div><strong id="agent-runtime-title">执行内核</strong><span>决定这个 Agent 可以使用哪些执行运行时。</span></div>
-          <label className="agent-runtime-default"><span>默认内核</span><select value={policy.defaultRuntimeId} onChange={(event) => {
-            const defaultRuntimeId = event.target.value;
-            setRuntimePolicy({ ...policy, defaultRuntimeId, allowedRuntimeIds: Array.from(new Set([...policy.allowedRuntimeIds, defaultRuntimeId])) });
+          <div><strong id="agent-runtime-title">默认 Harness</strong><span>只影响之后创建的会话。已有会话继续使用原来的 Harness。</span></div>
+          <label className="agent-runtime-default"><span>默认 Harness</span><select value={policy.defaultHarnessId || (policy.defaultRuntimeId === 'pi' ? 'native' : policy.defaultRuntimeId)} onChange={(event) => {
+            const defaultHarnessId = event.target.value as HarnessId;
+            const defaultRuntimeId = defaultHarnessId === 'native' ? 'pi' : defaultHarnessId;
+            setRuntimePolicy({ ...policy, defaultHarnessId, defaultRuntimeId, allowedRuntimeIds: [defaultRuntimeId] });
           }}>{runtimeOptions.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.name}</option>)}</select></label>
         </div>
-        <div className="agent-runtime-grid">
-          {runtimeOptions.map((runtime) => {
-            const checked = policy.allowedRuntimeIds.includes(runtime.id);
-            const isDefault = runtime.id === policy.defaultRuntimeId;
-            return <label className={`agent-runtime-card${checked ? ' selected' : ''}${isDefault ? ' default' : ''}`} key={runtime.id}>
-              <input type="checkbox" checked={checked} disabled={isDefault} onChange={(event) => {
-                const allowedRuntimeIds = event.target.checked
-                  ? Array.from(new Set([...policy.allowedRuntimeIds, runtime.id]))
-                  : policy.allowedRuntimeIds.filter((runtimeId) => runtimeId !== runtime.id);
-                setRuntimePolicy({ ...policy, allowedRuntimeIds });
-              }} />
-              <span className="agent-runtime-card-icon"><RuntimeLabel runtimeId={runtime.id} showName={false} /></span>
-              <span className="agent-runtime-card-copy"><strong>{runtime.name}</strong><small>{runtime.description}</small></span>
-              {isDefault ? <span className="agent-runtime-default-badge">默认</span> : <span className="agent-runtime-check" aria-hidden="true">{checked ? <Check size={15} /> : null}</span>}
-            </label>;
-          })}
-        </div>
       </section>
-      <label>颜色<input value={draft.color} onChange={(event) => setDraft({ ...draft, color: event.target.value })} /></label>
       <label>Soul<textarea value={draft.soul} onChange={(event) => setDraft({ ...draft, soul: event.target.value })} /></label>
       <label>职责范围<textarea value={draft.scope} onChange={(event) => setDraft({ ...draft, scope: event.target.value })} /></label>
     </div>

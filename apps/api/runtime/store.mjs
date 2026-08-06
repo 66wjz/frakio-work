@@ -4,7 +4,7 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { reduceRunPresentation } from './presentation.mjs';
 
-const SCHEMA_VERSION = 13;
+const SCHEMA_VERSION = 15;
 
 function timestamp() {
   return new Date().toISOString();
@@ -87,6 +87,11 @@ export function createRuntimeStore(filePath) {
       model_route_revision TEXT NOT NULL DEFAULT '',
       profile_revision TEXT NOT NULL DEFAULT '',
       model_id TEXT NOT NULL DEFAULT '',
+      engine_id TEXT NOT NULL DEFAULT '',
+      harness_id TEXT NOT NULL DEFAULT '',
+      parent_run_id TEXT NOT NULL DEFAULT '',
+      route_id TEXT NOT NULL DEFAULT '',
+      failure_class TEXT NOT NULL DEFAULT '',
       status TEXT NOT NULL,
       phase TEXT NOT NULL DEFAULT 'opening',
       stop_requested_at TEXT,
@@ -320,6 +325,58 @@ export function createRuntimeStore(filePath) {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS memory_context_receipts_thread_idx ON memory_context_receipts(thread_id, created_at DESC);
+    CREATE TABLE IF NOT EXISTS thread_context_events (
+      id TEXT PRIMARY KEY,
+      thread_id TEXT NOT NULL,
+      cursor INTEGER NOT NULL,
+      event_type TEXT NOT NULL,
+      actor_type TEXT NOT NULL DEFAULT 'system',
+      actor_id TEXT NOT NULL DEFAULT '',
+      source_id TEXT NOT NULL DEFAULT '',
+      source_revision INTEGER NOT NULL DEFAULT 1,
+      parent_event_id TEXT NOT NULL DEFAULT '',
+      visibility TEXT NOT NULL DEFAULT 'public',
+      scope TEXT NOT NULL DEFAULT 'thread',
+      authority TEXT NOT NULL DEFAULT 'inferred',
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      UNIQUE(thread_id, cursor),
+      UNIQUE(thread_id, source_id, event_type, source_revision)
+    );
+    CREATE INDEX IF NOT EXISTS thread_context_events_thread_idx ON thread_context_events(thread_id, cursor);
+    CREATE TABLE IF NOT EXISTS thread_state_snapshots (
+      thread_id TEXT PRIMARY KEY,
+      revision INTEGER NOT NULL DEFAULT 0,
+      through_cursor INTEGER NOT NULL DEFAULT 0,
+      state_json TEXT NOT NULL DEFAULT '{}',
+      content_hash TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'ready',
+      error TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE TABLE IF NOT EXISTS context_receipts (
+      id TEXT PRIMARY KEY,
+      packet_id TEXT NOT NULL DEFAULT '',
+      packet_hash TEXT NOT NULL DEFAULT '',
+      thread_id TEXT NOT NULL,
+      run_id TEXT NOT NULL DEFAULT '',
+      runtime_id TEXT NOT NULL DEFAULT '',
+      agent_id TEXT NOT NULL DEFAULT '',
+      schema_version INTEGER NOT NULL DEFAULT 2,
+      state_revision INTEGER NOT NULL DEFAULT 0,
+      cursor_from INTEGER NOT NULL DEFAULT 0,
+      cursor_to INTEGER NOT NULL DEFAULT 0,
+      delivery_mode TEXT NOT NULL DEFAULT 'frakio_full',
+      budget_json TEXT NOT NULL DEFAULT '{}',
+      included_json TEXT NOT NULL DEFAULT '[]',
+      excluded_json TEXT NOT NULL DEFAULT '[]',
+      conflicts_json TEXT NOT NULL DEFAULT '[]',
+      warnings_json TEXT NOT NULL DEFAULT '[]',
+      source_receipt_ids_json TEXT NOT NULL DEFAULT '[]',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS context_receipts_thread_idx ON context_receipts(thread_id, created_at DESC);
     CREATE TABLE IF NOT EXISTS hermes_projections (
       profile_name TEXT PRIMARY KEY,
       agent_id TEXT NOT NULL DEFAULT '',
@@ -547,6 +604,11 @@ export function createRuntimeStore(filePath) {
     ['model_route_revision', "TEXT NOT NULL DEFAULT ''"],
     ['phase', "TEXT NOT NULL DEFAULT 'opening'"],
     ['stop_requested_at', 'TEXT'],
+    ['engine_id', "TEXT NOT NULL DEFAULT ''"],
+    ['harness_id', "TEXT NOT NULL DEFAULT ''"],
+    ['parent_run_id', "TEXT NOT NULL DEFAULT ''"],
+    ['route_id', "TEXT NOT NULL DEFAULT ''"],
+    ['failure_class', "TEXT NOT NULL DEFAULT ''"],
   ];
   for (const [column, definition] of runColumnMigrations) {
     if (!runColumns.has(column)) db.exec(`ALTER TABLE runtime_runs ADD COLUMN ${column} ${definition}`);
@@ -657,6 +719,31 @@ export function createRuntimeStore(filePath) {
     if (!memoryColumns.has(column)) db.exec(`ALTER TABLE memory_entries ADD COLUMN ${column} ${definition}`);
   }
   db.exec('CREATE INDEX IF NOT EXISTS memory_entries_source_hash_idx ON memory_entries(source_hash, status, updated_at DESC);');
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS thread_agent_harness_bindings (
+      thread_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      harness_id TEXT NOT NULL,
+      bound_at TEXT NOT NULL,
+      source TEXT NOT NULL DEFAULT 'thread_created',
+      binding_revision INTEGER NOT NULL DEFAULT 1,
+      PRIMARY KEY(thread_id, agent_id)
+    );
+    CREATE INDEX IF NOT EXISTS thread_agent_harness_bindings_thread_idx ON thread_agent_harness_bindings(thread_id);
+    CREATE TABLE IF NOT EXISTS agent_context_cursors (
+      thread_id TEXT NOT NULL,
+      agent_id TEXT NOT NULL,
+      harness_id TEXT NOT NULL,
+      session_id TEXT NOT NULL DEFAULT '',
+      event_cursor INTEGER NOT NULL DEFAULT 0,
+      state_revision INTEGER NOT NULL DEFAULT 0,
+      profile_revision TEXT NOT NULL DEFAULT '',
+      memory_revision TEXT NOT NULL DEFAULT '',
+      source_ids_json TEXT NOT NULL DEFAULT '[]',
+      updated_at TEXT NOT NULL,
+      PRIMARY KEY(thread_id, agent_id, harness_id)
+    );
+  `);
   db.prepare('INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION));
 
   const mapSession = (row) => row && ({
@@ -706,6 +793,11 @@ export function createRuntimeStore(filePath) {
     modelRouteRevision: row.model_route_revision || '',
     profileRevision: row.profile_revision,
     modelId: row.model_id,
+    engineId: row.engine_id || row.runtime_id,
+    harnessId: row.harness_id || (row.runtime_id === 'pi' ? 'native' : row.runtime_id),
+    parentRunId: row.parent_run_id || '',
+    routeId: row.route_id || '',
+    failureClass: row.failure_class || '',
     status: row.status,
     phase: row.phase || 'opening',
     stopRequestedAt: row.stop_requested_at || null,
@@ -835,6 +927,56 @@ export function createRuntimeStore(filePath) {
     memoryRevision: row.memory_revision || '',
     included: json(row.included_json, []),
     excluded: json(row.excluded_json, []),
+    createdAt: row.created_at,
+  });
+
+  const mapThreadContextEvent = (row) => row && ({
+    id: row.id,
+    threadId: row.thread_id,
+    cursor: Number(row.cursor || 0),
+    eventType: row.event_type,
+    actorType: row.actor_type || 'system',
+    actorId: row.actor_id || '',
+    sourceId: row.source_id || '',
+    sourceRevision: Number(row.source_revision || 1),
+    parentEventId: row.parent_event_id || '',
+    visibility: row.visibility || 'public',
+    scope: row.scope || 'thread',
+    authority: row.authority || 'inferred',
+    payload: json(row.payload_json),
+    createdAt: row.created_at,
+  });
+
+  const mapThreadStateSnapshot = (row) => row && ({
+    threadId: row.thread_id,
+    revision: Number(row.revision || 0),
+    throughCursor: Number(row.through_cursor || 0),
+    state: json(row.state_json),
+    contentHash: row.content_hash || '',
+    status: row.status || 'ready',
+    error: row.error || '',
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+  });
+
+  const mapContextReceipt = (row) => row && ({
+    id: row.id,
+    packetId: row.packet_id || '',
+    packetHash: row.packet_hash || '',
+    threadId: row.thread_id,
+    runId: row.run_id || '',
+    runtimeId: row.runtime_id || '',
+    agentId: row.agent_id || '',
+    schemaVersion: Number(row.schema_version || 2),
+    stateRevision: Number(row.state_revision || 0),
+    cursor: { from: Number(row.cursor_from || 0), to: Number(row.cursor_to || 0) },
+    deliveryMode: row.delivery_mode || 'frakio_full',
+    budget: json(row.budget_json),
+    included: json(row.included_json, []),
+    excluded: json(row.excluded_json, []),
+    conflicts: json(row.conflicts_json, []),
+    warnings: json(row.warnings_json, []),
+    sourceReceiptIds: json(row.source_receipt_ids_json, []),
     createdAt: row.created_at,
   });
 
@@ -1035,15 +1177,16 @@ export function createRuntimeStore(filePath) {
         INSERT INTO runtime_runs(
           id, session_id, runtime_id, thread_id, agent_id, turn_id, native_run_id, native_turn_id,
           last_native_event_sequence, execution_realm_revision, model_route_revision, profile_revision,
-          model_id, status, phase, stop_requested_at, error, context_watermark_from, context_watermark_to, skill_set_revision,
+          model_id, engine_id, harness_id, parent_run_id, route_id, failure_class, status, phase, stop_requested_at, error, context_watermark_from, context_watermark_to, skill_set_revision,
           permission_policy_revision, permission_coverage, receipt_json, metadata_json,
           runtime_version, runtime_build_id, activation_revision, started_at, completed_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
       `).run(
         id, input.sessionId, input.runtimeId, input.threadId, input.agentId, input.turnId,
         input.nativeRunId || '', input.nativeTurnId || '', Math.max(0, Number(input.lastNativeEventSequence || 0)),
         input.executionRealmRevision || '', input.modelRouteRevision || '',
-        input.profileRevision || '', input.modelId || '', input.status || 'queued', input.phase || 'opening', input.stopRequestedAt || null,
+        input.profileRevision || '', input.modelId || '', input.engineId || input.runtimeId || '', input.harnessId || (input.runtimeId === 'pi' ? 'native' : input.runtimeId) || '',
+        input.parentRunId || '', input.routeId || '', input.failureClass || '', input.status || 'queued', input.phase || 'opening', input.stopRequestedAt || null,
         input.error || '', input.contextWatermarkFrom || '', input.contextWatermarkTo || '', input.skillSetRevision || '',
         input.permissionPolicyRevision || '', input.permissionCoverage || '', encode(input.receipt), encode(input.metadata),
         input.runtimeVersion || '', input.runtimeBuildId || '', input.activationRevision || '', startedAt, input.completedAt || null,
@@ -1736,6 +1879,92 @@ export function createRuntimeStore(filePath) {
       args.push(Math.max(1, Math.min(500, Number(limit) || 100)));
       return db.prepare(`SELECT * FROM memory_context_receipts ${where} ORDER BY created_at DESC LIMIT ?`).all(...args).map(mapMemoryReceipt);
     },
+    putThreadContextEvent(input) {
+      const existing = db.prepare('SELECT * FROM thread_context_events WHERE thread_id=? AND source_id=? AND event_type=? AND source_revision=?')
+        .get(input.threadId, input.sourceId || '', input.eventType, Number(input.sourceRevision || 1));
+      if (existing) return mapThreadContextEvent(existing);
+      return api.transaction(() => {
+        const repeated = db.prepare('SELECT * FROM thread_context_events WHERE thread_id=? AND source_id=? AND event_type=? AND source_revision=?')
+          .get(input.threadId, input.sourceId || '', input.eventType, Number(input.sourceRevision || 1));
+        if (repeated) return mapThreadContextEvent(repeated);
+        const cursor = Number(db.prepare('SELECT COALESCE(MAX(cursor), 0) + 1 AS cursor FROM thread_context_events WHERE thread_id=?').get(input.threadId)?.cursor || 1);
+        const id = input.id || `thread_event_${randomUUID()}`;
+        db.prepare(`INSERT INTO thread_context_events(id,thread_id,cursor,event_type,actor_type,actor_id,source_id,source_revision,parent_event_id,visibility,scope,authority,payload_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+          id, input.threadId, cursor, input.eventType, input.actorType || 'system', input.actorId || '', input.sourceId || '', Number(input.sourceRevision || 1), input.parentEventId || '', input.visibility || 'public', input.scope || 'thread', input.authority || 'inferred', encode(input.payload), input.createdAt || timestamp(),
+        );
+        return mapThreadContextEvent(db.prepare('SELECT * FROM thread_context_events WHERE id=?').get(id));
+      });
+    },
+    putThreadContextEvents(inputs = []) {
+      if (!inputs.length) return [];
+      const threadIds = [...new Set(inputs.map((input) => String(input.threadId || '')).filter(Boolean))];
+      if (threadIds.length !== 1) throw new Error('Thread context event batches must target one thread.');
+      const threadId = threadIds[0];
+      const existingKeys = new Set(db.prepare('SELECT source_id,event_type,source_revision FROM thread_context_events WHERE thread_id=?').all(threadId).map((row) => `${row.source_id}\u0000${row.event_type}\u0000${row.source_revision}`));
+      const pending = inputs.filter((input) => {
+        const key = `${input.sourceId || ''}\u0000${input.eventType}\u0000${Number(input.sourceRevision || 1)}`;
+        if (existingKeys.has(key)) return false;
+        existingKeys.add(key);
+        return true;
+      });
+      if (!pending.length) return [];
+      return api.transaction(() => {
+        let cursor = Number(db.prepare('SELECT COALESCE(MAX(cursor), 0) AS cursor FROM thread_context_events WHERE thread_id=?').get(threadId)?.cursor || 0);
+        const insert = db.prepare(`INSERT OR IGNORE INTO thread_context_events(id,thread_id,cursor,event_type,actor_type,actor_id,source_id,source_revision,parent_event_id,visibility,scope,authority,payload_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+        const ids = [];
+        for (const input of pending) {
+          const id = input.id || `thread_event_${randomUUID()}`;
+          const result = insert.run(id, threadId, cursor + 1, input.eventType, input.actorType || 'system', input.actorId || '', input.sourceId || '', Number(input.sourceRevision || 1), input.parentEventId || '', input.visibility || 'public', input.scope || 'thread', input.authority || 'inferred', encode(input.payload), input.createdAt || timestamp());
+          if (result.changes) { cursor += 1; ids.push(id); }
+        }
+        if (!ids.length) return [];
+        return db.prepare(`SELECT * FROM thread_context_events WHERE id IN (${placeholders(ids)}) ORDER BY cursor`).all(...ids).map(mapThreadContextEvent);
+      });
+    },
+    listThreadContextEvents(threadId, { afterCursor = 0, limit = 10000, visibility = '' } = {}) {
+      const capped = Math.max(1, Math.min(50000, Number(limit) || 10000));
+      const rows = visibility
+        ? db.prepare('SELECT * FROM thread_context_events WHERE thread_id=? AND cursor>? AND visibility=? ORDER BY cursor LIMIT ?').all(threadId, Number(afterCursor || 0), visibility, capped)
+        : db.prepare('SELECT * FROM thread_context_events WHERE thread_id=? AND cursor>? ORDER BY cursor LIMIT ?').all(threadId, Number(afterCursor || 0), capped);
+      return rows.map(mapThreadContextEvent);
+    },
+    getThreadStateSnapshot(threadId) {
+      return mapThreadStateSnapshot(db.prepare('SELECT * FROM thread_state_snapshots WHERE thread_id=?').get(threadId));
+    },
+    putThreadStateSnapshot(input, expectedRevision = null) {
+      const current = db.prepare('SELECT * FROM thread_state_snapshots WHERE thread_id=?').get(input.threadId);
+      if (expectedRevision !== null && Number(current?.revision || 0) !== Number(expectedRevision)) return null;
+      const updatedAt = timestamp();
+      const revision = Number(input.revision ?? Number(current?.revision || 0) + 1);
+      db.prepare(`INSERT INTO thread_state_snapshots(thread_id,revision,through_cursor,state_json,content_hash,status,error,created_at,updated_at) VALUES(?,?,?,?,?,?,?,?,?) ON CONFLICT(thread_id) DO UPDATE SET revision=excluded.revision,through_cursor=excluded.through_cursor,state_json=excluded.state_json,content_hash=excluded.content_hash,status=excluded.status,error=excluded.error,updated_at=excluded.updated_at`).run(
+        input.threadId, revision, Number(input.throughCursor || 0), encode(input.state), input.contentHash || '', input.status || 'ready', input.error || '', current?.created_at || updatedAt, updatedAt,
+      );
+      return api.getThreadStateSnapshot(input.threadId);
+    },
+    deleteThreadStateSnapshot(threadId) {
+      return db.prepare('DELETE FROM thread_state_snapshots WHERE thread_id=?').run(threadId).changes > 0;
+    },
+    putContextReceipt(input) {
+      const id = input.id || `context_receipt_${randomUUID()}`;
+      const cursor = input.cursor || {};
+      db.prepare(`INSERT INTO context_receipts(id,packet_id,packet_hash,thread_id,run_id,runtime_id,agent_id,schema_version,state_revision,cursor_from,cursor_to,delivery_mode,budget_json,included_json,excluded_json,conflicts_json,warnings_json,source_receipt_ids_json,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`).run(
+        id, input.packetId || '', input.packetHash || '', input.threadId, input.runId || '', input.runtimeId || '', input.agentId || '', Number(input.schemaVersion || 2), Number(input.stateRevision || 0), Number(cursor.from || 0), Number(cursor.to || 0), input.deliveryMode || 'frakio_full', encode(input.budget), encode(input.included || []), encode(input.excluded || []), encode(input.conflicts || []), encode(input.warnings || []), encode(input.sourceReceiptIds || []), input.createdAt || timestamp(),
+      );
+      return api.getContextReceipt(id);
+    },
+    getContextReceipt(id) {
+      return mapContextReceipt(db.prepare('SELECT * FROM context_receipts WHERE id=?').get(id));
+    },
+    updateContextReceiptDelivery(id, deliveryMode) {
+      db.prepare('UPDATE context_receipts SET delivery_mode=? WHERE id=?').run(deliveryMode, id);
+      return api.getContextReceipt(id);
+    },
+    listContextReceipts({ threadId = '', limit = 100 } = {}) {
+      const capped = Math.max(1, Math.min(500, Number(limit) || 100));
+      return (threadId
+        ? db.prepare('SELECT * FROM context_receipts WHERE thread_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?').all(threadId, capped)
+        : db.prepare('SELECT * FROM context_receipts ORDER BY created_at DESC, rowid DESC LIMIT ?').all(capped)).map(mapContextReceipt);
+    },
     memoryRevision({ scope = '', subjectId = '' } = {}) {
       const clauses = []; const args = [];
       if (scope) { clauses.push('scope=?'); args.push(scope); }
@@ -2091,7 +2320,48 @@ export function createRuntimeStore(filePath) {
           sourcePath: row.source_path,
           metadata: json(row.metadata_json),
           createdAt: row.created_at,
-        }));
+      }));
+    },
+    upsertThreadHarnessBinding(input) {
+      const record = {
+        threadId: String(input.threadId || ''),
+        agentId: String(input.agentId || ''),
+        harnessId: input.harnessId === 'pi' ? 'native' : String(input.harnessId || 'native'),
+        boundAt: String(input.boundAt || timestamp()),
+        source: String(input.source || 'thread_created'),
+        bindingRevision: Math.max(1, Number(input.bindingRevision || 1)),
+      };
+      db.prepare(`INSERT INTO thread_agent_harness_bindings(thread_id, agent_id, harness_id, bound_at, source, binding_revision)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT(thread_id, agent_id) DO UPDATE SET harness_id=excluded.harness_id, bound_at=excluded.bound_at,
+          source=excluded.source, binding_revision=excluded.binding_revision`)
+        .run(record.threadId, record.agentId, record.harnessId, record.boundAt, record.source, record.bindingRevision);
+      return record;
+    },
+    listThreadHarnessBindings(threadId) {
+      return db.prepare('SELECT * FROM thread_agent_harness_bindings WHERE thread_id=? ORDER BY agent_id').all(threadId).map((row) => ({
+        threadId: row.thread_id, agentId: row.agent_id, harnessId: row.harness_id, boundAt: row.bound_at,
+        source: row.source, bindingRevision: Number(row.binding_revision),
+      }));
+    },
+    getAgentContextCursor(threadId, agentId, harnessId) {
+      const row = db.prepare('SELECT * FROM agent_context_cursors WHERE thread_id=? AND agent_id=? AND harness_id=?').get(threadId, agentId, harnessId === 'pi' ? 'native' : harnessId);
+      return row && ({ threadId: row.thread_id, agentId: row.agent_id, harnessId: row.harness_id, sessionId: row.session_id,
+        eventCursor: Number(row.event_cursor), stateRevision: Number(row.state_revision), profileRevision: row.profile_revision,
+        memoryRevision: row.memory_revision, sourceIds: json(row.source_ids_json, []), updatedAt: row.updated_at });
+    },
+    upsertAgentContextCursor(input) {
+      const harnessId = input.harnessId === 'pi' ? 'native' : String(input.harnessId || 'native');
+      const updatedAt = String(input.updatedAt || timestamp());
+      db.prepare(`INSERT INTO agent_context_cursors(thread_id, agent_id, harness_id, session_id, event_cursor, state_revision, profile_revision, memory_revision, source_ids_json, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(thread_id, agent_id, harness_id) DO UPDATE SET session_id=excluded.session_id,
+          event_cursor=MAX(agent_context_cursors.event_cursor, excluded.event_cursor), state_revision=excluded.state_revision,
+          profile_revision=excluded.profile_revision, memory_revision=excluded.memory_revision,
+          source_ids_json=excluded.source_ids_json, updated_at=excluded.updated_at`)
+        .run(input.threadId, input.agentId, harnessId, input.sessionId || '', Number(input.eventCursor || 0), Number(input.stateRevision || 0),
+          input.profileRevision || '', input.memoryRevision || '', encode(input.sourceIds || []), updatedAt);
+      return api.getAgentContextCursor(input.threadId, input.agentId, harnessId);
     },
     upsertWorkTask(input) {
       const current = timestamp();

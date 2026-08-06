@@ -152,6 +152,33 @@ test('Responses to Chat bridge normalizes Codex developer messages for Chat prov
   assert.match(response.body(), /response\.completed/);
 });
 
+test('Responses v2 bridge rejects orphaned tool results', async () => {
+  const { transformBridgeRequest } = await import('./protocol-bridge.mjs');
+  assert.throws(() => transformBridgeRequest({ input: [{ type: 'function_call_output', call_id: 'missing', output: 'x' }] }, { harnessApiMode: 'openai_responses', upstreamApiMode: 'chat_completions', bridgeId: 'responses-chat-v2', modelId: 'test' }), /工具结果缺少相邻/);
+});
+
+test('Responses v2 bridge preserves a complete multi-tool round trip and disables unsupported thinking', async () => {
+  const { transformBridgeRequest } = await import('./protocol-bridge.mjs');
+  const transformed = transformBridgeRequest({
+    reasoning: { effort: 'high' },
+    input: [
+      { role: 'user', content: [{ type: 'input_text', text: 'Inspect both files.' }] },
+      { type: 'function_call', call_id: 'call-a', name: 'read_file', arguments: '{"path":"a.txt"}' },
+      { type: 'function_call', call_id: 'call-b', name: 'read_file', arguments: '{"path":"b.txt"}' },
+      { type: 'function_call_output', call_id: 'call-a', output: 'A' },
+      { type: 'function_call_output', call_id: 'call-b', output: 'B' },
+      { role: 'user', content: [{ type: 'input_text', text: 'Summarize.' }] },
+    ],
+  }, { harnessApiMode: 'openai_responses', upstreamApiMode: 'chat_completions', bridgeId: 'responses-chat-v2', modelId: 'test' });
+
+  assert.deepEqual(transformed.messages.map((message) => message.role), ['user', 'assistant', 'assistant', 'tool', 'tool', 'user']);
+  assert.equal(transformed.messages[1].tool_calls[0].id, 'call-a');
+  assert.equal(transformed.messages[2].tool_calls[0].id, 'call-b');
+  assert.equal(transformed.messages[3].tool_call_id, 'call-a');
+  assert.equal(transformed.messages[4].tool_call_id, 'call-b');
+  assert.equal('reasoning_effort' in transformed, false);
+});
+
 test('Runtime Model Gateway bridges Claude Messages requests and Responses streams with tools', async (t) => {
   let upstreamBody = null;
   const server = http.createServer((req, res) => {

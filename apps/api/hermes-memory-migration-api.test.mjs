@@ -70,6 +70,7 @@ test('Hermes migration backs up profiles and imports unconfirmed facts as candid
 
   const state = JSON.parse(await readFile(path.join(home, 'data', 'workbench-state.json'), 'utf8'));
   assert.equal(state.memoryAuthority, 'authority');
+  assert.equal(state.features.frakioMemoryAuthority, true);
   assert.equal(state.memoryMigration.hermesVersion, 1);
   const projectedUser = await readFile(path.join(memoriesDir, 'USER.md'), 'utf8');
   const projectedMemory = await readFile(path.join(memoriesDir, 'MEMORY.md'), 'utf8');

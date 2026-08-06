@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, mkdtemp } from 'node:fs/promises';
+import { access, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
@@ -150,6 +150,22 @@ test('Context Delta only projects sources added after the applied watermark', ()
   assert.deepEqual(projected.memory.map((item) => item.id), ['memory-b']);
   assert.deepEqual(projected.projectKnowledge, []);
   assert.deepEqual(projected.handoff.recentConversation.map((item) => item.messageId), ['message-b']);
+});
+
+test('Agent context cursors persist per Thread, Agent, and Harness', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-context-cursor-'));
+  const store = createRuntimeStore(path.join(root, 'runtime.sqlite'));
+  try {
+    store.upsertAgentContextCursor({ threadId: 'thread-1', agentId: 'victor', harnessId: 'native', sessionId: 'session-1', eventCursor: 12, stateRevision: 3, profileRevision: 'p1', memoryRevision: 'm1', sourceIds: ['message:a'] });
+    const cursor = store.getAgentContextCursor('thread-1', 'victor', 'pi');
+    assert.equal(cursor.harnessId, 'native');
+    assert.equal(cursor.eventCursor, 12);
+    store.upsertAgentContextCursor({ threadId: 'thread-1', agentId: 'victor', harnessId: 'native', sessionId: 'session-1', eventCursor: 8, stateRevision: 4, profileRevision: 'p2', memoryRevision: 'm2', sourceIds: ['message:b'] });
+    assert.equal(store.getAgentContextCursor('thread-1', 'victor', 'native').eventCursor, 12);
+  } finally {
+    store.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test('removing a recalled memory opens a fresh native session', async (t) => {
@@ -381,7 +397,7 @@ test('schema v4 sessions migrate idempotently into chat lanes', async () => {
   legacy.close();
 
   const migrated = createRuntimeStore(file);
-  assert.equal(migrated.schemaVersion, 13);
+  assert.equal(migrated.schemaVersion, 15);
   assert.ok(migrated.migrationBackupPath);
   await access(migrated.migrationBackupPath);
   assert.equal(migrated.getSession('legacy-session').laneType, 'chat');

@@ -39,6 +39,21 @@ const definitions = [
   },
 ];
 
+export function normalizeHarnessId(value, fallback = 'native') {
+  const id = String(value || '').trim().toLowerCase();
+  if (id === 'pi' || id === 'native') return 'native';
+  if (id === 'hermes' || id === 'codex' || id === 'claude') return id;
+  return fallback;
+}
+
+export function runtimeIdForHarness(value) {
+  return normalizeHarnessId(value) === 'native' ? 'pi' : normalizeHarnessId(value);
+}
+
+export function harnessIdForRuntime(value) {
+  return normalizeHarnessId(value);
+}
+
 async function commandVersion(commandPath, execFile) {
   if (!commandPath || !execFile) return '';
   for (const args of [['--version'], ['version']]) {
@@ -157,6 +172,7 @@ export function normalizeRuntimePolicy(policy = {}, { hasHermesProfile = true } 
     defaultRuntimeId,
     allowedRuntimeIds,
     permissionProfileId: String(policy.permissionProfileId || 'default').slice(0, 120),
+    defaultHarnessId: normalizeHarnessId(policy.defaultHarnessId || policy.defaultRuntimeId, hasHermesProfile ? 'hermes' : 'native'),
   };
 }
 

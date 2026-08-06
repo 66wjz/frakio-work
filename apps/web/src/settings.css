@@ -2450,6 +2450,7 @@
   .monitor-panel,
   .usage-summary-card,
   .vault-row,
+  .memory-automation-panel,
   .preference-grid,
   .pin-grid
 ) {
@@ -2463,6 +2464,11 @@
 .app[data-appearance='dark'].settings-mode .module-matrix-tabs button.selected {
   color: var(--settings-title);
   background: rgb(255 255 255 / 12%);
+}
+
+.app[data-appearance='dark'].settings-mode .runtime-autostart-log pre {
+  color: var(--settings-text-secondary);
+  background: var(--settings-surface-inset);
 }
 
 @media (max-width: 900px) {

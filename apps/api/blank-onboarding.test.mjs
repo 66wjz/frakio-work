@@ -91,7 +91,7 @@ test('fresh install creates a personal vault while models and Agents remain unco
   });
   assert.equal(conversationResponse.status, 200);
   const conversation = await conversationResponse.json();
-  assert.equal(conversation.thread.vaultId, vaults.personalVaultId);
+  assert.equal(conversation.thread.vaultId, null);
   assert.deepEqual(conversation.thread.messages, []);
   assert.deepEqual(conversation.thread.agentRunOverrides, {
     'local-agent': { reasoningEffort: 'high', speedMode: 'fast' },
@@ -103,6 +103,7 @@ test('fresh install creates a personal vault while models and Agents remain unco
   });
   assert.equal(workspaceResponse.status, 200);
   const workspace = await workspaceResponse.json();
+  assert.equal(workspace.workspace.personalKnowledgeDefault, 'on');
   assert.deepEqual(workspace.thread.messages, []);
   const workspaceThreadResponse = await fetch(`${ctx.baseUrl}/api/workspaces/${workspace.workspace.id}/threads`, {
     method: 'POST',
@@ -111,6 +112,13 @@ test('fresh install creates a personal vault while models and Agents remain unco
   });
   assert.equal(workspaceThreadResponse.status, 200);
   assert.deepEqual((await workspaceThreadResponse.json()).thread.messages, []);
+  const teamWorkspaceResponse = await fetch(`${ctx.baseUrl}/api/workspaces`, {
+    method: 'POST', headers: { ...ctx.writeHeaders, 'content-type': 'application/json' },
+    body: JSON.stringify({ name: 'Team project', mode: 'create', parentPath: ctx.parent, personalKnowledgeDefault: 'off' }),
+  });
+  assert.equal(teamWorkspaceResponse.status, 200);
+  const teamWorkspace = await teamWorkspaceResponse.json();
+  assert.equal(teamWorkspace.workspace.personalKnowledgeDefault, 'off');
   const patchResponse = await fetch(`${ctx.baseUrl}/api/threads/${conversation.thread.id}`, {
     method: 'PATCH',
     headers: { ...ctx.writeHeaders, 'content-type': 'application/json' },

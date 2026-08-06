@@ -39,9 +39,22 @@ test('macOS window chrome remains available above launch and settings content', 
 test('Web workbench keeps navigation controls without rendering native window chrome', () => {
   assert.match(mainSource, /const workbenchLeftActions = \([\s\S]*?aria-label="新对话"/);
   assert.match(mainSource, /\{!isDesktopShell && !isSettingsNav && workbenchLeftActions\}/);
-  assert.match(mainSource, /\{!isDesktopShell && !isSettingsNav && rightRailKind && \(/);
+  assert.match(mainSource, /\{!isDesktopShell && rightRailKind && \(/);
   assert.match(stylesSource, /\.managed-web-shell \.workbench-window-controls\s*\{[\s\S]*?top:\s*11px;[\s\S]*?left:\s*16px;/);
   assert.match(stylesSource, /\.managed-web-shell \.mac-window-toolbar,[\s\S]*?display:\s*none !important;/);
+});
+
+test('conversation context controls are external and the Banner owns the only right rail toggle', () => {
+  assert.match(mainSource, /function ConversationExternalControls\([\s\S]*?aria-label="会话摘要"[\s\S]*?aria-label="资料库上下文"/);
+  assert.doesNotMatch(mainSource, /function ConversationExternalControls[\s\S]*?aria-label=\{rightRailOpen/);
+  const toolbar = mainSource.match(/<header[\s\S]*?mac-global-window-toolbar[\s\S]*?<\/header>/)?.[0] || '';
+  assert.doesNotMatch(toolbar, /ariaLabel="会话摘要"/);
+  assert.match(toolbar, /ariaLabel=\{rightRailOpen \? '收起右侧栏' : '展开右侧栏'\}/);
+  assert.doesNotMatch(stylesSource.match(/\.conversation-external-controls\s*\{[\s\S]*?\}/)?.[0] || '', /border|box-shadow|border-radius|background/);
+  assert.match(stylesSource, /\.mac-window-toolbar\s*\{[\s\S]*?--banner-control-size:\s*28px;[\s\S]*?--conversation-control-gap:\s*4px;[\s\S]*?--conversation-controls-closed-right:\s*44px;/);
+  assert.match(stylesSource, /\.mac-global-window-toolbar \.conversation-external-controls\s*\{[\s\S]*?top:\s*var\(--banner-control-top\);[\s\S]*?right:\s*var\(--conversation-controls-closed-right\);[\s\S]*?gap:\s*var\(--conversation-control-gap\);[\s\S]*?transition:\s*right \.36s cubic-bezier\(\.2, \.8, \.2, 1\);/);
+  assert.match(stylesSource, /\.mac-global-window-toolbar:has\(\+ \.app\.right-rail-open\) \.conversation-external-controls\s*\{\s*right:\s*calc\(var\(--context-width\) \+ 12px\);\s*\}/);
+  assert.match(stylesSource, /@media \(prefers-reduced-motion: reduce\)[\s\S]*?\.mac-global-window-toolbar \.conversation-external-controls\s*\{\s*transition:\s*none;/);
 });
 
 test('macOS message viewport fades its own pixels instead of covering them with a bright layer', () => {
@@ -99,13 +112,12 @@ test('thinking presence stays in the reply slot until the first buffered body is
   assert.match(stylesSource, /\.run-reply-transition-slot > \.processing-presence\.is-exiting\s*\{[\s\S]*?position:\s*absolute;[\s\S]*?animation:\s*processing-presence-exit \.11s/);
 });
 
-test('completed replies are handed to history before a subsequent Agent state is displayed', () => {
-  assert.match(mainSource, /let pendingHandoff: Thread \| null = null;/);
-  assert.match(mainSource, /const bufferedTurnEvents: any\[\] = \[\];/);
-  assert.match(mainSource, /const scheduleHandoff = \(nextThread: Thread\) => \{/);
-  assert.match(mainSource, /hideStatus:\s*true,/);
-  assert.match(mainSource, /if \(pendingHandoff\) \{\s*bufferedTurnEvents\.push\(data\);/);
-  assert.doesNotMatch(mainSource, /commitCompletedAgent/);
+test('completed replies merge into history without blocking the next Agent start', () => {
+  assert.match(mainSource, /adoptThreadSnapshot\(threadId, nextThread\);/);
+  assert.match(mainSource, /ensureRunPresentation\(threadId, incomingHostRunId, identity\);/);
+  assert.doesNotMatch(mainSource, /pendingHandoff/);
+  assert.doesNotMatch(mainSource, /bufferedTurnEvents/);
+  assert.doesNotMatch(mainSource, /scheduleHandoff/);
 });
 
 test('tool activity summary is flat until hover, keyboard focus or expansion', () => {

@@ -32,6 +32,48 @@ test('live and recovered subscriptions deduplicate by thread, turn, Host Run, an
   assert.match(source, /eventCursor && eventCursor <= lastEventCursor/);
 });
 
+test('one turn renders independent Host Run presentations for every mentioned Agent', () => {
+  assert.match(source, /runPresentationsByThreadId/);
+  assert.match(source, /updateRunPresentation\(threadId, incomingHostRunId/);
+  assert.match(source, /key={`run:\$\{presentation\.hostRunId\}`}/);
+  assert.doesNotMatch(source, /if \(activeStreamRunId && incomingRunId !== activeStreamRunId\) return/);
+  assert.doesNotMatch(source, /if \(data\.runId && data\.runId !== activeStreamRunId\)/);
+});
+
+test('approval and clarification stay bound to the requesting Host Run', () => {
+  assert.match(source, /const activeDecisionPresentation = liveRunPresentations\.find\(\(run\) => run\.approval \|\| run\.clarification\)/);
+  assert.match(source, /updateDecisionRunUi/);
+  assert.match(source, /harnessId: decisionRunUi\?\.target/);
+  const recovered = source.match(/function ensureRecoveredRunSubscription\([\s\S]*?(?=\n  async function reconcileActiveRuns)/)?.[0] || '';
+  assert.match(recovered, /updateRunPresentation\(threadId, incomingHostRunId, \{[\s\S]*?approval: normalized\.approval/);
+  assert.match(recovered, /if \(incomingHostRunId === run\.runId\) updateRunUi\(threadId, \{[\s\S]*?approval: normalized\.approval/);
+  assert.match(recovered, /updateRunPresentation\(threadId, incomingHostRunId, \{[\s\S]*?clarification: normalized\.clarification/);
+});
+
+test('readonly Harness panel renders every bound Agent instead of only the active speaker', () => {
+  const switcher = source.match(/function RuntimeSwitcher\([\s\S]*?(?=\nfunction ThreadActionsMenu)/)?.[0] || '';
+  assert.match(switcher, /thread\.selectedAgents/);
+  assert.match(switcher, /Object\.keys\(thread\.agentHarnessBindings \|\| \{\}\)/);
+  assert.match(switcher, /teamAgents\.map\(\(agent\) =>/);
+  assert.match(switcher, /<AgentAvatar agent=\{agent\}/);
+  assert.match(switcher, /<RuntimeLabel runtimeId=\{runtimeId\}/);
+  assert.doesNotMatch(switcher, /\[activeAgent\]\.map/);
+});
+
+test('recovered turn subscription stays open across child Run completion', () => {
+  const recovered = source.match(/function ensureRecoveredRunSubscription\([\s\S]*?(?=\n  async function reconcileActiveRuns)/)?.[0] || '';
+  assert.match(recovered, /data\.event === 'run\.completed'[\s\S]*?updateRunPresentation/);
+  assert.match(recovered, /data\.event === 'turn\.completed'[\s\S]*?clearRecoveredRunSubscription/);
+  assert.doesNotMatch(recovered, /data\.event === 'run\.completed' \|\| data\.event === 'run\.failed'[\s\S]{0,400}clearRecoveredRunSubscription/);
+});
+
+test('turn events expose a stable Host Run identity', async () => {
+  const serverSource = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
+  const emit = serverSource.match(/function emitHermesTurnEvent\([\s\S]*?(?=\nfunction hermesTurnEventSink)/)?.[0] || '';
+  assert.match(emit, /resolveHostRun\(event\.hostRunId \|\| event\.runId\)/);
+  assert.match(emit, /hostRunId: event\.hostRunId \|\| hostRun\?\.id/);
+});
+
 test('new chat keeps its optimistic message and startup lock until Host Run acceptance', () => {
   assert.match(source, /clientMessageId/);
   assert.match(source, /addPendingMessage\(thread\.id, clientMessageId\)/);

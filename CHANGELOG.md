@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.3.0 — 2026-08-06
+
+Agent 配置中心改为名片式管理界面。每张名片集中展示头像、昵称、角色、默认模型和当前运行内核，内核使用对应图标与名称识别；Agent 的笔记、用户画像、灵魂和内核配置继续在下方详情面板中编辑。新建 Agent 不再要求用户设置名片颜色，历史颜色数据保持兼容。
+
+Frakio Runtime Host 进一步统一 Hermes、Pi、Codex 和 Claude 的执行链路。会话创建时固定 Agent 与 Harness 绑定，跨窗口、刷新和应用重启可以恢复运行状态；运行展示按 Agent 隔离，重复事件、审批、澄清和终态处理保持幂等。
+
+新增线程上下文账本、状态快照、上下文回执和 Agent 上下文游标。个人资料库与项目资料库支持按会话和工作区继承策略，上下文变更会触发必要的运行时恢复；无法使用旧 Harness 时可在确认后迁移到 Frakio Native。
+
 ## 1.2.3 — 2026-08-05
 
 Codex 与 Claude Code 现在通过 Frakio Runtime Host 恢复原生 Harness 会话链路。Responses、Chat Completions 与 Anthropic Messages 之间可按模型路由直连或桥接，Runtime Preflight 会在发送前检查模型、凭据、协议和权限；启动或流式失败会恢复输入区并显示可重试原因，不再静默停在运行中。

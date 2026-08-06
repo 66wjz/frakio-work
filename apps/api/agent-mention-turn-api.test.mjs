@@ -151,6 +151,8 @@ test('API owns Agent mention routing after the browser starts only the root run'
   });
   assert.deepEqual(bridge.chats.map((chat) => chat.profile), ['iris', 'victor']);
   assert.deepEqual(completed.selectedAgents.sort(), ['iris', 'victor']);
+  assert.equal(completed.messages.filter((message) => message.agentId === 'user').length, 1);
+  assert.equal(completed.messages.some((message) => message.agentId === 'user' && message.content.startsWith('群聊系统：')), false);
   assert.equal(completed.messages.filter((message) => message.agentId === 'victor').length, 1);
   const iris = completed.messages.find((message) => message.agentId === 'iris');
   const victor = completed.messages.find((message) => message.agentId === 'victor');

@@ -436,6 +436,15 @@ test('project libraries are opt-in, trusted rules are scoped to the connected th
   assert.equal(disconnected.thread.vaultId, null);
   const disconnectedPreview = await fetch(`${ctx.baseUrl}/api/threads/${thread.thread.id}/context-preview?agentId=iris-test`, { headers: ctx.headers }).then(res => res.json());
   assert.deepEqual(disconnectedPreview.projectRulePaths, []);
+
+  const personalOff = await fetch(`${ctx.baseUrl}/api/threads/${thread.thread.id}`, { method: 'PATCH', headers: ctx.headers, body: JSON.stringify({ personalKnowledgeMode: 'off' }) });
+  assert.equal(personalOff.status, 200);
+  const personalOffPreview = await fetch(`${ctx.baseUrl}/api/threads/${thread.thread.id}/context-preview?agentId=iris-test`, { headers: ctx.headers }).then(res => res.json());
+  assert.equal(personalOffPreview.personalKnowledge.enabled, false);
+  assert.ok(!personalOffPreview.sources.some(source => source.kind === 'personal_vault'));
+
+  const invalidPersonalBinding = await fetch(`${ctx.baseUrl}/api/threads/${thread.thread.id}`, { method: 'PATCH', headers: ctx.headers, body: JSON.stringify({ vaultId: personal.vault.id }) });
+  assert.equal(invalidPersonalBinding.status, 400);
 });
 
 test('project Work tasks automatically write a durable delivery into the project folder', async t => {

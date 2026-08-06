@@ -75,6 +75,22 @@ test('state API persists the one-time macOS sidebar width migration', async (t) 
     libraryV1: true,
     structuredHandoffs: true,
     externalCliChannels: true,
+    contextReceiptV2: true,
+    contextPacketV2Shadow: true,
+    contextPacketV2: true,
+    incrementalThreadProjection: true,
+    agentContextCursor: true,
+    structuredHandoffEnvelope: true,
+    internalHandoffEnvelope: true,
+    hideLegacyRelayMessages: true,
+    runPresentationByHostRun: true,
+    canonicalRuntimeApproval: true,
+    protocolBridgeV2: true,
+    publicRuntimeEventFilter: true,
+    stableThreadHarnessBinding: true,
+    frakioNativeHarness: true,
+    frakioMemoryAuthority: false,
+    readonlyHarnessPanel: true,
   });
 
   const stored = JSON.parse(await readFile(statePath, 'utf8'));

@@ -430,7 +430,7 @@ try {
   assert.equal(await page.getByPlaceholder('搜索设置...').evaluate((element) => Boolean(element.closest('.settings-nav'))), false, '设置搜索框被放进导航渐隐容器');
   const expectedNavigation = [
     '个人资料', '工作台', '外观', '隐私', '归档对话',
-    'Agent 配置', 'Memory', 'Knowledge', '仓库', '技能', '插件', '工具能力',
+    'Agent 配置', '记忆中心Beta', '资料库Beta', '技能', '插件', '工具能力',
     'Runtime Center', '模型', 'Hermes 集成', 'MCP', '频道', '任务', '监控', '系统状态', '版本更新',
   ];
   const navigationLabels = await page.locator('.settings-nav-group button strong').allTextContents();
@@ -442,9 +442,8 @@ try {
     ['隐私', '隐私'],
     ['归档对话', '归档对话'],
     ['Agent 配置', 'Agent Profile'],
-    ['Memory', 'Memory Ledger'],
-    ['Knowledge', 'Knowledge'],
-    ['仓库', 'Obsidian 仓库'],
+    ['记忆中心 Beta', '记忆中心 Beta'],
+    ['资料库 Beta', '资料库 Beta'],
     ['技能', '技能'],
     ['插件', '插件'],
     ['工具能力', '工具能力'],
@@ -582,15 +581,14 @@ try {
     ['个人资料', '个人资料'],
     ['归档对话', '归档对话'],
     ['Agent 配置', 'Agent Profile'],
-    ['Memory', 'Memory Ledger'],
-    ['Knowledge', 'Knowledge'],
+    ['记忆中心 Beta', '记忆中心 Beta'],
+    ['资料库 Beta', '资料库 Beta'],
     ['工具能力', '工具能力'],
     ['Runtime Center', 'Runtime Center'],
     ['Hermes 集成', 'Hermes 集成'],
     ['技能', '技能'],
     ['插件', '插件'],
     ['模型', 'Frakio Work 模型中心'],
-    ['仓库', 'Obsidian 仓库'],
     ['MCP', 'MCP 服务器'],
     ['频道', '频道'],
     ['任务', '定时任务'],
@@ -672,7 +670,7 @@ try {
   const agentTabs = page.locator('.agent-tabs');
   assert.equal(await agentTabs.count(), 1, 'Agent 档案标签 Banner 不存在');
   const agentTabButtons = agentTabs.getByRole('button');
-  assert.equal(await agentTabButtons.count(), 3, 'Agent 档案标签数量不正确');
+  assert.equal(await agentTabButtons.count(), 4, 'Agent 档案标签数量不正确');
   const agentTabAppearance = await agentTabs.evaluate((element) => {
     const selected = element.querySelector('button.selected');
     const inactive = element.querySelector('button:not(.selected)');
