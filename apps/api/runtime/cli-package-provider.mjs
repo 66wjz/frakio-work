@@ -38,7 +38,9 @@ async function sha256File(filePath) {
 async function executableFingerprint(filePath, version) {
   const info = await stat(filePath);
   const digest = await sha256File(filePath);
-  return createHash('sha256').update(`${filePath}\n${version}\n${info.size}\n${digest}`).digest('hex');
+  // Managed packages are verified after their staging directory is atomically
+  // moved into the runtime inventory, so their identity cannot include a path.
+  return createHash('sha256').update(`runtime-executable-v2\n${version}\n${info.size}\n${digest}`).digest('hex');
 }
 
 async function commandVersion(executablePath, execFile) {
@@ -212,18 +214,21 @@ export function createCliRuntimeProvider({
       if (!executablePath) throw new Error(`${runtimeId} 托管包未提供当前平台的可执行文件。`);
       const inspected = await inspectExecutable(executablePath, { source: 'managed', runtimeDir: staging });
       if (inspected.runtimeVersion !== requested) throw new Error(`${runtimeId} 运行版本 ${inspected.runtimeVersion} 与兼容目录 ${requested} 不一致。`);
-      const executableRelative = path.relative(staging, inspected.executablePath);
-      const packageRootRelative = inspected.packageRoot ? path.relative(staging, inspected.packageRoot) : '';
+      const stagingRealPath = await realpath(staging);
+      const executableRelative = path.relative(stagingRealPath, inspected.executablePath);
       await mkdir(path.dirname(destination), { recursive: true });
       await rm(destination, { recursive: true, force: true });
       await rename(staging, destination);
-      return {
-        ...inspected,
-        runtimeDir: destination,
-        executablePath: path.join(destination, executableRelative),
-        packageRoot: packageRootRelative ? path.join(destination, packageRootRelative) : '',
-        metadata: { ...inspected.metadata, packageVersion, integrity: release.integrity || '' },
-      };
+      try {
+        const finalized = await inspectExecutable(path.join(destination, executableRelative), { source: 'managed', runtimeDir: destination });
+        return {
+          ...finalized,
+          metadata: { ...finalized.metadata, packageVersion, integrity: release.integrity || '', fingerprintScheme: 'runtime-executable-v2' },
+        };
+      } catch (error) {
+        await rm(destination, { recursive: true, force: true }).catch(() => {});
+        throw error;
+      }
     } catch (error) {
       await rm(staging, { recursive: true, force: true }).catch(() => {});
       throw error;

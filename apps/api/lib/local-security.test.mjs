@@ -22,6 +22,10 @@ test('local security rejects foreign origins and unauthenticated writes', () => 
   const unauthenticated = response();
   security.protect({ method: 'POST', get: (name) => name === 'Origin' ? 'http://127.0.0.1:8787' : '' }, unauthenticated, () => assert.fail('write reached handler'));
   assert.equal(unauthenticated.statusCode, 403);
+  assert.deepEqual(unauthenticated.body, {
+    error: 'Local session validation failed.',
+    code: 'LOCAL_SESSION_INVALID',
+  });
 });
 
 test('session cookie and request header authorize same-origin writes', () => {

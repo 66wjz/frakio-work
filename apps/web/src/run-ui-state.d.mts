@@ -1,6 +1,8 @@
 export function normalizeApprovalPresentation(value: any): { approval: any | null; missingId: boolean };
 export function normalizeClarificationPresentation(value: any): { clarification: any | null; missingId: boolean };
 export function mergeThreadWithPendingMessages<T>(current: T, incoming: T, pendingMessageIds?: string[]): T;
+export function dedupeThreadMessages<T extends { id?: string; agentId?: string; content?: string; externalRunId?: string; turnId?: string }>(messages: T[]): T[];
+export function resolveRunEventIdentity(event?: Record<string, unknown>, fallback?: Record<string, unknown>): { hostRunId: string; runId: string; agentId: string; agentName: string; runtimeId: string };
 export function canApplyPresentation(currentRevision: number, nextRevision: number): boolean;
 export function canApplyRuntimeCursor(currentCursor: number, nextCursor: number): boolean;
 export function runtimeEventKey(event?: Record<string, any>): string;

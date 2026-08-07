@@ -4,12 +4,27 @@ import {
   canApplyPresentation,
   canApplyRunSnapshot,
   canApplyRuntimeCursor,
+  dedupeThreadMessages,
   mergeThreadWithPendingMessages,
   normalizeApprovalPresentation,
   normalizeClarificationPresentation,
+  resolveRunEventIdentity,
   runtimeEventKey,
   shouldApplyRuntimeEvent,
 } from '../web/src/run-ui-state.mjs';
+
+test('run event identity keeps the accepted Agent before the first streamed delta', () => {
+  assert.deepEqual(resolveRunEventIdentity(
+    { event: 'message.delta', runId: 'run-1', runtimeId: 'codex' },
+    { hostRunId: 'run-1', agentId: 'victor', agentName: 'Victor', runtimeId: 'codex' },
+  ), {
+    hostRunId: 'run-1',
+    runId: 'run-1',
+    agentId: 'victor',
+    agentName: 'Victor',
+    runtimeId: 'codex',
+  });
+});
 
 test('run presentation normalizes recovered approval and clarification identifiers', () => {
   const approval = normalizeApprovalPresentation({
@@ -75,4 +90,21 @@ test('older thread snapshots cannot remove a newer completed Agent reply', () =>
   };
 
   assert.deepEqual(mergeThreadWithPendingMessages(current, stale).messages, current.messages);
+});
+
+test('duplicate local and persisted Agent replies collapse by external run id', () => {
+  const messages = dedupeThreadMessages([
+    { id: 'local-run-1', agentId: 'max', content: '完成', externalRunId: 'run-1' },
+    { id: 'persisted-run-1', agentId: 'max', content: '完成', externalRunId: 'run-1' },
+    { id: 'run-2', agentId: 'kai', content: '完成', externalRunId: 'run-2' },
+  ]);
+  assert.deepEqual(messages.map((message) => message.id), ['local-run-1', 'run-2']);
+});
+
+test('identical replies from separate runs remain visible', () => {
+  const messages = dedupeThreadMessages([
+    { id: 'run-1', agentId: 'max', content: '收到', externalRunId: 'run-1' },
+    { id: 'run-2', agentId: 'max', content: '收到', externalRunId: 'run-2' },
+  ]);
+  assert.equal(messages.length, 2);
 });

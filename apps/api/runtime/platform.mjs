@@ -337,7 +337,11 @@ export function createRuntimePlatform({ store, registry, packageManager = null, 
       activationRevision: prepared.runtimeBinding?.activationRevision || prepared.session.activationRevision || '',
       executionRealmRevision: prepared.executionRealm?.revision || prepared.session.executionRealmRevision || '',
       modelRouteRevision: String(prepared.modelRoute?.routeRevision || prepared.session.modelRouteRevision || ''),
-      metadata: { ...(input.metadata || {}), permissionPolicy: prepared.permissionPolicy },
+      metadata: {
+        agentName: prepared.agent.name || prepared.agent.id,
+        ...(input.metadata || {}),
+        permissionPolicy: prepared.permissionPolicy,
+      },
     });
     events.append({ runId: run.id, type: 'run.accepted', payload: {
       turnId: run.turnId,

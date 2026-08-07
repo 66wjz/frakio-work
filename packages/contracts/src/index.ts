@@ -166,10 +166,12 @@ export type HandoffEnvelope = {
   routeId: string;
   turnId: string;
   sourceAgentId: string;
+  sourceAgentName?: string;
   targetAgentId: string;
   sourceMessageId: string;
   parentMessageId: string;
   reason: 'agent_mention' | 'structured_handoff';
+  handoffReason?: string;
   objective: string;
   requestedOutput: string;
   constraints: string[];
@@ -937,6 +939,8 @@ export type HermesMentionRoute = {
   targetAgentName: string;
   mentionDepth: number;
   text: string;
+  reason?: 'agent_mention' | 'structured_handoff';
+  handoff?: HandoffEnvelope;
   status: HermesMentionRouteStatus;
   runId: string;
   error: string;

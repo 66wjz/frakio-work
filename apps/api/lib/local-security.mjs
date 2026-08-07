@@ -73,7 +73,10 @@ export function createLocalSecurity({ port, development = false, managedWeb = fa
     if (['GET', 'HEAD', 'OPTIONS'].includes(req.method)) return next();
     const cookies = parseCookies(req.get('Cookie'));
     if (req.get('X-Frakio-Request') !== '1' || cookies.frakio_session !== sessionToken) {
-      return res.status(403).json({ error: 'Local session validation failed.' });
+      return res.status(403).json({
+        error: 'Local session validation failed.',
+        code: 'LOCAL_SESSION_INVALID',
+      });
     }
     return next();
   }

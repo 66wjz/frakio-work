@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import test from 'node:test';
 import { EventEmitter } from 'node:events';
+import { PassThrough, Writable } from 'node:stream';
 import { DatabaseSync } from 'node:sqlite';
 import { createRuntimePackageManager } from './package-manager.mjs';
 import { createPiBridgePool } from './pi-bridge.mjs';
@@ -207,6 +208,144 @@ test('native CLI binding is explicit and becomes broken when the executable chan
   await writeFile(executablePath, 'changed-build');
   assert.equal(await manager.resolveBinding('claude'), null);
   assert.equal(store.getRuntimePackage(bound.package.runtimeBuildId).availability, 'broken');
+});
+
+test('managed CLI packages keep a stable fingerprint after staging is moved', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-managed-cli-package-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtimeId = 'claude';
+  const packageName = '@anthropic-ai/claude-agent-sdk';
+  const version = '2.1.220';
+  const catalogPath = path.join(root, 'catalog.json');
+  await writeFile(catalogPath, JSON.stringify({ schema: 1, runtimeId, versions: [{ version, packageVersion: '0.3.220' }] }));
+  const cliProvider = createCliRuntimeProvider({
+    runtimeId, commandName: 'claude', packageName,
+    managedRoot: path.join(root, 'managed'), stagingRoot: path.join(root, 'staging'), catalogPath,
+    resolveCommand: async () => '',
+    execFile: async (command, _args, options = {}) => {
+      if (command === 'npm') {
+        const cwd = options.cwd;
+        const binary = path.join(cwd, 'node_modules', '@anthropic-ai', `claude-agent-sdk-${process.platform}-${process.arch}`, 'claude');
+        await mkdir(path.dirname(binary), { recursive: true });
+        await mkdir(path.join(cwd, 'node_modules', '@anthropic-ai', 'claude-agent-sdk'), { recursive: true });
+        await writeFile(binary, 'managed-cli-build');
+        await writeFile(path.join(cwd, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'package.json'), JSON.stringify({ name: packageName }));
+        await writeFile(path.join(cwd, 'package-lock.json'), JSON.stringify({ packages: { [`node_modules/${packageName}`]: {} } }));
+        return { stdout: '' };
+      }
+      return { stdout: version };
+    },
+    npmCommand: 'npm',
+  });
+  const installed = await cliProvider.install(version);
+  assert.equal(installed.metadata.fingerprintScheme, 'runtime-executable-v2');
+  assert.match(installed.runtimeDir, /managed/);
+  const verified = await cliProvider.verify(installed);
+  assert.equal(verified.ok, true);
+  assert.equal(verified.version, version);
+  assert.equal(verified.fingerprint, installed.fingerprint);
+  await writeFile(installed.executablePath, 'changed-managed-cli-build');
+  assert.equal((await cliProvider.verify(installed)).ok, false);
+});
+
+test('managed Codex packages revalidate after staging is moved', async (t) => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-managed-codex-package-'));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  const runtimeId = 'codex';
+  const packageName = '@openai/codex';
+  const version = '0.146.0';
+  const catalogPath = path.join(root, 'catalog.json');
+  await writeFile(catalogPath, JSON.stringify({ schema: 1, runtimeId, versions: [{ version }] }));
+  const spawnProcess = () => {
+    const child = new EventEmitter();
+    const stdout = new PassThrough();
+    child.stdout = stdout;
+    child.stderr = new PassThrough();
+    child.stdin = new Writable({ write(_chunk, _encoding, callback) {
+      queueMicrotask(() => stdout.write(`${JSON.stringify({ id: 'frakio_probe', result: { protocolVersion: 1 } })}\n`));
+      callback();
+    } });
+    child.kill = () => {};
+    return child;
+  };
+  const cliProvider = createCliRuntimeProvider({
+    runtimeId, commandName: 'codex', packageName,
+    managedRoot: path.join(root, 'managed'), stagingRoot: path.join(root, 'staging'), catalogPath,
+    resolveCommand: async () => '', spawnProcess,
+    execFile: async (command, _args, options = {}) => {
+      if (command === 'npm') {
+        const cwd = options.cwd;
+        const binary = path.join(cwd, 'node_modules', '.bin', 'codex');
+        await mkdir(path.dirname(binary), { recursive: true });
+        await mkdir(path.join(cwd, 'node_modules', '@openai', 'codex'), { recursive: true });
+        await writeFile(binary, 'managed-codex-build');
+        await writeFile(path.join(cwd, 'node_modules', '@openai', 'codex', 'package.json'), JSON.stringify({ name: packageName }));
+        await writeFile(path.join(cwd, 'package-lock.json'), JSON.stringify({ packages: { [`node_modules/${packageName}`]: {} } }));
+        return { stdout: '' };
+      }
+      return { stdout: version };
+    },
+    npmCommand: 'npm',
+  });
+  const installed = await cliProvider.install(version);
+  const verified = await cliProvider.verify(installed);
+  assert.equal(verified.ok, true);
+  assert.equal(installed.metadata.fingerprintScheme, 'runtime-executable-v2');
+});
+
+test('legacy CLI fingerprints become unavailable without affecting Pi managed packages', async (t) => {
+  const { store } = await fixture();
+  t.after(() => store.close());
+  store.putRuntimePackage({
+    runtimeId: 'codex', runtimeVersion: '0.146.0', runtimeBuildId: 'codex-managed-legacy', runtimeDir: '/managed/codex', executablePath: '/managed/codex/codex', fingerprint: 'legacy-fingerprint', source: 'managed',
+    platform: process.platform, arch: process.arch, adapterProtocolVersion: 1, installationState: 'installed', verificationState: 'verified', availability: 'ready',
+  });
+  store.putRuntimePackage({
+    runtimeId: 'pi', runtimeVersion: '0.83.0', runtimeBuildId: 'pi-managed-current', runtimeDir: '/managed/pi', source: 'managed',
+    platform: process.platform, arch: process.arch, adapterProtocolVersion: 1, installationState: 'installed', verificationState: 'verified', availability: 'ready',
+  });
+  const manager = createRuntimePackageManager({ store, providers: new Map([['codex', provider()], ['pi', provider()]]) });
+  await manager.status('codex');
+  await manager.status('pi');
+  assert.equal(store.getRuntimePackage('codex-managed-legacy').verificationState, 'unverified');
+  assert.equal(store.getRuntimePackage('codex-managed-legacy').availability, 'unavailable');
+  assert.equal(store.getRuntimePackage('pi-managed-current').verificationState, 'verified');
+});
+
+test('failed activation marks the target broken and keeps the existing active binding', async (t) => {
+  const { store } = await fixture();
+  t.after(() => store.close());
+  store.putRuntimePackage({
+    runtimeId: 'codex', runtimeVersion: '0.142.3', runtimeBuildId: 'codex-native-active', runtimeDir: '/native', source: 'native',
+    platform: process.platform, arch: process.arch, adapterProtocolVersion: 1, installationState: 'installed', verificationState: 'verified', availability: 'ready',
+  });
+  store.putRuntimePackage({
+    runtimeId: 'codex', runtimeVersion: '0.146.0', runtimeBuildId: 'codex-managed-broken', runtimeDir: '/managed', source: 'managed',
+    platform: process.platform, arch: process.arch, adapterProtocolVersion: 1, installationState: 'installed', verificationState: 'verified', availability: 'ready',
+  });
+  store.putRuntimeActivation({ runtimeId: 'codex', activeBuildId: 'codex-native-active', previousBuildId: '', activationRevision: 'native-active' });
+  const manager = createRuntimePackageManager({ store, providers: new Map([['codex', { async verify(pkg) { return { ok: pkg.runtimeBuildId !== 'codex-managed-broken', error: '模拟验证失败' }; } }]]) });
+  await assert.rejects(() => manager.activate('codex', 'codex-managed-broken'), /模拟验证失败/);
+  assert.equal(store.getRuntimeActivation('codex').activeBuildId, 'codex-native-active');
+  assert.equal(store.getRuntimePackage('codex-managed-broken').availability, 'broken');
+  assert.equal(store.getRuntimePackage('codex-managed-broken').verificationState, 'incompatible');
+});
+
+test('reinstalling an inactive managed version replaces its stale Build record', async (t) => {
+  const { store } = await fixture();
+  t.after(() => store.close());
+  store.putRuntimePackage({
+    runtimeId: 'codex', runtimeVersion: '0.146.0', runtimeBuildId: 'codex-managed-legacy', runtimeDir: '/managed', source: 'managed', fingerprint: 'old',
+    platform: process.platform, arch: process.arch, adapterProtocolVersion: 1, installationState: 'installed', verificationState: 'unverified', availability: 'unavailable',
+  });
+  store.putRuntimeActivation({ runtimeId: 'codex', activeBuildId: '', previousBuildId: '', activationRevision: 'empty' });
+  const manager = createRuntimePackageManager({ store, providers: new Map([['codex', {
+    async install() { return { runtimeVersion: '0.146.0', runtimeBuildId: 'codex-managed-current', runtimeDir: '/managed', source: 'managed', fingerprint: 'new', platform: process.platform, arch: process.arch, adapterProtocolVersion: 1, installationState: 'installed', verificationState: 'verified', availability: 'ready', metadata: { fingerprintScheme: 'runtime-executable-v2' } }; },
+    async verify() { return { ok: true }; },
+  }]]) });
+  await manager.install('codex', '0.146.0');
+  assert.equal(store.getRuntimePackage('codex-managed-legacy'), undefined);
+  assert.equal(store.getRuntimePackage('codex-managed-current').verificationState, 'verified');
 });
 
 test('schema v7 package inventory migrates without collapsing same-version Build IDs', async (t) => {

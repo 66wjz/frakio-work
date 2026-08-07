@@ -667,7 +667,28 @@ try {
   assert.match(await page.locator('.managed-module-origin').innerText(), /来源：Iris/, '全局插件没有显示来源 Agent');
 
   await selectSettingsEntry('Agent 配置', 'Agent Profile');
-  const agentTabs = page.locator('.agent-tabs');
+  const agentCards = page.locator('.profile-grid .profile-card:not(.profile-card-add)');
+  assert.ok(await agentCards.count() > 0, 'Agent 配置页没有可打开的 Agent 卡片');
+  await agentCards.first().click();
+  const agentModal = page.locator('.agent-profile-modal');
+  assert.equal(await agentModal.count(), 1, '点击 Agent 卡片后没有打开详情弹窗');
+  assert.equal(await page.getByRole('dialog').count(), 1, '打开 Agent 详情后存在额外对话框');
+  assert.equal(await agentModal.getAttribute('role'), 'dialog', 'Agent 详情没有使用对话框语义');
+  assert.equal(await page.locator('.org-split-section > .agent-profile-detail').count(), 0, 'Agent 详情仍然在卡片网格下方展开');
+  const agentModalSurface = await agentModal.evaluate((element) => {
+    const styles = getComputedStyle(element);
+    return { background: styles.backgroundColor, border: styles.borderTopColor, blur: styles.backdropFilter };
+  });
+  assert.notEqual(agentModalSurface.background, 'rgba(0, 0, 0, 0)', 'Agent 详情弹窗背景仍然完全透明');
+  assert.notEqual(agentModalSurface.border, 'rgba(0, 0, 0, 0)', 'Agent 详情弹窗没有主题边框');
+  assert.equal(agentModalSurface.blur, 'none', 'Agent 详情弹窗不应使用会透出背景文字的自身模糊材质');
+  await agentModal.getByRole('button', { name: '关闭 Agent 详情' }).click();
+  assert.equal(await agentModal.count(), 0, '关闭按钮没有关闭 Agent 详情弹窗');
+  await agentCards.first().click();
+  await page.locator('.agent-profile-backdrop').click({ position: { x: 2, y: 2 } });
+  assert.equal(await agentModal.count(), 0, '点击遮罩没有关闭 Agent 详情弹窗');
+  await agentCards.first().click();
+  const agentTabs = agentModal.locator('.agent-tabs');
   assert.equal(await agentTabs.count(), 1, 'Agent 档案标签 Banner 不存在');
   const agentTabButtons = agentTabs.getByRole('button');
   assert.equal(await agentTabButtons.count(), 4, 'Agent 档案标签数量不正确');
@@ -687,18 +708,35 @@ try {
       inactiveColor: inactiveStyles?.color || '',
     };
   });
-  assert.match(agentTabAppearance.containerBackground, /^rgba\(255, 255, 255, 0\.0/, 'Agent 标签 Banner 仍使用浅色实底');
+  assert.doesNotMatch(agentTabAppearance.containerBackground, /^rgba\(255, 255, 255, (?:0\.[5-9]|1)/, 'Agent 标签 Banner 仍使用浅色实底');
+  assert.notEqual(agentTabAppearance.containerBackground, 'rgba(0, 0, 0, 0)', 'Agent 标签 Banner 背景完全透明');
   assert.notEqual(agentTabAppearance.containerBorder, 'rgb(255, 255, 255)', 'Agent 标签 Banner 仍使用纯白边框');
-  assert.equal(agentTabAppearance.containerShadow, 'none', 'Agent 标签 Banner 仍有浅色阴影');
-  assert.match(agentTabAppearance.selectedBackground, /^rgba\(255, 255, 255, 0\.0/, 'Agent 标签选中态仍是白色胶囊');
+  assert.match(agentTabAppearance.containerShadow, /inset/, 'Agent 标签 Banner 没有结构边线');
+  assert.doesNotMatch(agentTabAppearance.selectedBackground, /^rgba\(255, 255, 255, (?:0\.[5-9]|1)/, 'Agent 标签选中态仍是白色胶囊');
+  assert.notEqual(agentTabAppearance.selectedBackground, 'rgba(0, 0, 0, 0)', 'Agent 标签选中态背景完全透明');
   assert.notEqual(agentTabAppearance.selectedColor, agentTabAppearance.inactiveColor, 'Agent 标签选中态没有文字层级');
-  assert.equal(agentTabAppearance.selectedShadow, 'none', 'Agent 标签选中态仍有浅色投影');
+  assert.match(agentTabAppearance.selectedShadow, /inset/, 'Agent 标签选中态没有内嵌结构边线');
 
-  for (const label of ['笔记', '用户画像', '灵魂']) {
+  const agentOverview = agentModal.locator('.agent-profile-overview');
+  const agentOverviewInitial = await agentOverview.evaluate((element) => ({ top: element.getBoundingClientRect().top, height: element.getBoundingClientRect().height }));
+  const agentModalHeights = [];
+  for (const label of ['笔记', '用户画像', '灵魂', '内核']) {
     const tabButton = agentTabs.getByRole('button', { name: label, exact: true });
     await tabButton.click();
     assert.equal(await tabButton.getAttribute('class'), 'selected', `Agent 标签“${label}”没有切换选中态`);
+    agentModalHeights.push(await agentModal.evaluate((element) => {
+      const styles = getComputedStyle(element);
+      return { height: element.getBoundingClientRect().height, cssHeight: styles.height, maxHeight: styles.maxHeight };
+    }));
   }
+  const harnessGrid = agentModal.locator('.harness-choice-grid');
+  assert.equal(await harnessGrid.count(), 1, 'Agent 内核没有使用可视化选择区');
+  assert.equal(await harnessGrid.locator('.agent-runtime-card').count(), 4, 'Agent 内核选项不是四项图标卡片');
+  assert.equal(await harnessGrid.locator('select').count(), 0, 'Agent 内核仍使用下拉选择');
+  assert.ok(Math.max(...agentModalHeights.map((item) => item.height)) - Math.min(...agentModalHeights.map((item) => item.height)) <= 1, 'Agent 详情弹窗高度随标签内容变化');
+  assert.ok(agentModalHeights.every((item) => item.cssHeight !== 'auto' && item.maxHeight !== 'none'), 'Agent 详情弹窗没有固定视口高度约束');
+  const agentOverviewFinal = await agentOverview.evaluate((element) => ({ top: element.getBoundingClientRect().top, height: element.getBoundingClientRect().height }));
+  assert.ok(Math.abs(agentOverviewInitial.top - agentOverviewFinal.top) <= 1 && Math.abs(agentOverviewInitial.height - agentOverviewFinal.height) <= 1, '切换标签时 Agent 固定概览区发生位移');
   await page.keyboard.press('Shift+Tab');
   const focusedAgentTab = agentTabs.locator('button:focus-visible');
   assert.equal(await focusedAgentTab.count(), 1, '键盘导航没有聚焦 Agent 标签');
@@ -711,8 +749,28 @@ try {
 
   await page.setViewportSize({ width: 760, height: 900 });
   await assertNoHorizontalOverflow(page.locator('.settings-content'), '760px Agent 配置页横向溢出');
-  await assertNoHorizontalOverflow(page.locator('.agent-profile-detail'), '760px Agent 档案详情横向溢出');
+  await assertNoHorizontalOverflow(agentModal, '760px Agent 档案详情弹窗横向溢出');
+  const modalScroll = await agentModal.locator('.agent-profile-scroll').evaluate((element) => ({ overflowY: getComputedStyle(element).overflowY, maxHeight: getComputedStyle(element.parentElement).maxHeight }));
+  assert.equal(modalScroll.overflowY, 'auto', 'Agent 档案详情弹窗没有独立纵向滚动区');
+  assert.notEqual(modalScroll.maxHeight, 'none', 'Agent 档案详情弹窗没有视口高度约束');
+  await page.setViewportSize({ width: 390, height: 620 });
+  const compactAgentModal = await agentModal.evaluate((element) => ({ height: element.getBoundingClientRect().height, maxHeight: getComputedStyle(element).maxHeight }));
+  assert.ok(compactAgentModal.height <= 580.5, '移动视口下 Agent 详情弹窗没有按视口缩小');
+  assert.notEqual(compactAgentModal.maxHeight, 'none', '移动视口下 Agent 详情弹窗没有高度上限');
+  await agentModal.locator('input[type="file"]').setInputFiles({ name: 'avatar.png', mimeType: 'image/png', buffer: Buffer.from('avatar-fixture') });
+  const avatarCropModal = page.locator('.avatar-crop-modal');
+  await avatarCropModal.waitFor({ state: 'visible' });
+  const avatarCropLayout = await avatarCropModal.evaluate((element) => {
+    const footer = element.querySelector('.avatar-crop-footer');
+    return { bottom: element.getBoundingClientRect().bottom, footerBottom: footer?.getBoundingClientRect().bottom || 0, bodyOverflow: getComputedStyle(element.querySelector('.avatar-crop-body')).overflowY };
+  });
+  assert.ok(avatarCropLayout.bottom <= 620.5 && Math.abs(avatarCropLayout.bottom - avatarCropLayout.footerBottom) <= 1, '低高度视口下头像裁剪保存区没有固定在弹窗底部');
+  assert.equal(avatarCropLayout.bodyOverflow, 'auto', '头像裁剪画布区没有独立滚动');
+  await avatarCropModal.getByRole('button', { name: '取消' }).click();
+  assert.equal(await avatarCropModal.count(), 0, '取消没有关闭头像裁剪弹窗');
   await page.setViewportSize({ width: 1440, height: 900 });
+  await page.keyboard.press('Escape');
+  assert.equal(await agentModal.count(), 0, 'Escape 没有关闭 Agent 详情弹窗');
 
   await selectSettingsEntry('监控', '监控');
   const chartTokens = await page.locator('.app').evaluate((app) => {

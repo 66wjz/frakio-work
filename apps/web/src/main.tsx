@@ -50,9 +50,11 @@ import {
   canApplyPresentation,
   canApplyRunSnapshot,
   canApplyRuntimeCursor,
+  dedupeThreadMessages,
   mergeThreadWithPendingMessages,
   normalizeApprovalPresentation,
   normalizeClarificationPresentation,
+  resolveRunEventIdentity,
   shouldApplyRuntimeEvent,
 } from './run-ui-state.mjs';
 import {
@@ -347,6 +349,43 @@ function RuntimeLabel({ runtimeId, showName = true, className = '' }: { runtimeI
     {showName && <span>{visual.label}</span>}
   </span>;
 }
+
+const harnessChoices: Array<{ id: HarnessId; runtimeId: RuntimeId; name: string }> = [
+  { id: 'native', runtimeId: 'native', name: 'Frakio Native' },
+  { id: 'hermes', runtimeId: 'hermes', name: 'Hermes' },
+  { id: 'codex', runtimeId: 'codex', name: 'Codex' },
+  { id: 'claude', runtimeId: 'claude', name: 'Claude Code' },
+];
+
+function HarnessChoiceGrid({ value, onChange, disabled = false, unavailable = {} }: { value: HarnessId; onChange: (value: HarnessId) => void; disabled?: boolean; unavailable?: Partial<Record<HarnessId, boolean>> }) {
+  return <div className="agent-runtime-grid harness-choice-grid" role="radiogroup" aria-label="默认 Harness">
+    {harnessChoices.map((choice) => {
+      const isUnavailable = Boolean(unavailable[choice.id]);
+      const selected = value === choice.id;
+      return <button
+        type="button"
+        key={choice.id}
+        className={`agent-runtime-card ${selected ? 'selected' : ''} ${isUnavailable ? 'unavailable' : ''}`}
+        aria-pressed={selected}
+        aria-label={`${choice.name}${isUnavailable ? '（不可用）' : ''}`}
+        disabled={disabled || isUnavailable}
+        onClick={() => onChange(choice.id)}
+      >
+        <span className="agent-runtime-card-icon"><RuntimeLabel runtimeId={choice.runtimeId} showName={false} /></span>
+        <span className="agent-runtime-card-copy"><strong>{choice.name}</strong></span>
+        {selected && <span className="agent-runtime-check"><Check size={13} aria-hidden="true" /></span>}
+      </button>;
+    })}
+  </div>;
+}
+
+function effectiveRuntimeForAgentUi(agent: Agent | null | undefined, thread: Pick<Thread, 'agentRuntimeOverrides' | 'agentHarnessBindings'> | null | undefined, requested = ''): RuntimeId {
+  const binding = agent?.id ? thread?.agentHarnessBindings?.[agent.id] : undefined;
+  const explicitBinding = binding && ['user_override', 'explicit_migration', 'explicit'].includes(String(binding.source || '')) ? binding.harnessId : '';
+  const policyRuntime = agent?.runtimePolicy?.defaultHarnessId || agent?.runtimePolicy?.defaultRuntimeId || 'hermes';
+  const harness = requested || explicitBinding || thread?.agentRuntimeOverrides?.[agent?.id || ''] || policyRuntime;
+  return harness === 'pi' ? 'native' : harness as RuntimeId;
+}
 type MemoryLedgerEntry = {
   id: string;
   scope: 'user' | 'agent' | 'vault' | 'thread' | 'workspace';
@@ -474,7 +513,7 @@ type VaultSummary = {
   needsRefresh: boolean;
 };
 type WorkMessageArtifact = { id: string; name: string; kind?: string; path: string; relativePath?: string; size?: number };
-type ChatEvent = { id: string; agentId: string; agentName: string; role: string; content: string; attachments?: Attachment[]; context?: MessageContext; changeSetId?: string; changeSummary?: { fileCount: number; additions: number; deletions: number }; workArtifacts?: WorkMessageArtifact[]; workFinalWorkflowId?: string; memoryIds?: string[]; handoffs?: Array<{ routeId: string; targetAgentId: string; targetAgentName: string; status: 'pending' | 'starting' | 'running' | 'completed' | 'failed' | 'recorded'; error?: string }>; reasoning?: string; externalRunId?: string; turnId?: string; mentionDepth?: number; parentMessageId?: string; routeReason?: string; runtimeId?: string; runtimeName?: string; modelId?: string; profileRevision?: string; resumeStrategy?: 'native_resumed' | 'handoff_resumed' | 'new_session' | 'unsupported' | 'failed' | ''; permissionCoverage?: 'host_enforced' | 'native_enforced' | 'partial' | 'unobservable' | ''; appliedSkillCount?: number; contentType?: 'plan' | 'plan_feedback' | string; planId?: string; planRevision?: number; processingDurationMs?: number; feedback?: 'up' | 'down' | null; createdAt?: string };
+type ChatEvent = { id: string; agentId: string; agentName: string; role: string; content: string; attachments?: Attachment[]; context?: MessageContext; changeSetId?: string; changeSummary?: { fileCount: number; additions: number; deletions: number }; workArtifacts?: WorkMessageArtifact[]; workFinalWorkflowId?: string; memoryIds?: string[]; handoffs?: Array<{ routeId: string; targetAgentId: string; targetAgentName: string; reason?: string; objective?: string; handoffReason?: string; status: 'pending' | 'starting' | 'running' | 'completed' | 'failed' | 'recorded'; error?: string }>; handoff?: { sourceAgentId?: string; sourceAgentName?: string; targetAgentId?: string; objective?: string; handoffReason?: string; reason?: string; sourceMessageId?: string }; reasoning?: string; externalRunId?: string; turnId?: string; mentionDepth?: number; parentMessageId?: string; routeReason?: string; runtimeId?: string; runtimeName?: string; modelId?: string; profileRevision?: string; resumeStrategy?: 'native_resumed' | 'handoff_resumed' | 'new_session' | 'unsupported' | 'failed' | ''; permissionCoverage?: 'host_enforced' | 'native_enforced' | 'partial' | 'unobservable' | ''; appliedSkillCount?: number; contentType?: 'plan' | 'plan_feedback' | string; planId?: string; planRevision?: number; processingDurationMs?: number; feedback?: 'up' | 'down' | null; createdAt?: string };
 type RuntimeSessionSummary = { id: string; runtimeId: RuntimeId; agentId?: string; laneType: 'chat' | 'work_task'; laneId: string; lifecycleState: 'opening' | 'active' | 'parked' | 'restoring' | 'recovering' | 'stale' | 'closed' | 'failed'; nativeSessionId?: string; resumeStrategy?: string; lastError?: string };
 type AttachmentDraft = { localId: string; file: File; previewUrl: string; status: 'uploading' | 'ready' | 'error'; attachment?: Attachment; error?: string };
 const attachmentAcceptValue = [
@@ -536,7 +575,7 @@ type Thread = {
   agentModelOverrides?: AgentModelOverrides;
   agentRunOverrides?: AgentRunOverrides;
   agentRuntimeOverrides?: AgentRuntimeOverrides;
-  agentHarnessBindings?: Record<string, { harnessId: HarnessId; boundAt?: string; bindingRevision?: number }>;
+  agentHarnessBindings?: Record<string, { harnessId: HarnessId; boundAt?: string; bindingRevision?: number; source?: string }>;
   runtimeId?: RuntimeId;
   permissionMode: PermissionMode;
   updatedAt: string;
@@ -1432,7 +1471,10 @@ function App() {
   const liveRunPresentations = activeThread?.id
     ? Object.values(runPresentationsByThreadId[activeThread.id] || {}).filter((run) => {
       const persisted = (activeThread.messages || []).some((message) => message.externalRunId === run.hostRunId || message.externalRunId === run.activeRun?.runId);
-      return !persisted || !run.completed;
+      const hasKnownAgent = Boolean(run.target || agents.some((agent) => agent.id === run.agentId));
+      const activeHostRunId = activeRunUi?.activeRun?.hostRunId || activeRunUi?.activeRun?.runId || '';
+      const isRootRun = Boolean(activeHostRunId && run.hostRunId === activeHostRunId);
+      return (!persisted || !run.completed) && (hasKnownAgent || isRootRun);
     })
     : [];
   // Decisions are owned by the Run that requested them. A child Agent must
@@ -1477,13 +1519,25 @@ function App() {
   }
 
   function adoptThreadSnapshot(threadId: string, thread: Thread) {
-    const confirmedIds = new Set((thread.messages || []).map((message) => message.id));
+    const normalizedMessages = dedupeThreadMessages<ChatEvent>(thread.messages || []);
+    const normalizedThread = { ...thread, messages: normalizedMessages };
+    const confirmedIds = new Set((normalizedThread.messages || []).map((message) => message.id));
+    const persistedRunIds = new Set((normalizedThread.messages || []).map((message) => String(message.externalRunId || '')).filter(Boolean));
     for (const messageId of pendingMessageIds(threadId)) {
       if (confirmedIds.has(messageId)) confirmPendingMessage(threadId, messageId);
     }
     setActiveThread((current) => current?.id === threadId
-      ? mergeThreadWithPendingMessages(current, thread, pendingMessageIds(threadId))
+      ? mergeThreadWithPendingMessages(current, normalizedThread, pendingMessageIds(threadId))
       : current);
+    if (persistedRunIds.size) setRunPresentationsByThreadId((current) => {
+      const threadRuns = current[threadId] || {};
+      const nextRuns = Object.fromEntries(Object.entries(threadRuns).filter(([hostRunId, run]) => (
+        !persistedRunIds.has(hostRunId) && !persistedRunIds.has(String(run.activeRun?.runId || ''))
+      )));
+      return Object.keys(nextRuns).length === Object.keys(threadRuns).length
+        ? current
+        : { ...current, [threadId]: nextRuns };
+    });
   }
 
   function updateRunUi(threadId: string, update: Partial<RunUiState> | ((current: RunUiState) => RunUiState)) {
@@ -1694,11 +1748,12 @@ function App() {
         if (data.event === 'run.started') {
           const incomingHostRunId = String(data.hostRunId || data.runId || run.runId);
           const routedAgent = agents.find((agent) => agent.id === data.agentId) || null;
+          const fallbackAgent = routedAgent || agents.find((agent) => agent.id === run.agentId) || null;
           ensureRunPresentation(threadId, incomingHostRunId, {
             hostRunId: incomingHostRunId,
             turnId: String(data.turnId || run.turnId),
-            agentId: String(data.agentId || routedAgent?.id || ''),
-            agentName: String(data.agentName || routedAgent?.name || 'Agent'),
+            agentId: String(data.agentId || fallbackAgent?.id || ''),
+            agentName: String(data.agentName || fallbackAgent?.name || 'Agent'),
             activeRun: {
               runId: String(data.nativeRunId || data.runId || incomingHostRunId),
               hostRunId: incomingHostRunId,
@@ -1706,7 +1761,7 @@ function App() {
               threadId,
               turnId: String(data.turnId || run.turnId),
             },
-            target: routedAgent ? { kind: 'agent', agent: routedAgent } : null,
+            target: fallbackAgent ? { kind: 'agent', agent: fallbackAgent } : null,
             isRunning: true,
             startPending: false,
             startedAt: Date.now(),
@@ -2212,8 +2267,8 @@ function App() {
   const launchWelcomeAvatarUrl = userProfile.avatarUrl || launchUserAvatarSnapshot || '';
   const activeComposerAgentId = activeThread?.activeAgentId || activeThread?.collaboration?.activeAgentId || activeThread?.defaultAgentId || activeThread?.primaryAgentId || globalDefaultAgentId;
   const activeComposerAgent = agents.find((agent) => agent.id === activeComposerAgentId) || agents[0] || null;
-  const activeComposerRuntimeId = (activeThread?.agentRuntimeOverrides?.[activeComposerAgent?.id || ''] || activeComposerAgent?.runtimePolicy?.defaultRuntimeId || 'hermes') as RuntimeId;
-  const newChatRuntimeId = (newChatRuntimeOverride || newChatAgent?.runtimePolicy?.defaultRuntimeId || 'hermes') as RuntimeId;
+  const activeComposerRuntimeId = effectiveRuntimeForAgentUi(activeComposerAgent, activeThread);
+  const newChatRuntimeId = newChatRuntimeOverride || effectiveRuntimeForAgentUi(newChatAgent, null);
   const localProfilesForComposer = hermesRuntime?.profiles?.length ? hermesRuntime.profiles : hermesBootstrap?.profiles || hermesStatus?.profiles || [];
   const newChatProfileName = resolveHermesProfileNameForAgent(newChatAgent, localProfilesForComposer);
   const activeComposerProfileName = resolveHermesProfileNameForAgent(activeComposerAgent, localProfilesForComposer);
@@ -4042,7 +4097,9 @@ function App() {
     const clientMessageId = options.clientMessageId || `client-message-${startedAt}`;
     const userDraftMessage: ChatEvent = { id: clientMessageId, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments, ...(hasMessageContext ? { context: messageContext } : {}) };
     const targetAgent = target?.kind === 'agent' ? target.agent : activeComposerAgent;
-    const runtimeId = targetAgent?.id === activeComposerAgent?.id ? activeComposerRuntimeId : (targetAgent?.runtimePolicy?.defaultRuntimeId || 'hermes');
+    const runtimeId = targetAgent?.id === activeComposerAgent?.id
+      ? activeComposerRuntimeId
+      : effectiveRuntimeForAgentUi(targetAgent, activeThread);
     if (targetAgent && ['codex', 'claude'].includes(runtimeId)) {
       await requestJson('/api/runtime-preflight', {
         method: 'POST',
@@ -4129,8 +4186,32 @@ function App() {
     }
     const turnId = String(created.turnId || `turn-${startedAt}`);
     const subscriptionKey = runSubscriptionKey(threadId, turnId, String(created.hostRunId || created.runId || ''));
-    const run = { runId: created.runId, hostRunId: created.hostRunId, sessionId: created.sessionId, threadId, turnId };
-    updateRunUi(threadId, { activeRun: run });
+    const acceptedIdentity = resolveRunEventIdentity(created, {
+      runId: created.runId,
+      hostRunId: created.runId,
+      agentId: targetAgent?.id || '',
+      agentName: targetAgent?.name || '',
+      runtimeId,
+    });
+    const acceptedAgent = agents.find((agent) => agent.id === acceptedIdentity.agentId) || targetAgent || null;
+    const acceptedTarget: ChatRunTarget | null = acceptedAgent ? { kind: 'agent', agent: acceptedAgent } : null;
+    const run = { runId: acceptedIdentity.runId, hostRunId: acceptedIdentity.hostRunId, sessionId: created.sessionId, threadId, turnId, agentId: acceptedIdentity.agentId };
+    const acceptedPresentation = {
+      activeRun: run,
+      target: acceptedTarget,
+      agentId: acceptedIdentity.agentId,
+      agentName: acceptedIdentity.agentName || acceptedAgent?.name || '',
+      turnId,
+      hostRunId: acceptedIdentity.hostRunId,
+      hideStatus: false,
+      isRunning: true,
+      startPending: false,
+      startedAt,
+      presentationPhase: 'thinking' as const,
+      completed: false,
+    };
+    ensureRunPresentation(threadId, acceptedIdentity.hostRunId, acceptedPresentation);
+    updateRunUi(threadId, acceptedPresentation);
     await new Promise<void>((resolve, reject) => {
       liveRunSubscriptionKeysRef.current.add(subscriptionKey);
       clearRecoveredRunSubscription(subscriptionKey);
@@ -4144,6 +4225,7 @@ function App() {
       let finalizationTimer: number | null = null;
       let streamedDraft = '';
       let activeStreamRunId = run.runId;
+      const pendingRunDeltas = new Map<string, { text: string; runtimeCursor: number }>();
       const finish = (error?: Error) => {
         if (settled) return;
         settled = true;
@@ -4193,16 +4275,23 @@ function App() {
         if (terminalReceived) return;
         if (!shouldApplyRuntimeEvent(liveEventKeys, data)) return;
         if (data.event === 'run.started') {
-          const incomingRunId = String(data.runId || activeStreamRunId);
-          const incomingHostRunId = String(data.hostRunId || (incomingRunId === activeStreamRunId ? run.hostRunId : incomingRunId));
+          const rawIncomingRunId = String(data.runId || activeStreamRunId);
+          const rootIdentityFallback = rawIncomingRunId === activeStreamRunId;
+          const eventIdentity = resolveRunEventIdentity(data, {
+            runId: rawIncomingRunId,
+            hostRunId: rootIdentityFallback ? run.hostRunId : rawIncomingRunId,
+            agentId: rootIdentityFallback ? acceptedIdentity.agentId : '',
+            agentName: rootIdentityFallback ? acceptedIdentity.agentName : '',
+            runtimeId: acceptedIdentity.runtimeId,
+          });
+          const incomingRunId = eventIdentity.runId;
+          const incomingHostRunId = eventIdentity.hostRunId;
           const isRootRun = incomingRunId === activeStreamRunId;
-          if (isRootRun) {
-            activeStreamRunId = incomingRunId;
-            streamedDraft = '';
-            lastRuntimeCursor = 0;
-          }
-          const routedAgent = agents.find((agent) => agent.id === data.agentId);
-          const routedTarget: ChatRunTarget | null = routedAgent ? { kind: 'agent', agent: routedAgent } : null;
+          const routedAgent = agents.find((agent) => agent.id === eventIdentity.agentId);
+          const fallbackAgent = routedAgent || (isRootRun ? acceptedAgent : null);
+          const routedTarget: ChatRunTarget | null = fallbackAgent ? { kind: 'agent', agent: fallbackAgent } : null;
+          const pending = pendingRunDeltas.get(incomingHostRunId);
+          pendingRunDeltas.delete(incomingHostRunId);
           const identity = {
             activeRun: {
               runId: incomingRunId,
@@ -4212,12 +4301,10 @@ function App() {
               turnId,
             },
             target: routedTarget,
-            agentId: String(data.agentId || routedAgent?.id || ''),
-            agentName: String(data.agentName || routedAgent?.name || 'Agent'),
+            agentId: eventIdentity.agentId || fallbackAgent?.id || '',
+            agentName: eventIdentity.agentName || fallbackAgent?.name || '',
             turnId,
             hostRunId: incomingHostRunId,
-            draft: '',
-            activityGroups: [],
             hideStatus: false,
             isRunning: true,
             startPending: false,
@@ -4226,7 +4313,13 @@ function App() {
             completed: false,
           };
           ensureRunPresentation(threadId, incomingHostRunId, identity);
-          if (isRootRun) updateRunUi(threadId, identity);
+          if (pending?.text) updateRunPresentation(threadId, incomingHostRunId, (current) => ({
+            ...current,
+            draft: current.draft + pending.text,
+            lastRuntimeCursor: Math.max(current.lastRuntimeCursor, pending.runtimeCursor),
+            presentationPhase: 'responding',
+          }));
+          if (isRootRun) updateRunUi(threadId, (current) => ({ ...current, ...identity }));
           return;
         }
         if (data.event === 'context.compaction.started') {
@@ -4261,9 +4354,24 @@ function App() {
         }
         if (data.event === 'message.delta') {
           const delta = String(data.delta || '');
-          const incomingRunId = String(data.runId || activeStreamRunId);
-          const incomingHostRunId = String(data.hostRunId || (incomingRunId === activeStreamRunId ? run.hostRunId : incomingRunId));
+          const rawIncomingRunId = String(data.runId || activeStreamRunId);
+          const rootIdentityFallback = rawIncomingRunId === activeStreamRunId;
+          const eventIdentity = resolveRunEventIdentity(data, {
+            runId: rawIncomingRunId,
+            hostRunId: rootIdentityFallback ? run.hostRunId : rawIncomingRunId,
+            agentId: rootIdentityFallback ? acceptedIdentity.agentId : '',
+            agentName: rootIdentityFallback ? acceptedIdentity.agentName : '',
+            runtimeId: acceptedIdentity.runtimeId,
+          });
+          const incomingRunId = eventIdentity.runId;
+          const incomingHostRunId = eventIdentity.hostRunId;
           const runtimeCursor = Math.max(0, Number(data.runtimeCursor || 0) || 0);
+          const deltaAgent = agents.find((agent) => agent.id === eventIdentity.agentId) || (incomingRunId === activeStreamRunId ? acceptedAgent : null);
+          if (!deltaAgent && incomingRunId !== activeStreamRunId) {
+            const pending = pendingRunDeltas.get(incomingHostRunId) || { text: '', runtimeCursor: 0 };
+            pendingRunDeltas.set(incomingHostRunId, { text: pending.text + delta, runtimeCursor: Math.max(pending.runtimeCursor, runtimeCursor) });
+            return;
+          }
           if (incomingRunId === activeStreamRunId) {
             if (runtimeCursor && runtimeCursor <= lastRuntimeCursor) return;
             if (runtimeCursor) lastRuntimeCursor = runtimeCursor;
@@ -4279,6 +4387,9 @@ function App() {
             if (runtimeCursor && runtimeCursor <= current.lastRuntimeCursor) return current;
             return {
               ...current,
+              target: current.target || (deltaAgent ? { kind: 'agent', agent: deltaAgent } : null),
+              agentId: current.agentId || eventIdentity.agentId || deltaAgent?.id || '',
+              agentName: current.agentName || eventIdentity.agentName || deltaAgent?.name || '',
               draft: current.draft + delta,
               lastRuntimeCursor: Math.max(current.lastRuntimeCursor, runtimeCursor),
               isRunning: true,
@@ -4432,14 +4543,10 @@ function App() {
           })), presentationPhase: nextRunPresentationPhase(current.presentationPhase, data.event) }));
           if (data.thread) {
             const threadFromServer = data.thread as Thread;
-            const hasAssistantResult = threadFromServer.messages.some((message) => (
-              message.agentId !== 'user'
-              && message.agentId !== 'system'
-              && (message.externalRunId === completedRunId || message.content.trim() === String(data.output || '').trim())
-              && message.content.trim()
-            ));
-            const completedDraft = completedRunId === activeStreamRunId ? streamedDraft : '';
-            const nextThread = appendMissingRunMessages(threadFromServer, completedRunId, hasAssistantResult ? '' : completedDraft);
+            // A successful terminal event is authoritative only after the
+            // server has persisted its message. Do not create a second local
+            // final message from the streamed draft here.
+            const nextThread = appendMissingRunMessages(threadFromServer, completedRunId, '');
             completedThread = nextThread;
             adoptThreadSnapshot(threadId, nextThread);
             const group = (threadFromServer as any).activeRunGroup;
@@ -5432,7 +5539,8 @@ function App() {
   async function updateThreadAgentRuntimeOverride(agentId: string, runtimeId: RuntimeId) {
     if (!activeThread || !agentId) return;
     const next = { ...(activeThread.agentRuntimeOverrides || {}) };
-    const defaultRuntimeId = agents.find((agent) => agent.id === agentId)?.runtimePolicy?.defaultRuntimeId || 'hermes';
+    const targetAgent = agents.find((agent) => agent.id === agentId);
+    const defaultRuntimeId = effectiveRuntimeForAgentUi(targetAgent, null);
     if (runtimeId && runtimeId !== defaultRuntimeId) next[agentId] = runtimeId;
     else delete next[agentId];
     const response = await fetch(`/api/threads/${activeThread.id}/agents/${agentId}/runtime-switch`, {
@@ -5442,7 +5550,11 @@ function App() {
     });
     const data = await response.json().catch(() => ({}));
     if (!response.ok) throw new Error(data.error || '运行时切换失败');
-    setActiveThread((current) => current ? { ...current, runtimeId, agentRuntimeOverrides: next } : current);
+    setActiveThread((current) => current ? {
+      ...current,
+      agentRuntimeOverrides: next,
+      agentHarnessBindings: data.thread?.agentHarnessBindings || current.agentHarnessBindings,
+    } : current);
     await refreshLeftRail();
     return data as { message?: string; resumeCandidate?: boolean };
   }
@@ -6581,6 +6693,7 @@ function App() {
                           {message.modelId && <span title={message.modelId}>{message.modelId}</span>}
                           {message.resumeStrategy === 'native_resumed' && <span title="已恢复该 Agent 在这套运行时中的原生 Session">原生续接</span>}
                           {message.resumeStrategy === 'handoff_resumed' && <span title="原生 Session 无法恢复，已通过 Frakio 交接包继续">交接续接</span>}
+                          {message.routeReason === 'structured_handoff' && message.handoff?.objective && <span title={message.handoff.objective}>{`${message.handoff.sourceAgentName || message.handoff.sourceAgentId || 'Agent'} 交办`}</span>}
                           {message.permissionCoverage === 'partial' && <span title="该运行时只暴露了部分可裁决操作">部分权限覆盖</span>}
                           {Boolean(message.appliedSkillCount) && <span>{message.appliedSkillCount} 个 Skill 已生效</span>}
                         </div>}
@@ -6648,7 +6761,9 @@ function App() {
                 {liveRunPresentations.length > 0 ? liveRunPresentations.map((presentation) => (
                   <ChatRunStatus
                     key={`run:${presentation.hostRunId}`}
-                    target={presentation.target || (agents.find((agent) => agent.id === presentation.agentId) ? { kind: 'agent', agent: agents.find((agent) => agent.id === presentation.agentId)! } : null)}
+                    target={presentation.target
+                      || (agents.find((agent) => agent.id === presentation.agentId) ? { kind: 'agent', agent: agents.find((agent) => agent.id === presentation.agentId)! } : null)
+                      || (presentation.hostRunId === (activeRunUi?.activeRun?.hostRunId || activeRunUi?.activeRun?.runId) ? runTarget : null)}
                     startedAt={presentation.startedAt || runStartedAt}
                     tick={runTick}
                     draft={presentation.draft}
@@ -8186,7 +8301,6 @@ function RuntimeSwitcher({ thread, activeAgent, agents = [], currentRuntimeId: r
   const harnessForAgent = (agent: Agent): RuntimeId => {
     const bound = thread?.agentHarnessBindings?.[agent.id]?.harnessId
       || thread?.agentRuntimeOverrides?.[agent.id]
-      || thread?.runtimeId
       || (agent.id === activeAgent?.id ? runtimeIdOverride : '')
       || agent.runtimePolicy?.defaultHarnessId
       || agent.runtimePolicy?.defaultRuntimeId
@@ -11577,7 +11691,7 @@ function AvatarCropModal({ file, title, saving, onCancel, onSave }: { file: File
 
   return (
     <div className="modal-backdrop nested" onClick={onCancel}>
-      <div className="modal avatar-crop-modal" onClick={(event) => event.stopPropagation()}>
+      <div className="modal avatar-crop-modal" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}>
         <div className="modal-head">
           <div><h2>{title}</h2><p>拖动位置，放大后保存为圆形安全区。</p></div>
           <button className="icon-btn" onClick={onCancel} aria-label="关闭"><X size={18} /></button>
@@ -11606,10 +11720,10 @@ function AvatarCropModal({ file, title, saving, onCancel, onSave }: { file: File
               window.requestAnimationFrame(() => setOffset((current) => clampOffset(current)));
             }} />
           </label>
-          <div className="modal-actions">
-            <button className="secondary-btn" onClick={onCancel} disabled={saving}>取消</button>
-            <button className="send-btn" onClick={saveCroppedAvatar} disabled={saving}>{saving ? '保存中' : '保存头像'}</button>
-          </div>
+        </div>
+        <div className="avatar-crop-footer">
+          <button className="secondary-btn" onClick={onCancel} disabled={saving}>取消</button>
+          <button className="send-btn" onClick={saveCroppedAvatar} disabled={saving}>{saving ? '保存中' : '保存头像'}</button>
         </div>
       </div>
     </div>
@@ -12044,6 +12158,7 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
   const [discoveryCandidates, setDiscoveryCandidates] = useState<Record<string, RuntimeDiscoveryCandidate[]>>({});
   const [expandedRuntimeId, setExpandedRuntimeId] = useState<string>('');
   const [runtimeBusy, setRuntimeBusy] = useState('');
+  const [runtimeActivity, setRuntimeActivity] = useState('');
   const [checkingIds, setCheckingIds] = useState<Set<string>>(() => new Set());
   const [error, setError] = useState('');
   const [gatewayRepair, setGatewayRepair] = useState<HermesGatewayRepair | null>(null);
@@ -12133,12 +12248,16 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
   };
   const installRuntime = async (runtimeId: string, version: string) => {
     setRuntimeBusy(`install:${runtimeId}`);
+    setExpandedRuntimeId(runtimeId);
+    setRuntimeActivity(`正在下载并验证 ${runtimeLabels[runtimeId] || runtimeId} ${version}，请勿关闭 Frakio Work。`);
     setError('');
     try {
       await requestJson(`/api/runtime-packages/${runtimeId}/install`, { method: 'POST', body: JSON.stringify({ version }) });
       await refreshRuntimePackage(runtimeId);
+      setRuntimeActivity(`${runtimeLabels[runtimeId] || runtimeId} ${version} 已安装，可在安装来源中启用。`);
     } catch (actionError) {
       setError(actionError instanceof Error ? actionError.message : 'Runtime 安装失败。');
+      setRuntimeActivity('');
     } finally {
       setRuntimeBusy('');
     }
@@ -12208,6 +12327,7 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
           const installation = runtime.installation;
           const ready = installation?.status === 'ready';
           const checking = checkingIds.has(runtime.id);
+          const installing = runtimeBusy === `install:${runtime.id}`;
           const expanded = expandedRuntimeId === runtime.id;
           const description = runtime.id === 'pi'
             ? '独立版本的 Pi Worker；使用 Frakio Model Center，并由 Runtime Platform 固定 Session 版本。'
@@ -12227,16 +12347,20 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
           const packageCount = packageStatus?.packages.length || 0;
           const modelRouteReady = Boolean(catalog?.usableModelCount);
           const activePackage = packageStatus?.packages.find((pkg) => pkg.runtimeBuildId === packageStatus.activeBinding?.runtimeBuildId);
+          const activePackageUsable = activePackage?.verificationState === 'verified' && activePackage?.availability === 'ready';
           const realTurnVerified = Boolean(activePackage?.verificationReceipt?.realTurnVerified);
-          const state = checking
+          const state = installing
+            ? '安装中'
+            : checking
             ? '验证中'
             : !runtime.capabilitySnapshot ? '尚未验证'
-              : ready && modelRouteReady ? '模型链路可用'
+              : activePackage && !activePackageUsable ? activePackage.verificationState === 'unverified' ? '需要重新安装' : '验证失败'
+                : ready && modelRouteReady ? '模型链路可用'
                 : ready ? 'CLI 已连接'
                 : installation?.status === 'missing' ? '未安装'
                   : installation?.status === 'error' ? '异常' : installation?.status || '尚未验证';
-          const stateTone = ready && modelRouteReady && !checking ? 'ready' : installation?.status === 'missing' ? 'neutral' : 'warning';
-          const primaryLabel = checking ? '验证中' : installation?.status === 'missing' && compatibleRelease ? '安装' : ready ? '重新验证' : '查看问题';
+          const stateTone = installing || activePackage && !activePackageUsable ? 'warning' : ready && modelRouteReady && !checking ? 'ready' : installation?.status === 'missing' ? 'neutral' : 'warning';
+          const primaryLabel = installing ? '安装中' : checking ? '验证中' : installation?.status === 'missing' && compatibleRelease ? '安装' : ready ? '重新验证' : '查看问题';
           const runPrimaryAction = () => {
             if (installation?.status === 'missing' && compatibleRelease) {
               void installRuntime(runtime.id, compatibleRelease.version);
@@ -12278,11 +12402,15 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
               </div>
             </div>
             {expanded && <div className="runtime-center-detail" id={`runtime-detail-${runtime.id}`}>
+              {installing && <section className="runtime-install-progress" aria-live="polite">
+                <LoaderCircle className="spin" size={18} aria-hidden="true" />
+                <div><strong>正在安装 {runtimeLabels[runtime.id] || runtime.name} {compatibleRelease?.version || ''}</strong><small>正在下载托管 Runtime 并验证可执行文件。完成后可在下方启用。</small></div>
+              </section>}
               <section><span>链路状态</span><strong>{state}</strong><small>{ready ? `二进制可用 · Adapter 可用 · ${modelRouteReady ? '模型路由可用' : '尚无可用模型路由'} · ${realTurnVerified ? `真实对话已验证${activePackage?.verificationReceipt?.realTurnVerifiedAt ? ` ${formatTime(String(activePackage.verificationReceipt.realTurnVerifiedAt))}` : ''}` : '真实对话待验证'}` : installation?.detail || '请完成验证或安装后再使用。'}</small></section>
               <section><span>安装来源</span><div className="runtime-source-list">
                 {packageStatus?.packages.map((pkg) => <div className="runtime-source-card" key={pkg.runtimeBuildId}>
                   <div><strong>{pkg.source === 'native' ? '系统安装' : pkg.source === 'bundled' ? '应用内置' : '托管安装'} {pkg.runtimeVersion}</strong><small title={pkg.executablePath || pkg.runtimeDir}>{pkg.executablePath || pkg.runtimeDir}</small></div>
-                  <div className="runtime-source-actions"><em>{packageStatus.activeBinding?.runtimeBuildId === pkg.runtimeBuildId ? '正在使用' : pkg.availability === 'ready' ? '可用' : '不可用'}</em>{packageStatus.activeBinding?.runtimeBuildId !== pkg.runtimeBuildId && <button className="secondary-btn compact quiet" disabled={Boolean(runtimeBusy)} onClick={() => void activateRuntime(runtime.id, pkg.runtimeBuildId)}>启用</button>}<AppMenu modal={false}><AppMenuTrigger asChild><button className="icon-btn small" aria-label={`${pkg.runtimeVersion} 更多操作`}><MoreHorizontal size={15} /></button></AppMenuTrigger><AppMenuContent align="end">{pkg.source === 'native' && <AppMenuItem onSelect={() => void unbindRuntime(runtime.id, pkg.runtimeBuildId)} disabled={Boolean(runtimeBusy)}>解除绑定</AppMenuItem>}{pkg.source === 'managed' && <AppMenuItem variant="destructive" onSelect={() => void deleteManagedRuntime(runtime.id, pkg.runtimeVersion)} disabled={Boolean(runtimeBusy) || packageStatus.activeBinding?.runtimeBuildId === pkg.runtimeBuildId || packageStatus.previousBinding?.runtimeBuildId === pkg.runtimeBuildId}><Trash2 size={15} />删除</AppMenuItem>}</AppMenuContent></AppMenu></div>
+                  <div className="runtime-source-actions"><em>{packageStatus.activeBinding?.runtimeBuildId === pkg.runtimeBuildId ? '正在使用' : pkg.verificationState === 'unverified' ? '需要重新安装' : pkg.verificationState !== 'verified' || pkg.availability !== 'ready' ? '不可用' : '可用'}</em>{packageStatus.activeBinding?.runtimeBuildId !== pkg.runtimeBuildId && pkg.verificationState === 'verified' && pkg.availability === 'ready' && <button className="secondary-btn compact quiet" disabled={Boolean(runtimeBusy)} onClick={() => void activateRuntime(runtime.id, pkg.runtimeBuildId)}>启用</button>}<AppMenu modal={false}><AppMenuTrigger asChild><button className="icon-btn small" aria-label={`${pkg.runtimeVersion} 更多操作`}><MoreHorizontal size={15} /></button></AppMenuTrigger><AppMenuContent align="end">{pkg.source === 'native' && <AppMenuItem onSelect={() => void unbindRuntime(runtime.id, pkg.runtimeBuildId)} disabled={Boolean(runtimeBusy)}>解除绑定</AppMenuItem>}{pkg.source === 'managed' && <AppMenuItem variant="destructive" onSelect={() => void deleteManagedRuntime(runtime.id, pkg.runtimeVersion)} disabled={Boolean(runtimeBusy) || packageStatus.activeBinding?.runtimeBuildId === pkg.runtimeBuildId || packageStatus.previousBinding?.runtimeBuildId === pkg.runtimeBuildId}><Trash2 size={15} />删除</AppMenuItem>}</AppMenuContent></AppMenu></div>
                 </div>)}
                 {!packageStatus?.packages.length && <small className="runtime-detail-empty">尚未发现已绑定的安装来源。</small>}
               </div></section>
@@ -12303,7 +12431,7 @@ function RuntimeCenterPage({ onOpenHermes }: { onOpenHermes: () => void }) {
   );
   return (
     <>
-      <div className="settings-head"><div><h2>Runtime Center</h2><p className="settings-description">{runtimeSummary}</p></div><button className="secondary-btn" onClick={verifyAll} disabled={checkingIds.size > 0}>{checkingIds.size > 0 ? '验证中' : '重新验证全部'}</button></div>
+      <div className="settings-head"><div><h2>Runtime Center</h2><p className="settings-description">{runtimeActivity || runtimeSummary}</p></div><button className="secondary-btn" onClick={verifyAll} disabled={checkingIds.size > 0 || Boolean(runtimeBusy)}>{checkingIds.size > 0 ? '验证中' : '重新验证全部'}</button></div>
       {renderGroup('core', 'Runtime 内核')}
       {renderGroup('channel', 'CLI 内核')}
       <SettingsInlineNote>这里是全部执行运行时的唯一总入口。切换运行时会创建独立原生 Session；Agent 人格、Frakio 对话、Memory 和 Workspace Vault 保持不变。</SettingsInlineNote>
@@ -14992,7 +15120,43 @@ function OrgPage({ agents, models, selectedOrgAgentId, onSelectAgent, onProfiles
   defaultAgentId: string;
   onUpdateDefaultAgent: (agentId: string) => void;
 }) {
-  const selectedAgent = agents.find((agent) => agent.id === selectedOrgAgentId) || agents[0] || null;
+  const [openAgentId, setOpenAgentId] = useState<string | null>(null);
+  const [detailDirty, setDetailDirty] = useState(false);
+  const openAgent = agents.find((agent) => agent.id === openAgentId) || null;
+
+  useEffect(() => {
+    if (openAgentId && !openAgent) {
+      setOpenAgentId(null);
+      setDetailDirty(false);
+    }
+  }, [openAgentId, openAgent]);
+
+  useEffect(() => {
+    if (!openAgentId) return;
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') closeDetail();
+    };
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [openAgentId, detailDirty, profileEditor]);
+
+  function closeDetail() {
+    const profileDirty = profileEditor.state.target?.agentId === openAgentId && profileEditor.dirty;
+    if (profileDirty && !profileEditor.close()) return;
+    if (detailDirty && !window.confirm('当前编辑内容还没有保存，确定关闭吗？')) return;
+    setOpenAgentId(null);
+    setDetailDirty(false);
+  }
+
+  function openDetail(agentId: string) {
+    const profileDirty = profileEditor.state.target?.agentId === openAgentId && profileEditor.dirty;
+    if (openAgentId && openAgentId !== agentId && profileDirty && !profileEditor.close()) return;
+    if (openAgentId && openAgentId !== agentId && detailDirty && !window.confirm('当前编辑内容还没有保存，确定切换 Agent 吗？')) return;
+    onSelectAgent(agentId);
+    setDetailDirty(false);
+    setOpenAgentId(agentId);
+  }
+
   return (
     <section className="org-page">
       <div className="org-split-section">
@@ -15001,10 +15165,18 @@ function OrgPage({ agents, models, selectedOrgAgentId, onSelectAgent, onProfiles
           {agents.length > 0 && <label className="org-default-agent">默认 Agent<select value={defaultAgentId} onChange={(event) => onUpdateDefaultAgent(event.target.value)}>{agents.map((agent) => <option key={agent.id} value={agent.id}>{agent.name}</option>)}</select></label>}
         </div>
         <div className="profile-grid">
-          {agents.map((agent) => <AgentProfileCard agent={agent} models={models} selected={selectedOrgAgentId === agent.id} key={agent.id} onSelect={onSelectAgent} />)}
+          {agents.map((agent) => <AgentProfileCard agent={agent} models={models} selected={selectedOrgAgentId === agent.id} key={agent.id} onSelect={openDetail} />)}
           <button className="profile-card profile-card-add" onClick={onCreate}><span className="profile-add-icon"><Plus size={22} /></span><strong>新建 Agent</strong><small>创建一个新的团队成员</small></button>
         </div>
-        {selectedAgent && <AgentProfileDetail agent={selectedAgent} models={models} canDelete={agents.length > 1} onChanged={onProfilesChanged} onUpdateAgent={onUpdateAgent} onDelete={() => onDeleteAgent(selectedAgent.id)} profileEditor={profileEditor} />}
+        {openAgent && createPortal(<div className="modal-backdrop agent-profile-backdrop" onMouseDown={(event) => { if (event.target === event.currentTarget) closeDetail(); }}>
+          <div className="modal agent-profile-modal" role="dialog" aria-modal="true" aria-labelledby="agent-profile-modal-title" onMouseDown={(event) => event.stopPropagation()}>
+            <div className="modal-head">
+              <div><h2 id="agent-profile-modal-title">Agent Profile</h2><p>{openAgent.name} · 配置详情</p></div>
+              <button className="icon-btn" onClick={closeDetail} aria-label="关闭 Agent 详情"><X size={18} /></button>
+            </div>
+            <AgentProfileDetail agent={openAgent} models={models} canDelete={agents.length > 1} onChanged={onProfilesChanged} onUpdateAgent={onUpdateAgent} onDelete={() => onDeleteAgent(openAgent.id)} profileEditor={profileEditor} onDirtyChange={setDetailDirty} />
+          </div>
+        </div>, document.body)}
       </div>
     </section>
   );
@@ -15056,23 +15228,19 @@ function AgentRuntimePolicyPanel({ agent, onUpdateAgent }: { agent: Agent; onUpd
       setSaving(false);
     }
   }
+  const selectedHarness = (policy.defaultHarnessId || (policy.defaultRuntimeId === 'pi' ? 'native' : policy.defaultRuntimeId)) as HarnessId;
+  const unavailable = Object.fromEntries(harnessChoices.filter((choice) => choice.id !== 'native').map((choice) => [choice.id, !isRuntimeReady(runtimes.find((item) => item.id === choice.runtimeId))])) as Partial<Record<HarnessId, boolean>>;
   return <section className="agent-runtime-policy" aria-label="默认 Harness">
     <div className="agent-runtime-policy-head"><div><strong>默认 Harness</strong><small>只影响之后创建的会话。已有会话继续使用原来的 Harness。</small></div>{saving && <LoaderCircle className="spin" size={15} aria-label="正在保存" />}</div>
-    <label className="agent-runtime-default">默认 Harness
-      <select value={policy.defaultHarnessId || (policy.defaultRuntimeId === 'pi' ? 'native' : policy.defaultRuntimeId)} disabled={saving} onChange={(event) => {
-        const defaultHarnessId = event.target.value as HarnessId;
+    <HarnessChoiceGrid value={selectedHarness} disabled={saving} unavailable={unavailable} onChange={(defaultHarnessId) => {
         const defaultRuntimeId = defaultHarnessId === 'native' ? 'pi' : defaultHarnessId;
         void save({ ...policy, defaultHarnessId, defaultRuntimeId, allowedRuntimeIds: [defaultRuntimeId] });
-      }}>
-        <option value="native">Frakio Native</option>
-        {runtimeSeed.filter((runtime) => runtime.id !== 'pi').map((runtime) => <option key={runtime.id} value={runtime.id} disabled={!isRuntimeReady(runtimes.find((item) => item.id === runtime.id))}>{runtime.name}{isRuntimeReady(runtimes.find((item) => item.id === runtime.id)) ? '' : '（不可用）'}</option>)}
-      </select>
-    </label>
+      }} />
     {error && <div className="inline-error">{error}</div>}
   </section>;
 }
 
-function AgentProfileDetail({ agent, models, canDelete, onChanged, onUpdateAgent, onDelete, profileEditor }: { agent: Agent; models: ModelProfile[]; canDelete: boolean; onChanged: () => Promise<void>; onUpdateAgent: (agentId: string, payload: Partial<Agent>) => Promise<void>; onDelete: () => Promise<void>; profileEditor: ProfileEditorControls }) {
+function AgentProfileDetail({ agent, models, canDelete, onChanged, onUpdateAgent, onDelete, profileEditor, onDirtyChange }: { agent: Agent; models: ModelProfile[]; canDelete: boolean; onChanged: () => Promise<void>; onUpdateAgent: (agentId: string, payload: Partial<Agent>) => Promise<void>; onDelete: () => Promise<void>; profileEditor: ProfileEditorControls; onDirtyChange?: (dirty: boolean) => void }) {
   const [tab, setTab] = useState<'notes' | 'user' | 'soul' | 'runtime'>('notes');
   const [avatarError, setAvatarError] = useState('');
   const [avatarSaving, setAvatarSaving] = useState(false);
@@ -15176,7 +15344,8 @@ function AgentProfileDetail({ agent, models, canDelete, onChanged, onUpdateAgent
     }
   }
   return (
-    <section className="agent-profile-detail">
+    <>
+      <section className="agent-profile-overview">
       <div className="agent-profile-hero">
         <button className="agent-profile-avatar" style={agent.avatarUrl ? undefined : { background: agent.color }} onClick={() => avatarInputRef.current?.click()} disabled={avatarSaving} title="上传头像" aria-label="上传头像">
           {agent.avatarUrl ? <img src={agent.avatarUrl} alt="" /> : agent.name.slice(0, 1)}
@@ -15235,23 +15404,28 @@ function AgentProfileDetail({ agent, models, canDelete, onChanged, onUpdateAgent
         </label>
       </div>
       {modelError && <div className="inline-error">{modelError}</div>}
-      {avatarCropFile && <AvatarCropModal file={avatarCropFile} title={`裁剪 ${agent.name} 的头像`} saving={avatarSaving} onCancel={() => setAvatarCropFile(null)} onSave={(data) => void uploadAvatar(data)} />}
-      <div className="agent-tab-panel">
-        {tab === 'notes' && <FrakioAgentTextPanel title="Agent 笔记" text={agent.notes || ''} fallback="记录只属于这个 Agent 的维护说明。" onSave={(notes) => onUpdateAgent(agent.id, { notes } as Partial<Agent>)} />}
+      </section>
+      {avatarCropFile && createPortal(<AvatarCropModal file={avatarCropFile} title={`裁剪 ${agent.name} 的头像`} saving={avatarSaving} onCancel={() => setAvatarCropFile(null)} onSave={(data) => void uploadAvatar(data)} />, document.body)}
+      <div className="agent-profile-scroll">
+        <div className="agent-tab-panel">
+        {tab === 'notes' && <FrakioAgentTextPanel title="Agent 笔记" text={agent.notes || ''} fallback="记录只属于这个 Agent 的维护说明。" onDirtyChange={onDirtyChange} onSave={(notes) => onUpdateAgent(agent.id, { notes } as Partial<Agent>)} />}
         {tab === 'user' && <div className="text-panel editable-panel"><div className="panel-edit-head"><strong>用户画像</strong><span>Frakio 用户层</span></div><p>用户画像与个人偏好由“个人资料”和“记忆中心”统一管理，并投影给当前 Agent 使用。</p></div>}
-        {tab === 'soul' && <FrakioAgentTextPanel title="Soul" text={agent.soul || ''} fallback="定义这个 Agent 的人格和长期行为原则。" confirmLabel="确认修改 Soul" onSave={(soul) => onUpdateAgent(agent.id, { soul, confirmSoul: true } as Partial<Agent>)} />}
+        {tab === 'soul' && <FrakioAgentTextPanel title="Soul" text={agent.soul || ''} fallback="定义这个 Agent 的人格和长期行为原则。" confirmLabel="确认修改 Soul" onDirtyChange={onDirtyChange} onSave={(soul) => onUpdateAgent(agent.id, { soul, confirmSoul: true } as Partial<Agent>)} />}
         {tab === 'runtime' && <AgentRuntimePolicyPanel agent={agent} onUpdateAgent={onUpdateAgent} />}
+        </div>
       </div>
-    </section>
+    </>
   );
 }
 
-function FrakioAgentTextPanel({ title, text, fallback, confirmLabel = '保存', onSave }: { title: string; text: string; fallback: string; confirmLabel?: string; onSave: (value: string) => Promise<void> }) {
+function FrakioAgentTextPanel({ title, text, fallback, confirmLabel = '保存', onSave, onDirtyChange }: { title: string; text: string; fallback: string; confirmLabel?: string; onSave: (value: string) => Promise<void>; onDirtyChange?: (dirty: boolean) => void }) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState(text);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState('');
   useEffect(() => { if (!editing) setDraft(text); }, [text, editing]);
+  useEffect(() => { onDirtyChange?.(editing && draft.trim() !== text.trim()); }, [draft, editing, text, onDirtyChange]);
+  useEffect(() => () => onDirtyChange?.(false), [onDirtyChange]);
   async function save() {
     setSaving(true);
     setError('');
@@ -16808,12 +16982,6 @@ function AgentEditorModal({ title, models, agent, onClose, onSave }: { title: st
 function AgentFields({ draft, setDraft, models }: { draft: Agent; setDraft: (agent: Agent) => void; models: ModelProfile[] }) {
   const modelChoices = models.flatMap((model) => modelNamesForProvider(model).map((modelName) => ({ value: modelChoiceValue(model, modelName), label: `${model.name} · ${modelName}` })));
   const policy = draft.runtimePolicy || { defaultRuntimeId: 'pi', defaultHarnessId: 'native', allowedRuntimeIds: ['pi'], permissionProfileId: 'default' };
-  const runtimeOptions = [
-    { id: 'native', runtimeId: 'pi', name: 'Frakio Native', description: '默认 Harness，由 Frakio 管理执行引擎' },
-    { id: 'hermes', name: 'Hermes Agent', description: '使用 Frakio Model Center' },
-    { id: 'codex', name: 'Codex', description: '使用 Frakio Model Center' },
-    { id: 'claude', name: 'Claude Code', description: '使用 Frakio Model Center' },
-  ];
   const setRuntimePolicy = (next: AgentRuntimePolicy) => setDraft({ ...draft, runtimePolicy: next });
   return (
     <div className="agent-fields">
@@ -16823,12 +16991,11 @@ function AgentFields({ draft, setDraft, models }: { draft: Agent; setDraft: (age
       <section className="agent-runtime-section" aria-labelledby="agent-runtime-title">
         <div className="agent-runtime-section-head">
           <div><strong id="agent-runtime-title">默认 Harness</strong><span>只影响之后创建的会话。已有会话继续使用原来的 Harness。</span></div>
-          <label className="agent-runtime-default"><span>默认 Harness</span><select value={policy.defaultHarnessId || (policy.defaultRuntimeId === 'pi' ? 'native' : policy.defaultRuntimeId)} onChange={(event) => {
-            const defaultHarnessId = event.target.value as HarnessId;
+        </div>
+        <HarnessChoiceGrid value={(policy.defaultHarnessId || (policy.defaultRuntimeId === 'pi' ? 'native' : policy.defaultRuntimeId)) as HarnessId} onChange={(defaultHarnessId) => {
             const defaultRuntimeId = defaultHarnessId === 'native' ? 'pi' : defaultHarnessId;
             setRuntimePolicy({ ...policy, defaultHarnessId, defaultRuntimeId, allowedRuntimeIds: [defaultRuntimeId] });
-          }}>{runtimeOptions.map((runtime) => <option key={runtime.id} value={runtime.id}>{runtime.name}</option>)}</select></label>
-        </div>
+          }} />
       </section>
       <label>Soul<textarea value={draft.soul} onChange={(event) => setDraft({ ...draft, soul: event.target.value })} /></label>
       <label>职责范围<textarea value={draft.scope} onChange={(event) => setDraft({ ...draft, scope: event.target.value })} /></label>

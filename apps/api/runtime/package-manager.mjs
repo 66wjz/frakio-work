@@ -85,7 +85,20 @@ export function createRuntimePackageManager({ store, providers = new Map() } = {
     if (provider?.autoActivateBundled) await ensureBundled(runtimeId);
     const releases = provider?.releases ? await provider.releases({ refresh }) : { verified: [], upstreamLatest: null, checkedAt: '' };
     const activation = store.getRuntimeActivation(runtimeId);
-    const packages = store.listRuntimePackages(runtimeId);
+    const packages = store.listRuntimePackages(runtimeId).map((pkg) => {
+      if (pkg.source !== 'managed' || !pkg.fingerprint || pkg.metadata?.fingerprintScheme === 'runtime-executable-v2') return pkg;
+      return store.putRuntimePackage({
+        ...pkg,
+        verificationState: 'unverified',
+        availability: 'unavailable',
+        verificationReceipt: {
+          kind: 'legacy_runtime_fingerprint',
+          error: '该托管 Runtime 来自旧版校验机制，请重新安装后启用。',
+        },
+        metadata: { ...pkg.metadata, fingerprintScheme: 'legacy-path-bound' },
+        lastVerifiedAt: new Date().toISOString(),
+      });
+    });
     return {
       runtimeId,
       activation,
@@ -100,14 +113,26 @@ export function createRuntimePackageManager({ store, providers = new Map() } = {
   async function install(runtimeId, version) {
     const provider = providerMap.get(runtimeId);
     if (!provider?.install) throw Object.assign(new Error(`Runtime ${runtimeId} does not support managed installation.`), { status: 409 });
-    const installed = await provider.install(String(version || '').trim());
+    const requestedVersion = String(version || '').trim();
+    const activation = store.getRuntimeActivation(runtimeId);
+    const replaced = store.listRuntimePackages(runtimeId).filter((pkg) => pkg.source === 'managed' && pkg.runtimeVersion === requestedVersion);
+    for (const pkg of replaced) {
+      const liveSession = store.listSessions({ runtimeId, limit: 500 }).find((item) => item.runtimeBuildId === pkg.runtimeBuildId && !['closed', 'failed', 'stale'].includes(item.lifecycleState));
+      const liveRun = store.listRuns({ runtimeId, runtimeBuildId: pkg.runtimeBuildId, limit: 500 }).find((item) => ['starting', 'running', 'waiting_approval'].includes(item.status));
+      if ([activation?.activeBuildId, activation?.previousBuildId].includes(pkg.runtimeBuildId) || liveSession || liveRun) {
+        throw Object.assign(new Error('该托管 Runtime 正在使用，不能覆盖安装。请先切换到其他版本并结束相关会话。'), { status: 409, code: 'RUNTIME_PACKAGE_IN_USE' });
+      }
+    }
+    const installed = await provider.install(requestedVersion);
     const stored = store.putRuntimePackage({
       ...installed,
       runtimeId,
       source: 'managed',
       installationState: 'installed',
     });
-    const activation = store.getRuntimeActivation(runtimeId);
+    for (const pkg of replaced) {
+      if (pkg.runtimeBuildId !== stored.runtimeBuildId) store.deleteRuntimePackage(pkg.runtimeBuildId);
+    }
     if (!activation?.activeBuildId) await activate(runtimeId, stored.runtimeBuildId);
     return store.getRuntimePackage(stored.runtimeBuildId);
   }
@@ -215,7 +240,7 @@ export function createRuntimePackageManager({ store, providers = new Map() } = {
     }
     const verified = provider?.verify ? await provider.verify(target) : { ok: target.verificationState === 'verified' };
     if (!verified?.ok) {
-      store.putRuntimePackage({ ...target, verificationState: 'incompatible', verificationReceipt: verified || {}, verifiedAt: new Date().toISOString() });
+      store.putRuntimePackage({ ...target, verificationState: 'incompatible', availability: 'broken', verificationReceipt: verified || {}, verifiedAt: new Date().toISOString(), lastVerifiedAt: new Date().toISOString() });
       throw Object.assign(new Error(verified?.error || 'Runtime 兼容性验证失败。'), { status: 409, code: 'RUNTIME_PACKAGE_INCOMPATIBLE' });
     }
     store.putRuntimePackage({ ...target, verificationState: 'verified', availability: 'ready', verificationReceipt: verified, verifiedAt: new Date().toISOString(), lastVerifiedAt: new Date().toISOString() });

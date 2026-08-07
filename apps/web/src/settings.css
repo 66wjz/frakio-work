@@ -3067,6 +3067,25 @@
   line-height: 1.45;
 }
 
+.runtime-install-progress {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 10px;
+  border: 1px solid color-mix(in srgb, var(--accent, #2563eb) 38%, var(--settings-row-border));
+  border-radius: 6px;
+  padding: 10px;
+  background: color-mix(in srgb, var(--accent, #2563eb) 8%, var(--settings-panel-bg, #fff));
+}
+
+.runtime-install-progress > svg {
+  color: var(--accent, #2563eb);
+}
+
+.runtime-install-progress > div {
+  display: grid;
+  gap: 3px;
+}
+
 .runtime-source-list {
   display: grid;
   max-width: 760px;

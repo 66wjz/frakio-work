@@ -58,7 +58,39 @@ export function mergeThreadWithPendingMessages(current, incoming, pendingMessage
     !incomingIds.has(message.id)
     && (pendingIds.has(message.id) || incomingIsStale)
   ));
-  return preserved.length ? { ...incoming, messages: [...(incoming.messages || []), ...preserved] } : incoming;
+  const messages = dedupeThreadMessages([...(incoming.messages || []), ...preserved]);
+  return messages.length !== (incoming.messages || []).length || preserved.length
+    ? { ...incoming, messages }
+    : incoming;
+}
+
+export function dedupeThreadMessages(messages = []) {
+  const seen = new Set();
+  const result = [];
+  for (const message of messages) {
+    const externalRunId = String(message?.externalRunId || '').trim();
+    const content = String(message?.content || '').trim();
+    const key = externalRunId && message?.agentId !== 'user'
+      ? `run:${externalRunId}`
+      : content && message?.agentId !== 'user'
+        ? `body:${message.agentId || ''}:${message.turnId || ''}:${content}`
+        : `id:${message?.id || result.length}`;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(message);
+  }
+  return result;
+}
+
+export function resolveRunEventIdentity(event = {}, fallback = {}) {
+  const runId = firstString(event.runId, fallback.runId, event.hostRunId, fallback.hostRunId);
+  return {
+    hostRunId: firstString(event.hostRunId, fallback.hostRunId, runId),
+    runId,
+    agentId: firstString(event.agentId, fallback.agentId),
+    agentName: firstString(event.agentName, fallback.agentName),
+    runtimeId: firstString(event.runtimeId, fallback.runtimeId),
+  };
 }
 
 export function canApplyPresentation(currentRevision, nextRevision) {

@@ -61,11 +61,12 @@ test('Runtime Host Controller creates the Host Run before starting the native ru
   const controller = createRuntimeHostController({ platform, store });
   const hosted = await controller.begin({
     state: { features: {} }, threadId: 'thread-host', thread: { id: 'thread-host' },
-    agent: { id: 'agent-host', runtimePolicy: {} }, runtimeId: 'hermes', workspace: null,
+    agent: { id: 'agent-host', name: 'Host Agent', runtimePolicy: {} }, runtimeId: 'hermes', workspace: null,
     profileSnapshot: { revision: 'profile-host' }, message: 'hello', permissionMode: 'smart',
     modelRoute: { routeRevision: 'route-host', providerCredentialRevision: 'credential-host', modelId: 'model-host' },
   }, { turnId: 'turn-host', modelId: 'model-host' });
   assert.equal(hosted.run.status, 'queued');
+  assert.equal(hosted.run.metadata.agentName, 'Host Agent');
   assert.match(hosted.run.id, /^runtime_run_/);
   const started = await controller.dispatch(hosted.prepared, hosted.run, { prompt: 'hello' });
   assert.equal(observedStartingRun.status, 'queued');

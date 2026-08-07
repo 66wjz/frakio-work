@@ -50,8 +50,8 @@ const toolsBySet = {
     { name: 'hermes_workbench_protocol_get', description: 'Return the Frakio Workbench MCP protocol version and collaboration capabilities.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     {
       name: 'frakio_agent_handoff',
-      description: 'Register an intentional Agent-to-Agent handoff for the current reply. Frakio executes it only after this reply is saved. In Work mode it is routed through the existing scheduler and never creates an unplanned hidden task.',
-      inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, targetAgentId: { type: 'string' }, reason: { type: 'string' }, sourceAgentId: { type: 'string' } }, required: ['threadId', 'targetAgentId', 'reason'], additionalProperties: false },
+      description: 'Register an intentional Agent-to-Agent handoff for the current reply. Provide a concrete objective and reason. Frakio executes it only after this reply is saved. In Work mode it is routed through the existing scheduler and never creates an unplanned hidden task.',
+      inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, targetAgentId: { type: 'string' }, objective: { type: 'string' }, reason: { type: 'string' }, sourceAgentId: { type: 'string' } }, required: ['threadId', 'targetAgentId', 'objective', 'reason'], additionalProperties: false },
     },
     { name: 'frakio_knowledge_status', description: 'Read governed status, configuration, activity and pending counts for a Frakio vault.', inputSchema: { type: 'object', properties: { vaultId: { type: 'string' } }, required: ['vaultId'], additionalProperties: false } },
     { name: 'frakio_knowledge_search', description: 'Search a Frakio vault with confidence and citation metadata.', inputSchema: { type: 'object', properties: { vaultId: { type: 'string' }, query: { type: 'string' }, limit: { type: 'number' } }, required: ['vaultId', 'query'], additionalProperties: false } },

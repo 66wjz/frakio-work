@@ -7311,12 +7311,29 @@ button:disabled { cursor: not-allowed; opacity: .58; }
 .project-path-preview { overflow: hidden; border: 1px solid #e6ece9; border-radius: 8px; padding: 10px 12px; color: #687773; background: #fafbfb; text-overflow: ellipsis; white-space: nowrap; font-size: 12px; }
 .project-path-preview.target { color: #25433d; background: #f5faf7; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 8px; padding-top: 2px; }
-.avatar-crop-modal { width: min(420px, calc(100vw - 32px)); }
+.avatar-crop-modal {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+  width: min(420px, calc(100vw - 32px));
+  height: min(520px, calc(100dvh - 40px));
+  max-height: calc(100dvh - 40px);
+  overflow: hidden;
+}
 .avatar-crop-body {
   display: grid;
+  min-height: 0;
   gap: 16px;
   justify-items: center;
-  padding: 20px 22px 18px;
+  overflow-y: auto;
+  padding: 20px 22px;
+}
+.avatar-crop-footer {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  border-top: 1px solid var(--overlay-outline, #e4e8e6);
+  padding: 12px 22px 18px;
+  background: var(--overlay-surface-solid, #fff);
 }
 .avatar-crop-frame {
   position: relative;
@@ -7528,14 +7545,46 @@ button:disabled { cursor: not-allowed; opacity: .58; }
   color: #0f766e;
   background: #eef7f4;
 }
-.agent-profile-detail {
+.agent-profile-modal {
+  display: grid;
+  grid-template-rows: auto auto minmax(0, 1fr);
+  width: min(680px, calc(100vw - 40px));
+  height: min(720px, calc(100dvh - 40px));
+  max-height: calc(100dvh - 40px);
+  overflow: hidden;
+  border: 1px solid var(--overlay-outline, rgb(17 24 39 / 9%));
+  border-radius: 14px;
+  color: var(--overlay-text, #252629);
+  background: var(--overlay-surface-solid, #fafafa);
+  box-shadow: var(--overlay-dialog-shadow, 0 0 0 1px rgb(17 24 39 / 7%), 0 14px 36px -10px rgb(15 23 42 / 18%));
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+.agent-profile-modal > .modal-head {
+  border-bottom-color: var(--overlay-outline, rgb(17 24 39 / 9%));
+  background: var(--overlay-surface-solid, #fafafa);
+}
+.agent-profile-overview {
   display: grid;
   gap: 14px;
-  margin: 4px 0 24px;
-  border: 1px solid #dbe3df;
-  border-radius: 8px;
-  padding: 16px;
-  background: #fff;
+  border-bottom: 1px solid var(--overlay-outline, rgb(17 24 39 / 9%));
+  padding: 16px 20px 14px;
+  background: var(--overlay-surface-solid, #fafafa);
+}
+.agent-profile-scroll {
+  min-height: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  padding: 16px 20px 24px;
+  background: var(--overlay-surface-solid, #fafafa);
+}
+.agent-profile-scroll .inline-profile-editor-footer {
+  position: sticky;
+  z-index: 1;
+  bottom: 0;
+  padding: 12px 0 2px;
+  background: var(--overlay-surface-solid, #fafafa);
 }
 .agent-profile-hero {
   display: grid;
@@ -14659,6 +14708,17 @@ body:has(.mac-desktop-shell) {
 
 body:has(.mac-desktop-shell[data-appearance='dark']) {
   --mac-popover-surface: rgb(30 30 30 / 78%);
+  --mac-text: #f1f1f1;
+  --mac-muted: #a4a4a8;
+  --mac-text-secondary: #c5c5c8;
+  --mac-text-tertiary: #929297;
+  --mac-icon: rgb(255 255 255 / 55%);
+  --mac-focus: #5e9cff;
+  --mac-structure-base: #1d1d1d;
+  --mac-structure-raised: #262626;
+  --mac-structure-hover: #2b2b2b;
+  --mac-structure-border: rgb(255 255 255 / 10%);
+  --mac-field-surface: #262626;
   --overlay-surface: rgb(34 34 34 / 94%);
   --overlay-surface-solid: #222;
   --overlay-text: #f1f1f1;
@@ -14676,6 +14736,438 @@ body:has(.mac-desktop-shell[data-appearance='dark']) {
   --overlay-dialog-shadow:
     0 0 0 1px rgb(255 255 255 / 10%),
     0 18px 44px -12px rgb(0 0 0 / 45%);
+}
+
+/* Portaled Agent settings dialogs need their own dark-theme scope. The
+   dialogs are mounted under body, outside the themed application subtree. */
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-backdrop,
+body:has(.mac-desktop-shell[data-appearance='dark']) .avatar-crop-modal {
+  color: var(--overlay-text);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-backdrop {
+  background: var(--overlay-backdrop);
+  backdrop-filter: blur(4px);
+  -webkit-backdrop-filter: blur(4px);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) :is(.agent-profile-modal, .avatar-crop-modal) {
+  border-color: var(--overlay-outline);
+  background: var(--overlay-surface-solid);
+  box-shadow: var(--overlay-dialog-shadow);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) :is(.agent-profile-modal > .modal-head, .agent-profile-overview, .agent-profile-scroll, .agent-profile-scroll .inline-profile-editor-footer, .avatar-crop-modal > .modal-head, .avatar-crop-footer) {
+  border-color: var(--overlay-outline);
+  background: var(--overlay-surface-solid);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) :is(.agent-profile-modal .modal-head h2, .agent-profile-modal .agent-profile-hero h2, .agent-profile-modal .text-panel > strong, .agent-profile-modal .module-panel > strong, .agent-profile-modal .panel-edit-head > strong, .avatar-crop-modal .modal-head h2) {
+  color: var(--overlay-text);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) :is(.agent-profile-modal .modal-head p, .agent-profile-modal .agent-profile-hero p, .agent-profile-modal .agent-default-model, .agent-profile-modal .agent-profile-hero .agent-name-edit, .avatar-crop-modal .modal-head p, .avatar-crop-modal .avatar-crop-slider) {
+  color: var(--overlay-muted);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal :is(.agent-tabs, .agent-model-select) {
+  border-color: var(--overlay-outline);
+  background: var(--mac-structure-raised);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal .agent-tabs button {
+  color: var(--overlay-muted);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal .agent-tabs button.selected {
+  color: var(--overlay-text);
+  background: var(--overlay-hover);
+  box-shadow: inset 0 0 0 1px var(--overlay-outline);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal .agent-default-model-picker .provider-model-trigger,
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal .agent-default-model-picker .provider-model-trigger :is(span, strong, svg) {
+  color: var(--overlay-text);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal .agent-default-model-picker .provider-model-trigger:not(:disabled):hover {
+  color: var(--overlay-text);
+  background: var(--mac-structure-hover);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal :is(.agent-model-select select, .agent-name-editor input, .profile-editor-textarea, .inline-profile-editor-textarea, .agent-runtime-default select) {
+  border-color: var(--overlay-outline);
+  color: var(--overlay-text);
+  background: var(--mac-field-surface);
+  box-shadow: none;
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal :is(.agent-model-select select, .agent-name-editor input, .profile-editor-textarea, .inline-profile-editor-textarea, .agent-runtime-default select):focus {
+  border-color: var(--mac-focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mac-focus) 18%, transparent);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal :is(.text-panel, .module-panel, .profile-summary-grid > div, .agent-runtime-config, .agent-config-editor.compact, .agent-runtime-policy) {
+  border-color: var(--mac-structure-border);
+  color: var(--mac-text);
+  background: var(--mac-structure-base);
+  box-shadow: inset 0 0 0 1px var(--mac-structure-border);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal :is(.text-panel p, .module-panel p, .profile-summary-grid span, .profile-summary-grid strong, .panel-edit-head > span, .agent-runtime-policy-head small, .agent-runtime-policy-item small) {
+  color: var(--mac-text-secondary);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal .agent-runtime-config-toggle {
+  color: var(--mac-text);
+  background: var(--mac-structure-raised);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal .agent-runtime-config-toggle small,
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal .agent-runtime-config-toggle svg {
+  color: var(--mac-muted);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal :is(.danger-btn, .secondary-btn.danger, .icon-btn.danger) {
+  border-color: color-mix(in srgb, var(--overlay-danger) 38%, var(--overlay-outline));
+  color: var(--overlay-danger);
+  background: color-mix(in srgb, var(--overlay-danger) 12%, var(--overlay-surface-solid));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--overlay-danger) 20%, transparent);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal :is(.danger-btn:hover, .secondary-btn.danger:hover, .icon-btn.danger:hover) {
+  background: color-mix(in srgb, var(--overlay-danger) 20%, var(--overlay-surface-solid));
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .agent-profile-modal .agent-profile-avatar:not(:disabled):hover {
+  outline-color: color-mix(in srgb, var(--mac-focus) 55%, transparent);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .avatar-crop-modal .avatar-crop-body {
+  background: var(--mac-structure-base);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .avatar-crop-modal .avatar-crop-frame {
+  background: var(--mac-structure-raised);
+  box-shadow: 0 0 0 1px var(--mac-structure-border), 0 16px 36px rgb(0 0 0 / 35%);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .avatar-crop-modal .avatar-crop-footer {
+  border-top-color: var(--overlay-outline);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) :is(.agent-profile-modal, .avatar-crop-modal) ::-webkit-scrollbar-thumb {
+  background: rgb(255 255 255 / 24%);
+}
+
+/* Provider editor is also portaled to body; keep its dark form surface
+   consistent with Agent settings and the rest of Model Center. */
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor {
+  border-color: var(--overlay-outline);
+  color: var(--overlay-text);
+  background: var(--overlay-surface-solid);
+  box-shadow: var(--overlay-dialog-shadow);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor > .modal-head,
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor-body,
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-modal-footer {
+  border-color: var(--overlay-outline);
+  background: var(--overlay-surface-solid);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor :is(.provider-field, .provider-protocol-control, .provider-capability-settings, .provider-capability-manual) {
+  color: var(--overlay-muted);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor :is(.provider-field input, .provider-field select, .provider-combobox-input, .provider-combobox-input input, .provider-capability-mappings select, .provider-capability-mappings input) {
+  border-color: var(--overlay-outline);
+  color: var(--overlay-text);
+  background: var(--mac-field-surface);
+  box-shadow: none;
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor :is(.provider-field input, .provider-field select, .provider-combobox-input, .provider-combobox-input input, .provider-capability-mappings select, .provider-capability-mappings input):focus,
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor .provider-combobox-input:focus-within {
+  border-color: var(--mac-focus);
+  box-shadow: 0 0 0 3px color-mix(in srgb, var(--mac-focus) 18%, transparent);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor :is(.provider-base-help, .provider-mode-tabs, .provider-capability-efforts label, .provider-catalog-status, .provider-detection-status) {
+  border-color: var(--mac-structure-border);
+  color: var(--mac-text-secondary);
+  background: var(--mac-structure-base);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor .provider-base-help:hover,
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor .provider-base-help:focus-visible,
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor .provider-mode-tabs button:hover {
+  color: var(--overlay-text);
+  background: var(--mac-structure-hover);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor .provider-mode-tabs button {
+  color: var(--overlay-muted);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor .provider-mode-tabs button.selected {
+  color: var(--overlay-text);
+  background: var(--overlay-selected);
+  box-shadow: inset 0 0 0 1px var(--overlay-outline);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor :is(.provider-capability-head strong, .provider-capability-toggle strong, .provider-catalog-status strong, .provider-detection-line strong) {
+  color: var(--overlay-text);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor :is(.provider-capability-head small, .provider-capability-summary, .provider-capability-toggle small, .provider-catalog-status small, .provider-detection-line span, .provider-detection-status small, .provider-verification small) {
+  color: var(--overlay-muted);
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor .provider-detection-status.complete {
+  border-color: color-mix(in srgb, #45c49a 42%, var(--overlay-outline));
+  color: #8ce3c2;
+  background: color-mix(in srgb, #178b69 24%, var(--overlay-surface-solid));
+}
+
+body:has(.mac-desktop-shell[data-appearance='dark']) .provider-editor .provider-detection-status.failed {
+  border-color: color-mix(in srgb, var(--overlay-danger) 42%, var(--overlay-outline));
+  color: #ffaaa4;
+  background: color-mix(in srgb, var(--overlay-danger) 16%, var(--overlay-surface-solid));
+}
+
+/* Agent cards on the settings page use the application subtree rather than a
+   portal, so keep their badges and controls in the same dark palette too. */
+.mac-desktop-shell[data-appearance='dark'] .org-page .org-default-agent {
+  color: var(--mac-muted);
+}
+
+.mac-desktop-shell[data-appearance='dark'] .org-page .org-default-agent select {
+  border-color: var(--mac-border);
+  color: var(--mac-text);
+  background: var(--mac-control);
+}
+
+.mac-desktop-shell[data-appearance='dark'] .org-page .profile-card {
+  color: var(--mac-text);
+  border-color: var(--mac-border);
+  background: var(--mac-surface-soft);
+  box-shadow: 0 12px 30px var(--mac-shadow), inset 0 1px 0 rgb(255 255 255 / 7%);
+}
+
+.mac-desktop-shell[data-appearance='dark'] .org-page .profile-card:hover,
+.mac-desktop-shell[data-appearance='dark'] .org-page .profile-card.active {
+  border-color: color-mix(in srgb, var(--mac-focus) 58%, var(--mac-border));
+  background: var(--mac-structure-hover);
+  box-shadow: 0 12px 30px var(--mac-shadow), inset 0 0 0 1px color-mix(in srgb, var(--mac-focus) 42%, transparent);
+}
+
+.mac-desktop-shell[data-appearance='dark'] .org-page :is(.profile-card-role, .profile-card-model) {
+  color: var(--mac-text-secondary);
+}
+
+.mac-desktop-shell[data-appearance='dark'] .org-page :is(.profile-card-model, .profile-card-runtime) {
+  border-color: var(--mac-structure-border);
+  background: var(--mac-field-surface);
+}
+
+.mac-desktop-shell[data-appearance='dark'] .org-page .profile-card-runtime {
+  color: #b9ead8;
+  background: color-mix(in srgb, #1b8d6c 24%, var(--mac-field-surface));
+  border-color: color-mix(in srgb, #45c49a 35%, var(--mac-structure-border));
+}
+
+.mac-desktop-shell[data-appearance='dark'] .org-page .profile-card-add {
+  color: var(--mac-text);
+  border-color: var(--mac-border);
+  background: var(--mac-surface-soft);
+}
+
+.mac-desktop-shell[data-appearance='dark'] .org-page .profile-card-add:hover {
+  background: var(--mac-structure-hover);
+}
+
+.mac-desktop-shell[data-appearance='dark'] .org-page .profile-add-icon {
+  border-color: var(--mac-structure-border);
+  color: #9fe4ce;
+  background: color-mix(in srgb, #1b8d6c 24%, var(--mac-field-surface));
+}
+
+/* Conversation menus are portaled AppMenu surfaces. Keep them opaque and
+   elevated so the conversation behind them does not bleed through. */
+body:has(.mac-desktop-shell) :is(.new-chat-agent-menu-v2, .runtime-switcher-popover) {
+  border: 1px solid var(--overlay-outline);
+  border-radius: 12px;
+  padding: 8px;
+  color: var(--overlay-text);
+  background: var(--overlay-surface-solid);
+  box-shadow: var(--overlay-dialog-shadow);
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+body:has(.mac-desktop-shell) .new-chat-agent-menu-v2 {
+  width: min(320px, calc(100vw - 16px));
+  gap: 4px;
+}
+
+body:has(.mac-desktop-shell) .new-chat-agent-menu-v2 .new-chat-agent-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 48px;
+  gap: 10px;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 7px 9px;
+  color: var(--overlay-text);
+  background: transparent;
+  white-space: normal;
+}
+
+body:has(.mac-desktop-shell) .new-chat-agent-menu-v2 .new-chat-agent-option:hover,
+body:has(.mac-desktop-shell) .new-chat-agent-menu-v2 .new-chat-agent-option:focus-visible {
+  border-color: var(--overlay-outline);
+  color: var(--overlay-text);
+  background: var(--overlay-hover);
+  outline: none;
+}
+
+body:has(.mac-desktop-shell) .new-chat-agent-menu-v2 .new-chat-agent-option.selected {
+  border-color: color-mix(in srgb, var(--mac-focus) 42%, var(--overlay-outline));
+  color: var(--overlay-text);
+  background: color-mix(in srgb, var(--mac-focus) 10%, var(--overlay-surface-solid));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mac-focus) 18%, transparent);
+}
+
+body:has(.mac-desktop-shell) .new-chat-agent-menu-v2 .new-chat-agent-option :is(strong, small, em) {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+body:has(.mac-desktop-shell) .new-chat-agent-menu-v2 .new-chat-agent-option strong {
+  color: var(--overlay-text);
+  font-size: 13px;
+  font-weight: 650;
+}
+
+body:has(.mac-desktop-shell) .new-chat-agent-menu-v2 .new-chat-agent-option small,
+body:has(.mac-desktop-shell) .new-chat-agent-menu-v2 .new-chat-agent-option em {
+  color: var(--overlay-muted);
+  font-size: 11px;
+  font-style: normal;
+}
+
+body:has(.mac-desktop-shell) .new-chat-agent-menu-v2 .new-chat-agent-option em {
+  max-width: 104px;
+  text-align: right;
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover {
+  width: min(320px, calc(100vw - 16px));
+  gap: 4px;
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-summary {
+  margin: 0 1px 3px;
+  border-bottom: 1px solid var(--overlay-outline);
+  padding: 3px 7px 9px;
+  color: var(--overlay-text);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-summary small {
+  display: block;
+  margin-top: 3px;
+  color: var(--overlay-muted);
+  font-size: 11px;
+  font-weight: 450;
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto auto auto;
+  min-height: 48px;
+  gap: 8px;
+  align-items: center;
+  border: 1px solid transparent;
+  border-radius: 9px;
+  padding: 7px 8px;
+  color: var(--overlay-text);
+  background: transparent;
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-option:hover,
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-option:focus-visible {
+  border-color: var(--overlay-outline);
+  color: var(--overlay-text);
+  background: var(--overlay-hover);
+  outline: none;
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-option.selected {
+  border-color: color-mix(in srgb, var(--mac-focus) 34%, var(--overlay-outline));
+  background: color-mix(in srgb, var(--mac-focus) 8%, var(--overlay-surface-solid));
+  box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--mac-focus) 14%, transparent);
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-agent strong {
+  color: var(--overlay-text);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-agent small,
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-option em {
+  color: var(--overlay-muted);
+  font-size: 10px;
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-option > .runtime-label {
+  display: inline-flex;
+  min-width: 74px;
+  justify-content: flex-start;
+  color: var(--overlay-muted);
+  font-size: 11px;
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-option > svg:last-child {
+  color: var(--mac-focus);
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-footer {
+  gap: 8px;
+  margin: 5px 1px 0;
+  border-top-color: var(--overlay-outline);
+  padding: 10px 7px 2px;
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-footer small {
+  color: var(--overlay-muted);
+  font-size: 11px;
+  line-height: 1.45;
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-footer button {
+  min-height: 30px;
+  border: 1px solid var(--overlay-outline);
+  border-radius: 8px;
+  padding: 0 9px;
+  color: var(--overlay-text);
+  background: var(--overlay-hover);
+}
+
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-footer button:hover,
+body:has(.mac-desktop-shell) .runtime-switcher-popover .runtime-switcher-footer button:focus-visible {
+  border-color: color-mix(in srgb, var(--mac-focus) 42%, var(--overlay-outline));
+  background: color-mix(in srgb, var(--mac-focus) 10%, var(--overlay-surface-solid));
+  outline: none;
 }
 
 .app-overlay-surface {
@@ -15427,9 +15919,9 @@ body:has(.mac-desktop-shell) :is(.provider-model-menu, .mention-menu, .provider-
 .agent-runtime-card {
   position: relative;
   display: grid;
-  grid-template-columns: 30px minmax(0, 1fr) auto;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
   align-items: center;
-  min-height: 66px;
+  min-height: 72px;
   gap: 9px;
   overflow: hidden;
   border: 1px solid var(--overlay-outline);
@@ -15458,12 +15950,14 @@ body:has(.mac-desktop-shell) :is(.provider-model-menu, .mention-menu, .provider-
 
 .agent-runtime-card.default { cursor: default; }
 .agent-runtime-card.default:hover { background: color-mix(in srgb, var(--mac-focus, #1769e0) 10%, var(--overlay-surface-solid)); }
+.agent-runtime-card.unavailable { cursor: not-allowed; opacity: .55; }
+.agent-runtime-card.unavailable:hover { border-color: var(--overlay-outline); background: var(--overlay-surface-solid); }
 .agent-runtime-card > input { position: absolute; width: 1px; height: 1px; opacity: 0; pointer-events: none; }
 
 .agent-runtime-card-icon {
   display: grid;
-  width: 30px;
-  height: 30px;
+  width: 36px;
+  height: 36px;
   place-items: center;
   border: 1px solid var(--overlay-outline);
   border-radius: 8px;
@@ -15471,11 +15965,11 @@ body:has(.mac-desktop-shell) :is(.provider-model-menu, .mention-menu, .provider-
 }
 
 .agent-runtime-card-icon .runtime-label { display: grid; place-items: center; }
-.agent-runtime-card-icon .runtime-label img { width: 18px; height: 18px; object-fit: contain; }
-.agent-runtime-card-copy { display: grid; min-width: 0; gap: 3px; }
+.agent-runtime-card-icon .runtime-label img { width: 22px; height: 22px; object-fit: contain; }
+.agent-runtime-card-copy { display: grid; min-width: 0; align-content: center; gap: 3px; text-align: center; }
 .agent-runtime-card-copy strong,
 .agent-runtime-card-copy small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.agent-runtime-card-copy strong { color: var(--overlay-text); font-size: 12px; }
+.agent-runtime-card-copy strong { color: var(--overlay-text); font-size: 14px; font-weight: 720; }
 .agent-runtime-card-copy small { color: var(--overlay-muted); font-size: 11px; }
 
 .agent-runtime-check {
