@@ -49,6 +49,7 @@ test('run UI rejects old revisions and duplicate runtime cursors', () => {
   assert.equal(canApplyPresentation(5, 5), true);
   assert.equal(canApplyRuntimeCursor(8, 8), false);
   assert.equal(canApplyRuntimeCursor(8, 9), true);
+  assert.equal(canApplyRuntimeCursor(8, 42), true);
   assert.equal(canApplyRunSnapshot('run-1', 'run-1', 'running'), false);
   assert.equal(canApplyRunSnapshot('run-1', 'run-1', 'completed'), true);
   assert.equal(canApplyRunSnapshot('run-1', 'run-2', 'running'), true);

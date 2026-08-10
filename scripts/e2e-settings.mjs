@@ -360,7 +360,7 @@ try {
       ],
     }),
   }));
-  await page.goto(baseUrl, { waitUntil: 'networkidle' });
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
   await clearBlockingNotices();
 
   const mainSidebarScroll = page.locator('.sidebar-scroll');
@@ -688,6 +688,7 @@ try {
   await page.locator('.agent-profile-backdrop').click({ position: { x: 2, y: 2 } });
   assert.equal(await agentModal.count(), 0, '点击遮罩没有关闭 Agent 详情弹窗');
   await agentCards.first().click();
+  await page.waitForTimeout(250);
   const agentTabs = agentModal.locator('.agent-tabs');
   assert.equal(await agentTabs.count(), 1, 'Agent 档案标签 Banner 不存在');
   const agentTabButtons = agentTabs.getByRole('button');
@@ -760,6 +761,7 @@ try {
   await agentModal.locator('input[type="file"]').setInputFiles({ name: 'avatar.png', mimeType: 'image/png', buffer: Buffer.from('avatar-fixture') });
   const avatarCropModal = page.locator('.avatar-crop-modal');
   await avatarCropModal.waitFor({ state: 'visible' });
+  await page.waitForTimeout(250);
   const avatarCropLayout = await avatarCropModal.evaluate((element) => {
     const footer = element.querySelector('.avatar-crop-footer');
     return { bottom: element.getBoundingClientRect().bottom, footerBottom: footer?.getBoundingClientRect().bottom || 0, bodyOverflow: getComputedStyle(element.querySelector('.avatar-crop-body')).overflowY };
@@ -831,7 +833,7 @@ try {
   await waitForPersistedUi('appearance', nextAppearance);
   assert.equal(await page.locator('.app').getAttribute('data-appearance'), nextAppearance);
 
-  await page.reload({ waitUntil: 'networkidle' });
+  await page.reload({ waitUntil: 'domcontentloaded' });
   await clearBlockingNotices();
   await openSettings();
   const persistedSendKey = page.getByRole('region', { name: '工作台偏好' }).getByRole('combobox').nth(0);

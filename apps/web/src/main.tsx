@@ -43,6 +43,7 @@ import {
 } from './run-presence.mjs';
 import type { RunPresentationPhase } from './run-presence.mjs';
 import { activityTimelineEntries, buildRunActivityTimeline } from './run-activity-timeline.mjs';
+import { publishThreadCollaborationSnapshot, refreshThreadCollaboration, useThreadCollaboration } from './collaboration-store';
 import { contrastForegroundForTint, workspaceTintAlpha } from './theme-contrast.mjs';
 import { buildProfileActivity } from './profile-activity.mjs';
 import type { ProfileActivityCell, ProfileActivityMode } from './profile-activity.mjs';
@@ -110,6 +111,7 @@ import {
   ArrowUpFromLine,
   ArrowUpRight,
   Archive,
+  Bell,
   Bot,
   BookOpenText,
   Boxes,
@@ -181,6 +183,7 @@ import {
   ThumbsUp,
   UserCircle,
   UserPlus,
+  UsersRound,
   X,
   Zap as ZapIcon,
 } from 'lucide-react';
@@ -306,7 +309,7 @@ type RuntimeId = 'hermes' | 'pi' | 'codex' | 'claude' | string;
 type HarnessId = 'native' | 'hermes' | 'codex' | 'claude';
 type AgentRuntimePolicy = { defaultRuntimeId: RuntimeId; allowedRuntimeIds: RuntimeId[]; permissionProfileId: string; defaultHarnessId?: HarnessId };
 type RuntimeModelCompatibility = { status: 'ready' | 'partial' | 'unsupported' | 'missing_credentials'; credentialStatus: 'ready' | 'missing' | 'not_required'; compatibility?: 'direct' | 'bridged' | 'unsupported'; bridgeId?: string; harnessApiMode?: string; upstreamApiMode?: string; capabilities?: Record<string, 'native' | 'bridge' | 'auxiliary' | 'unsupported'>; degradations?: string[]; usableModelIds: string[]; unsupportedModelIds: string[]; reason: string };
-type RuntimeModelCatalogEntry = { id: string; name: string; provider?: string; defaultModelId?: string; models: string[]; compatibility: RuntimeModelCompatibility };
+type RuntimeModelCatalogEntry = { id: string; name: string; provider?: string; defaultModelId?: string; models: string[]; compatibility: RuntimeModelCompatibility; modelCompatibilities?: Record<string, RuntimeModelCompatibility> };
 type RuntimeModelCatalog = { runtimeId: string; source: string; models: RuntimeModelCatalogEntry[]; usableModelCount?: number };
 type RuntimeDefinition = {
   id: RuntimeId;
@@ -416,7 +419,7 @@ type MemoryLedgerEntry = {
   updatedAt: string;
 };
 type MemoryReviewConfig = { enabled: boolean; provider: string; model: string; timeout: number; extraBody?: Record<string, unknown> };
-type Agent = { id: string; name: string; role: string; model: string; color: string; soul: string; scope: string; profileName?: string; gatewayStatus?: string; source?: string; soulExcerpt?: string; userProfileExcerpt?: string; memoryExcerpt?: string; userProfile?: string; memory?: string; notes?: string; communicationStyle?: string; providerSummary?: HermesProviderSummary[]; skills?: ProfileModuleEntry[]; plugins?: ProfileModuleEntry[]; avatarUrl?: string; runtimePolicy?: AgentRuntimePolicy; profileRevision?: string; ownership?: { identity: 'frakio'; memory: 'frakio'; runtimeProfile: 'hermes' | 'none' }; projection?: { status: string; generatedAt?: string; error?: string } | null };
+type Agent = { id: string; name: string; role: string; model: string; color: string; soul: string; scope: string; defaultReasoningEffort?: string; defaultSpeedMode?: string; profileName?: string; gatewayStatus?: string; source?: string; soulExcerpt?: string; userProfileExcerpt?: string; memoryExcerpt?: string; userProfile?: string; memory?: string; notes?: string; communicationStyle?: string; providerSummary?: HermesProviderSummary[]; skills?: ProfileModuleEntry[]; plugins?: ProfileModuleEntry[]; avatarUrl?: string; runtimePolicy?: AgentRuntimePolicy; profileRevision?: string; ownership?: { identity: 'frakio'; memory: 'frakio'; runtimeProfile: 'hermes' | 'none' }; projection?: { status: string; generatedAt?: string; error?: string } | null };
 type ModelKind = 'official' | 'relay' | 'local';
 type ModelProtocol = 'OpenAI Compatible' | 'Anthropic Compatible' | 'Custom';
 type ProviderApiMode = 'chat_completions' | 'openai_responses' | 'codex_responses' | 'anthropic_messages' | 'bedrock_converse' | 'codex_app_server' | '';
@@ -513,7 +516,7 @@ type VaultSummary = {
   needsRefresh: boolean;
 };
 type WorkMessageArtifact = { id: string; name: string; kind?: string; path: string; relativePath?: string; size?: number };
-type ChatEvent = { id: string; agentId: string; agentName: string; role: string; content: string; attachments?: Attachment[]; context?: MessageContext; changeSetId?: string; changeSummary?: { fileCount: number; additions: number; deletions: number }; workArtifacts?: WorkMessageArtifact[]; workFinalWorkflowId?: string; memoryIds?: string[]; handoffs?: Array<{ routeId: string; targetAgentId: string; targetAgentName: string; reason?: string; objective?: string; handoffReason?: string; status: 'pending' | 'starting' | 'running' | 'completed' | 'failed' | 'recorded'; error?: string }>; handoff?: { sourceAgentId?: string; sourceAgentName?: string; targetAgentId?: string; objective?: string; handoffReason?: string; reason?: string; sourceMessageId?: string }; reasoning?: string; externalRunId?: string; turnId?: string; mentionDepth?: number; parentMessageId?: string; routeReason?: string; runtimeId?: string; runtimeName?: string; modelId?: string; profileRevision?: string; resumeStrategy?: 'native_resumed' | 'handoff_resumed' | 'new_session' | 'unsupported' | 'failed' | ''; permissionCoverage?: 'host_enforced' | 'native_enforced' | 'partial' | 'unobservable' | ''; appliedSkillCount?: number; contentType?: 'plan' | 'plan_feedback' | string; planId?: string; planRevision?: number; processingDurationMs?: number; feedback?: 'up' | 'down' | null; createdAt?: string };
+type ChatEvent = { id: string; agentId: string; agentName: string; agentAvatarUrl?: string; agentProfileRevision?: string; role: string; content: string; attachments?: Attachment[]; context?: MessageContext; changeSetId?: string; changeSummary?: { fileCount: number; additions: number; deletions: number }; workArtifacts?: WorkMessageArtifact[]; workFinalWorkflowId?: string; memoryIds?: string[]; handoffs?: Array<{ routeId: string; targetAgentId: string; targetAgentName: string; reason?: string; objective?: string; handoffReason?: string; status: 'pending' | 'starting' | 'running' | 'completed' | 'failed' | 'recorded'; error?: string }>; handoff?: { sourceAgentId?: string; sourceAgentName?: string; targetAgentId?: string; objective?: string; handoffReason?: string; reason?: string; sourceMessageId?: string }; reasoning?: string; externalRunId?: string; turnId?: string; mentionDepth?: number; parentMessageId?: string; routeReason?: string; runtimeId?: string; runtimeName?: string; modelId?: string; profileRevision?: string; resumeStrategy?: 'native_resumed' | 'handoff_resumed' | 'new_session' | 'unsupported' | 'failed' | ''; permissionCoverage?: 'host_enforced' | 'native_enforced' | 'partial' | 'unobservable' | ''; appliedSkillCount?: number; contentType?: 'plan' | 'plan_feedback' | 'collaboration_suggestion' | 'collaboration_plan_intro' | 'collaboration_plan_response' | 'workflow_final_delivery' | string; collaborationSuggestion?: { title: string; reason: string; sourceAgentId?: string }; planId?: string; planIntroForId?: string; planRevision?: number; processingDurationMs?: number; feedback?: 'up' | 'down' | null; createdAt?: string };
 type RuntimeSessionSummary = { id: string; runtimeId: RuntimeId; agentId?: string; laneType: 'chat' | 'work_task'; laneId: string; lifecycleState: 'opening' | 'active' | 'parked' | 'restoring' | 'recovering' | 'stale' | 'closed' | 'failed'; nativeSessionId?: string; resumeStrategy?: string; lastError?: string };
 type AttachmentDraft = { localId: string; file: File; previewUrl: string; status: 'uploading' | 'ready' | 'error'; attachment?: Attachment; error?: string };
 const attachmentAcceptValue = [
@@ -533,11 +536,24 @@ type WorkflowStep = { title: string; status: 'pending' | 'running' | 'completed'
 type FollowMode = 'default' | 'conversation';
 type CollaborationPlanTask = { key: string; taskId?: string; title: string; description?: string; assigneeAgentId: string; expectedResult?: string; dependsOnKeys: string[]; cancelled?: boolean };
 type CollaborationPlan = { revision: number; goal?: string; summary?: string; tasks: CollaborationPlanTask[]; publishedAt?: string };
-type CollaborationWorkflowControl = { operationId: string; idempotencyKey: string; action: 'pause' | 'resume' | 'cancel' | ''; state: 'idle' | 'pausing' | 'paused' | 'resuming' | 'cancelling' | 'cancelled' | 'pause_failed'; affectedTaskIds: string[]; stoppedRuns: number; blockedTasks: number; preservedWaitingTasks: number; failedTaskIds: string[]; heldInterventionCount: number; startedAt: string | null; completedAt: string | null; error: string };
-type CollaborationWorkflow = { id: string; name: string; boardSlug: string; status: 'active' | 'paused' | 'completed' | 'cancelled' | 'archived'; coordinatorAgentId: string; fallbackDecisionAgentId: string; rootTaskIds: string[]; currentRootTaskId?: string; planRevision?: number; plan?: CollaborationPlan | null; interventionQueue?: Array<{ id: string; status: string }>; control?: CollaborationWorkflowControl; capability?: { status: string; protocolVersion?: number; error?: string }; finalization?: { state: 'idle' | 'requested' | 'delivered'; requestedAt?: string | null; deliveryMessageId?: string }; createdAt: string; updatedAt: string; completedAt?: string | null; pausedAt?: string | null; cancelledAt?: string | null; archivedAt?: string | null };
+type CollaborationWorkflowControl = { operationId: string; idempotencyKey: string; action: 'pause' | 'resume' | 'cancel' | ''; state: 'idle' | 'pausing' | 'paused' | 'resuming' | 'cancelling' | 'cancelled' | 'pause_failed'; affectedTaskIds: string[]; stoppedRuns: number; pendingRunIds?: string[]; deferredRunIds?: string[]; blockedTasks: number; preservedWaitingTasks: number; failedTaskIds: string[]; heldInterventionCount: number; startedAt: string | null; completedAt: string | null; error: string };
+type CollaborationWorkflow = { id: string; name: string; boardSlug: string; nativeOnly?: boolean; status: 'active' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'archived'; coordinatorAgentId: string; fallbackDecisionAgentId: string; rootTaskIds: string[]; currentRootTaskId?: string; approvedPlanId?: string; approvedPlanRevision?: number; planRevision?: number; plan?: CollaborationPlan | null; interventionQueue?: Array<{ id: string; status: string }>; control?: CollaborationWorkflowControl; capability?: { status: string; protocolVersion?: number; error?: string }; finalization?: { state: 'idle' | 'requested' | 'running' | 'delivered' | 'failed'; requestedAt?: string | null; startedAt?: string | null; deliveredAt?: string | null; failedAt?: string | null; deliveryMessageId?: string; runId?: string; error?: string }; finalDelivery?: { status: 'pending' | 'ready' | 'failed'; summary: string; content: string; coordinatorAgentId: string; sourceTaskIds: string[]; runId: string; messageId?: string; createdAt?: string | null; error?: string }; createdAt: string; updatedAt: string; completedAt?: string | null; pausedAt?: string | null; cancelledAt?: string | null; archivedAt?: string | null };
 type CollaborationEvent = { id: string; cursor: number; type: string; workflowId: string; taskId?: string; actorAgentId?: string; title: string; detail?: string; payload?: Record<string, any>; createdAt: string };
-type CollaborationWorkflowSnapshot = CollaborationWorkflow & { tasks: KanbanTask[]; error?: string };
-type CollaborationSnapshot = { threadId: string; mode?: 'chat' | 'work'; workerOutputMode?: 'summary' | 'all'; activeWorkflowId: string; cursor: number; workflows: CollaborationWorkflowSnapshot[]; events: CollaborationEvent[]; fallbackDecisionAgentId: string };
+type CollaborationWorkflowSnapshot = CollaborationWorkflow & { tasks: CollaborationTask[]; error?: string };
+type CollaborationProposal = { id: string; workflowId?: string | null; sourcePlanId?: string | null; proposalMessageId?: string | null; revision: number; status: 'draft' | 'pending_confirmation' | 'confirmed' | 'cancelled' | 'failed'; title: string; summary: string; content: PlanDraft | Record<string, any>; createdAt?: string; updatedAt?: string };
+type CollaborationSnapshot = { threadId: string; mode?: 'chat' | 'work'; workerOutputMode?: 'summary' | 'all'; activeWorkflowId: string; cursor: number; workflows: CollaborationWorkflowSnapshot[]; proposals?: CollaborationProposal[]; events: CollaborationEvent[]; fallbackDecisionAgentId: string };
+type CollaborationTaskDetail = {
+  task: CollaborationTask & { description?: string; assigneeAgentId?: string; runtimeId?: string; metadata?: Record<string, any> };
+  parents: string[];
+  children: string[];
+  comments: Array<{ id: string; body: string; createdAt: string }>;
+  runs: Array<Omit<ThreadRunState, 'status'> & { id: string; runtimeId: string; status: CollaborationRunStatus; runtimeStatus?: ThreadRunState['status']; presentation?: RunPresentationSnapshot | null }>;
+  runtimeEvents: Array<{ id: string; cursor: number; runId: string; type: string; payload?: Record<string, any>; createdAt: string }>;
+  events: CollaborationEvent[];
+  artifacts: Array<{ id: string; taskId?: string; path: string; status: string; metadata?: Record<string, any>; publishedAt?: string | null; createdAt: string }>;
+  interventions: Array<{ id: string; status: string; message: string; createdAt: string }>;
+};
+type InboxItem = { id: string; cursor: number; workspaceId: string; threadId: string; threadTitle?: string; workflowId?: string | null; taskId?: string | null; type: 'workflow_completed' | 'workflow_failed' | 'finalization_failed' | 'approval_required' | 'answer_required'; title: string; summary: string; priority: 'normal' | 'important' | 'urgent'; actionRequired: boolean; readAt?: string | null; resolvedAt?: string | null; createdAt: string; updatedAt: string };
 type ThreadCollaboration = { kind: string; activeAgentId?: string | null; lastMentionedAgentId?: string | null; lastMentionedAgentName?: string; maxMentionDepth?: number | 'unlimited'; lastRoutedAt?: string | null; lastRouteReason?: string; workflows?: CollaborationWorkflow[]; activeWorkflowId?: string; eventCursor?: number; events?: CollaborationEvent[] };
 type ContextPacket = {
   title: string;
@@ -1122,6 +1138,9 @@ type McpFormState = {
   enabled: boolean;
 };
 type KanbanTaskStatus = 'triage' | 'todo' | 'scheduled' | 'ready' | 'running' | 'blocked' | 'review' | 'done' | 'archived';
+type CollaborationTaskStatus = KanbanTaskStatus | 'pending_confirmation' | 'waiting_dependency' | 'waiting_input' | 'completed' | 'failed' | 'paused' | 'cancelled';
+type CollaborationRunStatus = 'queued' | 'starting' | 'running' | 'parked' | 'ended' | 'failed' | 'aborted';
+type CollaborationTaskActivity = { phase: 'queued' | 'waiting_dependency' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'paused' | 'cancelled'; revision: number; kind?: RunActivityItem['kind']; displayName?: string; target?: string; upstreamAgentNames?: string[]; changedAt: string; waitingSince?: string; sourceEventId?: string; runId?: string };
 type KanbanTask = {
   id: string;
   title: string;
@@ -1134,6 +1153,7 @@ type KanbanTask = {
   result?: string | null;
   skills?: string[] | null;
 };
+type CollaborationTask = Omit<KanbanTask, 'status'> & { status: CollaborationTaskStatus; dependencies?: string[]; activity?: CollaborationTaskActivity };
 type KanbanBoard = {
   slug: string;
   name: string;
@@ -1224,7 +1244,8 @@ const navItems = [
   { id: 'knowledge', label: '知识问答', icon: Library, placement: 'hidden' },
   { id: 'channels', label: '频道', icon: MessageSquare, placement: 'settings' },
   { id: 'plugins', label: '插件中心', icon: Boxes, placement: 'settings' },
-  { id: 'kanban', label: '看板', icon: Boxes, placement: 'rail' },
+  { id: 'inbox', label: '收件箱', icon: Bell, placement: 'rail' },
+  { id: 'kanban', label: '协作', icon: Boxes, placement: 'rail' },
   { id: 'jobs', label: '定时任务', icon: Clock3, placement: 'settings' },
   { id: 'monitoring', label: '监控', icon: Activity, placement: 'settings' },
   { id: 'models', label: '模型配置', icon: Bot, placement: 'settings' },
@@ -1232,7 +1253,8 @@ const navItems = [
   { id: 'settings', label: '设置', icon: Settings, placement: 'system' },
 ];
 const railNavItems = navItems.filter((item) => item.placement === 'rail');
-const managementNavIds = new Set(['settings', 'org', 'models', 'channels', 'plugins', 'kanban', 'jobs', 'monitoring']);
+const managementNavIds = new Set(['settings', 'org', 'models', 'channels', 'plugins', 'inbox', 'kanban', 'jobs', 'monitoring']);
+const workspaceSurfaceNavIds = new Set(['inbox', 'kanban']);
 const defaultProductSpaceTheme: SpaceThemePalette = {
   accentColor: '#dce8e3',
   sidebarBg: '#f3f7f5',
@@ -1326,8 +1348,12 @@ function App() {
   const [threads, setThreads] = useState<ThreadSummary[]>([]);
   const [conversations, setConversations] = useState<ThreadSummary[]>([]);
   const [activeThread, setActiveThread] = useState<Thread | null>(null);
+  const [selectedThreadId, setSelectedThreadId] = useState('');
+  const [openingThreadId, setOpeningThreadId] = useState('');
+  const [threadOpenError, setThreadOpenError] = useState('');
   const activeThreadIdRef = useRef('');
   const openThreadRequestRef = useRef(0);
+  const openThreadAbortRef = useRef<AbortController | null>(null);
   const pendingMessageIdsByThreadRef = useRef<Map<string, Set<string>>>(new Map());
   const [workspaceArtifacts, setWorkspaceArtifacts] = useState<WorkArtifact[]>([]);
   const [activeView, setActiveView] = useState<'thread' | 'new-chat'>('new-chat');
@@ -1340,12 +1366,15 @@ function App() {
   const [newChatRunOverride, setNewChatRunOverride] = useState<AgentRunOverride>({});
   const [newChatAgentPickerOpen, setNewChatAgentPickerOpen] = useState(false);
   const [newChatPermissionMode, setNewChatPermissionMode] = useState<PermissionMode>('manual');
-  const [newChatExecutionMode, setNewChatExecutionMode] = useState<'chat' | 'work'>('chat');
+  const newChatExecutionMode: 'chat' = 'chat';
   const [newChatPlanEnabled, setNewChatPlanEnabled] = useState(false);
+  const [newChatCollaborationEnabled, setNewChatCollaborationEnabled] = useState(false);
+  const [collaborationIntentByThreadId, setCollaborationIntentByThreadId] = useState<Record<string, boolean>>({});
   const [planAction, setPlanAction] = useState('');
   const [planFeedbackDraft, setPlanFeedbackDraft] = useState('');
   const [planFeedbackOpen, setPlanFeedbackOpen] = useState(false);
   const [planActionError, setPlanActionError] = useState('');
+  const [collaborationSuggestionStartingId, setCollaborationSuggestionStartingId] = useState('');
   const [selectedNewChatWorkspaceId, setSelectedNewChatWorkspaceId] = useState<string | null>(null);
   const [projectPickerOpen, setProjectPickerOpen] = useState(false);
   const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
@@ -1355,6 +1384,8 @@ function App() {
   const attachmentDragDepthRef = useRef(0);
   const threadScrollRef = useRef<HTMLDivElement | null>(null);
   const mainPanelRef = useRef<HTMLElement | null>(null);
+  const [shellSurfaceTransitioning, setShellSurfaceTransitioning] = useState(false);
+  const shellSurfaceTransitionTimerRef = useRef<number | null>(null);
   const [conversationMainCompact, setConversationMainCompact] = useState(false);
   const threadContentRef = useRef<HTMLDivElement | null>(null);
   const threadBottomRef = useRef<HTMLDivElement | null>(null);
@@ -1372,6 +1403,7 @@ function App() {
   const [feedbackMessageId, setFeedbackMessageId] = useState('');
   const [branchingMessageId, setBranchingMessageId] = useState('');
   const [messageActionError, setMessageActionError] = useState<{ messageId: string; message: string } | null>(null);
+  const [messageAgentConfigOpenId, setMessageAgentConfigOpenId] = useState('');
   const [activeOverviewRoundId, setActiveOverviewRoundId] = useState('');
   const [agentPickerOpen, setAgentPickerOpen] = useState(false);
   const [agentModelEditorId, setAgentModelEditorId] = useState<string | null>(null);
@@ -1390,12 +1422,18 @@ function App() {
   const [railContextMenu, setRailContextMenu] = useState<RailContextMenuTarget | null>(null);
   const railActionFocusRef = useRef<HTMLElement | null>(null);
   const [archivedThreads, setArchivedThreads] = useState<ThreadSummary[]>([]);
+  const [inboxItems, setInboxItems] = useState<InboxItem[]>([]);
+  const [inboxUnreadCount, setInboxUnreadCount] = useState(0);
+  const [inboxActionCount, setInboxActionCount] = useState(0);
+  const [inboxLoading, setInboxLoading] = useState(true);
+  const [inboxError, setInboxError] = useState('');
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   const [settingsSection, setSettingsSection] = useState<SettingsSection>('workbench');
   const [libraryCollapsed, setLibraryCollapsed] = useState(false);
   const [rightRailTab, setRightRailTab] = useState<RightRailTab>('collaboration');
   const [openRightRailTabs, setOpenRightRailTabs] = useState<RightRailTab[]>([]);
+  const [collaborationTaskRequest, setCollaborationTaskRequest] = useState<{ id: string; threadId: string; workflowId?: string; taskId?: string } | null>(null);
   const [newTabMenuOpen, setNewTabMenuOpen] = useState(false);
   const [draftContext, setDraftContext] = useState<MessageContext>({ browserAnnotations: [], reviewComments: [] });
   const [overviewOpen, setOverviewOpen] = useState(false);
@@ -1518,6 +1556,22 @@ function App() {
     else pendingMessageIdsByThreadRef.current.delete(threadId);
   }
 
+  function syncThreadSummary(threadId: string, thread: Thread) {
+    const updateSummary = (summary: ThreadSummary): ThreadSummary => summary.id !== threadId ? summary : {
+      ...summary,
+      title: thread.title || summary.title,
+      runStatus: thread.runStatus || 'idle',
+      activeAgentId: thread.activeAgentId || summary.activeAgentId,
+      defaultAgentId: thread.defaultAgentId || summary.defaultAgentId,
+      collaborationMode: thread.collaborationMode || summary.collaborationMode,
+      activePlanId: thread.activePlanId || '',
+      runtimeId: thread.runtimeId || summary.runtimeId,
+      updatedAt: thread.updatedAt || summary.updatedAt,
+    };
+    setConversations((current) => current.map(updateSummary));
+    setThreads((current) => current.map(updateSummary));
+  }
+
   function adoptThreadSnapshot(threadId: string, thread: Thread) {
     const normalizedMessages = dedupeThreadMessages<ChatEvent>(thread.messages || []);
     const normalizedThread = { ...thread, messages: normalizedMessages };
@@ -1529,6 +1583,7 @@ function App() {
     setActiveThread((current) => current?.id === threadId
       ? mergeThreadWithPendingMessages(current, normalizedThread, pendingMessageIds(threadId))
       : current);
+    syncThreadSummary(threadId, normalizedThread);
     if (persistedRunIds.size) setRunPresentationsByThreadId((current) => {
       const threadRuns = current[threadId] || {};
       const nextRuns = Object.fromEntries(Object.entries(threadRuns).filter(([hostRunId, run]) => (
@@ -1946,7 +2001,7 @@ function App() {
     const refresh = (event: Event) => {
       const requestedThreadId = (event as CustomEvent<{ threadId?: string }>).detail?.threadId;
       if (requestedThreadId && requestedThreadId !== threadId) return;
-      void requestJson<{ thread: Thread }>(`/api/threads/${threadId}`).then((data) => setActiveThread(data.thread)).catch(() => {});
+      void requestJson<{ thread: Thread }>(`/api/threads/${threadId}`).then((data) => adoptThreadSnapshot(threadId, data.thread)).catch(() => {});
     };
     window.addEventListener('frakio:thread-refresh-request', refresh);
     return () => window.removeEventListener('frakio:thread-refresh-request', refresh);
@@ -2111,7 +2166,7 @@ function App() {
   }, [activeThread?.vaultId]);
 
   useEffect(() => {
-    if (activeView !== 'thread' || !activeThread?.id || activeThread.collaborationMode !== 'plan') return undefined;
+    if (activeView !== 'thread' || !activeThread?.id || !['plan', 'collaboration'].includes(activeThread.collaborationMode || 'default')) return undefined;
     const threadId = activeThread.id;
     const events = new EventSource(`/api/threads/${threadId}/plans/events`);
     events.onmessage = (event) => {
@@ -2125,7 +2180,9 @@ function App() {
           : current.planSessions || [];
         return {
           ...current,
-          collaborationMode: data.collaborationMode === 'plan' ? 'plan' : 'default',
+          collaborationMode: data.collaborationMode === 'collaboration'
+            ? 'collaboration'
+            : data.collaborationMode === 'plan' ? 'plan' : 'default',
           activePlanId: String(data.activePlanId || ''),
           planSessions,
         };
@@ -2243,6 +2300,7 @@ function App() {
     if (threadProgrammaticScrollTimerRef.current !== null) window.clearTimeout(threadProgrammaticScrollTimerRef.current);
     if (threadUserScrollIntentTimerRef.current !== null) window.clearTimeout(threadUserScrollIntentTimerRef.current);
     if (copiedMessageTimerRef.current !== null) window.clearTimeout(copiedMessageTimerRef.current);
+    if (shellSurfaceTransitionTimerRef.current !== null) window.clearTimeout(shellSurfaceTransitionTimerRef.current);
   }, []);
 
   useEffect(() => {
@@ -2282,13 +2340,18 @@ function App() {
   const activeSection = navItems.find((item) => item.id === activeNav);
   const isManagementSection = managementNavIds.has(activeNav);
   const isSettingsNav = activeNav === 'settings' && activeView !== 'new-chat';
+  const isWorkspaceSurfaceNav = workspaceSurfaceNavIds.has(activeNav) && activeView !== 'new-chat';
   const visiblePinnedNav = railNavItems.filter((item) => pinnedNav[item.id] !== false);
   const activeSpace = spaces.find((space) => space.id === activeSpaceId) || spaces[0] || null;
   const visibleWorkspaces = workspaces.filter((workspace) => (workspace.spaceId || activeSpaceId) === activeSpaceId);
   const visibleConversations = conversations.filter((thread) => (thread.spaceId || activeSpaceId) === activeSpaceId);
   const activeWorkspace = activeThread?.workspaceId ? workspaces.find((workspace) => workspace.id === activeThread.workspaceId) || null : null;
-  const activePlan = activeThread?.planSessions?.find((plan) => plan.id === activeThread.activePlanId) || null;
-  const pendingPlanQuestion = activePlan?.questions?.find((batch) => batch.status === 'pending') || null;
+  const activeProposal = activeThread?.planSessions?.find((proposal) => proposal.id === activeThread.activePlanId) || null;
+  const activePlan = activeProposal?.purpose === 'plan' ? activeProposal : null;
+  const activeCollaborationProposal = activeProposal?.purpose === 'collaboration' ? activeProposal : null;
+  const activeWorkflowRunning = Boolean(activeThread?.collaboration?.workflows?.some((workflow) => ['active', 'paused'].includes(workflow.status)));
+  const collaborationIntentEnabled = Boolean(activeThread?.id && collaborationIntentByThreadId[activeThread.id]);
+  const pendingProposalQuestion = activeProposal?.questions?.find((batch) => batch.status === 'pending') || null;
   const visibleMessages = (activeThread?.messages || []).filter(isVisibleChatMessage);
   const overviewRounds = buildThreadOverviewRounds(visibleMessages);
   const profileInspectorDirty = Boolean(profileInspector.target && profileInspector.draft !== profileInspector.original);
@@ -2297,7 +2360,11 @@ function App() {
   const resourceRailAvailable = !spaceEditorReplacesPage && activeView !== 'new-chat' && !isManagementSection && Boolean(activeThread);
   const rightRailKind: 'resources' | null = resourceRailAvailable ? 'resources' : null;
   const rightRailOpen = Boolean(rightRailKind && !libraryCollapsed);
-  const isMacConversationShell = !isSettingsNav && (activeView === 'new-chat' || (!isManagementSection && Boolean(activeThread)));
+  const isMacConversationShell = !isSettingsNav && (activeView === 'new-chat' || (!isManagementSection && (Boolean(activeThread) || Boolean(openingThreadId))));
+  const isMacWorkspaceSurfaceShell = isMacConversationShell || (isMacDesktop && isWorkspaceSurfaceNav);
+  const currentShellSurfaceKind = isMacConversationShell
+    ? 'conversation'
+    : (isSettingsNav || isWorkspaceSurfaceNav) ? 'floating' : 'other';
   useLayoutEffect(() => {
     const main = mainPanelRef.current;
     if (!main || !isMacConversationShell) {
@@ -2466,7 +2533,8 @@ function App() {
   }, [macSpaceEditorOpen]);
 
   useEffect(() => {
-    const nextTab = (activeThread?.executionMode || 'chat') === 'work' ? 'collaboration' : 'files';
+    const hasActiveCollaboration = Boolean(activeThread?.collaboration?.activeWorkflowId || activeThread?.collaboration?.workflows?.some((workflow) => ['active', 'paused'].includes(workflow.status)));
+    const nextTab = hasActiveCollaboration || (activeThread?.executionMode || 'chat') === 'work' ? 'collaboration' : 'files';
     setRightRailTab(nextTab);
   }, [activeThread?.id, activeThread?.executionMode]);
 
@@ -2578,6 +2646,18 @@ function App() {
   useEffect(() => {
     if (activeView === 'new-chat' && globalDefaultAgentId && !newChatAgentId) setNewChatAgentId(globalDefaultAgentId);
   }, [activeView, globalDefaultAgentId, newChatAgentId]);
+
+  useEffect(() => {
+    if (!models.length) return undefined;
+    let cancelled = false;
+    const refreshCapabilities = () => {
+      void fetch('/api/model-capabilities').then((response) => response.json()).then((data) => {
+        if (!cancelled && data?.capabilities) setModelCapabilities(data.capabilities);
+      }).catch(() => {});
+    };
+    const timer = window.setInterval(refreshCapabilities, 5000);
+    return () => { cancelled = true; window.clearInterval(timer); };
+  }, [models.map((model) => `${model.id}:${model.runtimeRevision || ''}`).join('|')]);
 
   useEffect(() => {
     if (activeNav === 'settings' && settingsSection === 'archivedThreads') void refreshArchivedThreads();
@@ -3425,6 +3505,47 @@ function App() {
     setArchivedThreads(data.threads || []);
   }
 
+  async function refreshInbox() {
+    setInboxLoading(true);
+    try {
+      const data = await requestJson<{ items: InboxItem[]; unreadCount: number; actionRequiredCount: number }>('/api/inbox');
+      setInboxItems(data.items || []);
+      setInboxUnreadCount(Number(data.unreadCount || 0));
+      setInboxActionCount(Number(data.actionRequiredCount || 0));
+      setInboxError('');
+      return data.items || [];
+    } catch (error) {
+      setInboxError(error instanceof Error ? error.message : '收件箱读取失败');
+      return [];
+    } finally {
+      setInboxLoading(false);
+    }
+  }
+
+  async function updateInboxItem(itemId: string, patch: { read?: boolean; resolved?: boolean }) {
+    const data = await requestJson<{ item: InboxItem }>(`/api/inbox/${encodeURIComponent(itemId)}`, { method: 'PATCH', body: JSON.stringify(patch) });
+    setInboxItems((current) => current.map((item) => item.id === itemId ? { ...item, ...data.item } : item));
+    if (patch.read === true) setInboxUnreadCount((count) => Math.max(0, count - (inboxItems.find((item) => item.id === itemId)?.readAt ? 0 : 1)));
+    if (patch.resolved === true) setInboxActionCount((count) => Math.max(0, count - (inboxItems.find((item) => item.id === itemId)?.resolvedAt ? 0 : 1)));
+    return data.item;
+  }
+
+  useEffect(() => {
+    let disposed = false;
+    let source: EventSource | null = null;
+    void refreshInbox().then((items) => {
+      if (disposed) return;
+      const cursor = Math.max(0, ...items.map((item) => Number(item.cursor || 0)));
+      source = new EventSource(`/api/inbox/events?afterCursor=${cursor}`);
+      source.addEventListener('inbox.item', () => { if (!disposed) void refreshInbox(); });
+      source.onerror = () => { if (!disposed) setInboxError('收件箱实时连接正在重连…'); };
+    });
+    return () => {
+      disposed = true;
+      source?.close();
+    };
+  }, []);
+
   async function loadThreads(targetWorkspaceId = workspaceId, preferredThreadId?: string | null, options: { openPreferred?: boolean } = {}) {
     const data = await fetch(`/api/workspaces/${targetWorkspaceId}/threads`).then((res) => res.json());
     setThreads(data.threads);
@@ -3433,19 +3554,38 @@ function App() {
   }
 
   async function openThread(threadId: string) {
+    beginShellSurfaceTransition('council', 'thread', 'conversation');
     const requestRevision = ++openThreadRequestRef.current;
-    const data = await fetch(`/api/threads/${threadId}/runs/active`).then((res) => res.json());
-    if (requestRevision !== openThreadRequestRef.current) return;
+    openThreadAbortRef.current?.abort();
+    const controller = new AbortController();
+    openThreadAbortRef.current = controller;
+    setSelectedThreadId(threadId);
+    setOpeningThreadId(threadId);
+    setThreadOpenError('');
     setInput('');
     setThreadFollowState(true);
-    const confirmedIds = new Set(((data.thread as Thread).messages || []).map((message) => message.id));
-    for (const messageId of pendingMessageIds(threadId)) {
-      if (confirmedIds.has(messageId)) confirmPendingMessage(threadId, messageId);
-    }
-    setActiveThread((current) => mergeThreadWithPendingMessages(current?.id === threadId ? current : null, data.thread, pendingMessageIds(threadId)));
-    applyThreadRunSnapshot(data as ThreadRunStateResponse, false);
     setActiveView('thread');
-    scheduleThreadScrollToLatest();
+    closeMacSidebarOverlay();
+    try {
+      const response = await fetch(`/api/threads/${threadId}/runs/active`, { signal: controller.signal });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || '对话加载失败');
+      if (requestRevision !== openThreadRequestRef.current || controller.signal.aborted) return;
+      const confirmedIds = new Set(((data.thread as Thread).messages || []).map((message) => message.id));
+      for (const messageId of pendingMessageIds(threadId)) {
+        if (confirmedIds.has(messageId)) confirmPendingMessage(threadId, messageId);
+      }
+      setActiveThread(mergeThreadWithPendingMessages(null, data.thread, pendingMessageIds(threadId)));
+      syncThreadSummary(threadId, data.thread);
+      applyThreadRunSnapshot(data as ThreadRunStateResponse, false);
+      scheduleThreadScrollToLatest();
+    } catch (error) {
+      if (controller.signal.aborted || requestRevision !== openThreadRequestRef.current) return;
+      setThreadOpenError(error instanceof Error ? error.message : '对话加载失败');
+    } finally {
+      if (requestRevision === openThreadRequestRef.current) setOpeningThreadId('');
+      if (openThreadAbortRef.current === controller) openThreadAbortRef.current = null;
+    }
   }
 
   async function loadVaultSummary(vaultId: string) {
@@ -3510,6 +3650,27 @@ function App() {
       contextWidth,
     });
   }
+
+  useEffect(() => {
+    const openCollaborationRail = (event: Event) => {
+      const detail = (event as CustomEvent<{ threadId?: string; workflowId?: string }>).detail;
+      if (activeThread && detail?.threadId === activeThread.id && detail.workflowId) setCollaborationTaskRequest({ id: `${detail.workflowId}:${Date.now()}`, threadId: activeThread.id, workflowId: detail.workflowId });
+      openRightRailTab('collaboration');
+    };
+    window.addEventListener('frakio:open-collaboration-rail', openCollaborationRail);
+    return () => window.removeEventListener('frakio:open-collaboration-rail', openCollaborationRail);
+  }, [rightRailKind, contextWidth, activeThread?.id]);
+
+  useEffect(() => {
+    const openTask = (event: Event) => {
+      const detail = (event as CustomEvent<{ threadId?: string; workflowId?: string; taskId?: string }>).detail;
+      if (!detail?.threadId || !detail.taskId || detail.threadId !== activeThread?.id) return;
+      setCollaborationTaskRequest({ id: `${detail.workflowId || ''}:${detail.taskId}:${Date.now()}`, threadId: detail.threadId, workflowId: detail.workflowId, taskId: detail.taskId });
+      openRightRailTab('collaboration');
+    };
+    window.addEventListener('frakio:open-collaboration-task', openTask);
+    return () => window.removeEventListener('frakio:open-collaboration-task', openTask);
+  }, [activeThread?.id, rightRailKind, contextWidth]);
 
   function closeRightRailTab(tab: RightRailTab) {
     const index = openRightRailTabs.indexOf(tab);
@@ -3744,8 +3905,24 @@ function App() {
   }
 
   async function deleteThread(threadId: string) {
-    const res = await fetch(`/api/threads/${threadId}`, { method: 'DELETE' });
-    const data = await res.json().catch(() => ({}));
+    let res = await fetch(`/api/threads/${threadId}`, { method: 'DELETE' });
+    let data = await res.json().catch(() => ({}));
+    if (!res.ok && data.code === 'ACTIVE_WORKFLOW_EXISTS' && data.workflowId) {
+      const shouldEndAndDelete = window.confirm('此对话仍有未结束的协作。是否结束协作并删除对话？');
+      if (!shouldEndAndDelete) return;
+      const stopped = await fetch(`/api/threads/${threadId}/collaboration/workflows/${data.workflowId}/cancel`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ idempotencyKey: `delete:${globalThis.crypto.randomUUID()}` }),
+      });
+      const stoppedData = await stopped.json().catch(() => ({}));
+      if (!stopped.ok) {
+        window.alert(stoppedData.error || '协作结束失败，对话尚未删除。');
+        return;
+      }
+      res = await fetch(`/api/threads/${threadId}`, { method: 'DELETE' });
+      data = await res.json().catch(() => ({}));
+    }
     if (!res.ok) {
       window.alert(data.error || '对话删除失败。');
       return;
@@ -4088,7 +4265,7 @@ function App() {
     target: ChatRunTarget | null,
     runAttachments: Attachment[] = [],
     onAccepted?: () => void,
-    options: { suppressUserMessage?: boolean; planExecutionId?: string; messageContext?: MessageContext; clientMessageId?: string } = {},
+    options: { suppressUserMessage?: boolean; planExecutionId?: string; messageIntent?: 'chat' | 'collaboration'; messageContext?: MessageContext; clientMessageId?: string } = {},
   ): Promise<Thread | null> {
     resetRunUi(threadId, { isRunning: true, startPending: true, startedAt, target });
     setRunPresentationsByThreadId((current) => ({ ...current, [threadId]: {} }));
@@ -4107,7 +4284,7 @@ function App() {
           runtimeId,
           agentId: targetAgent.id,
           permissionMode,
-          planMode: activeThread?.collaborationMode === 'plan',
+          planMode: Boolean(activeProposal),
           modelProfileId: activeThreadModelOverride.split('::')[0] || '',
           modelId: activeThreadModelOverride.split('::')[1] || '',
           attachmentKinds: runAttachments.map((attachment) => attachment.kind),
@@ -4165,6 +4342,7 @@ function App() {
         clientMessageId,
         ...(options.suppressUserMessage ? { suppressUserMessage: true } : {}),
         ...(options.planExecutionId ? { planExecutionId: options.planExecutionId } : {}),
+        messageIntent: options.messageIntent || 'chat',
       }),
     });
     const created = await createRes.json().catch(() => ({}));
@@ -4753,12 +4931,12 @@ function App() {
         ? await fetch(`/api/workspaces/${selectedNewChatWorkspaceId}/threads`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ title: titleSeed.slice(0, 40), agentModelOverrides: draftModelOverrides, agentRuntimeOverrides: draftRuntimeOverrides, agentRunOverrides: draftRunOverrides, executionMode: newChatExecutionMode, collaborationMode: newChatPlanEnabled ? 'plan' : 'default', coordinatorAgentId: newChatAgent.id, requestId }),
+          body: JSON.stringify({ title: titleSeed.slice(0, 40), agentModelOverrides: draftModelOverrides, agentRuntimeOverrides: draftRuntimeOverrides, agentRunOverrides: draftRunOverrides, executionMode: newChatExecutionMode, collaborationMode: newChatPlanEnabled ? 'plan' : 'default', planEnabled: newChatPlanEnabled, messageIntent: newChatCollaborationEnabled ? 'collaboration' : 'chat', coordinatorAgentId: newChatAgent.id, requestId }),
         })
         : await fetch('/api/conversations', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ primaryAgentId: newChatAgent.id, title: titleSeed.slice(0, 40), agentModelOverrides: draftModelOverrides, agentRuntimeOverrides: draftRuntimeOverrides, agentRunOverrides: draftRunOverrides, spaceId: activeSpaceId, executionMode: newChatExecutionMode, collaborationMode: newChatPlanEnabled ? 'plan' : 'default', coordinatorAgentId: newChatAgent.id, requestId }),
+          body: JSON.stringify({ primaryAgentId: newChatAgent.id, title: titleSeed.slice(0, 40), agentModelOverrides: draftModelOverrides, agentRuntimeOverrides: draftRuntimeOverrides, agentRunOverrides: draftRunOverrides, spaceId: activeSpaceId, executionMode: newChatExecutionMode, collaborationMode: newChatPlanEnabled ? 'plan' : 'default', planEnabled: newChatPlanEnabled, messageIntent: newChatCollaborationEnabled ? 'collaboration' : 'chat', coordinatorAgentId: newChatAgent.id, requestId }),
         });
       const created = await createResponse.json().catch(() => ({}));
       if (!createResponse.ok) {
@@ -4781,6 +4959,7 @@ function App() {
       setNewChatModelOverride('');
       setNewChatRunOverride({});
       setNewChatPlanEnabled(false);
+      setNewChatCollaborationEnabled(false);
       setActiveView('thread');
       setActiveThread(optimisticThread);
       resetRunUi(thread.id, { isRunning: true, startPending: true, startedAt, target });
@@ -4804,7 +4983,7 @@ function App() {
         await runHermesAgentThread(thread.id, text, runAgents, startedAt, target, runAttachments, () => {
           runAccepted = true;
           clearAttachmentDrafts();
-        }, { clientMessageId });
+        }, { clientMessageId, messageIntent: newChatCollaborationEnabled ? 'collaboration' : 'chat' });
       } catch (error) {
         const failure = error as Error & { code?: string };
         if (!runAccepted) {
@@ -4825,20 +5004,58 @@ function App() {
           return restored;
         });
       }
-      if (newChatExecutionMode === 'work') {
-        const failure = error as Error & { code?: string; details?: Record<string, any> };
-        setCollaborationModeError({ message: failure?.message || '协作运行时未准备好。', code: failure?.code, details: failure?.details });
-      } else {
-        window.alert(error instanceof Error ? error.message : '新对话创建失败。');
-      }
+      const failure = error as Error & { code?: string; details?: Record<string, any> };
+      setCollaborationModeError({ message: failure?.message || '新对话创建失败。', code: failure?.code, details: failure?.details });
       await refreshHermesRuntime();
     } finally {
       setNewChatStarting(false);
     }
   }
 
+  function shellSurfaceKindFor(nextNav: string, nextView: 'thread' | 'new-chat') {
+    if (nextNav === 'settings' && nextView !== 'new-chat') return 'floating';
+    if (workspaceSurfaceNavIds.has(nextNav) && nextView !== 'new-chat') return 'floating';
+    if (nextView === 'new-chat') return 'conversation';
+    if (!managementNavIds.has(nextNav) && (activeThread || openingThreadId)) return 'conversation';
+    return 'other';
+  }
+
+  function clearShellSurfaceTransition() {
+    if (shellSurfaceTransitionTimerRef.current !== null) {
+      window.clearTimeout(shellSurfaceTransitionTimerRef.current);
+      shellSurfaceTransitionTimerRef.current = null;
+    }
+    setShellSurfaceTransitioning(false);
+  }
+
+  function beginShellSurfaceTransition(nextNav: string, nextView: 'thread' | 'new-chat', forcedKind?: 'conversation' | 'floating') {
+    const nextKind = forcedKind || shellSurfaceKindFor(nextNav, nextView);
+    const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)').matches;
+    const narrowLayout = window.matchMedia?.('(max-width: 760px)').matches;
+    if (reduceMotion || narrowLayout || currentShellSurfaceKind === nextKind || currentShellSurfaceKind === 'other' || nextKind === 'other') {
+      clearShellSurfaceTransition();
+      return;
+    }
+    if (shellSurfaceTransitionTimerRef.current !== null) window.clearTimeout(shellSurfaceTransitionTimerRef.current);
+    setShellSurfaceTransitioning(true);
+    shellSurfaceTransitionTimerRef.current = window.setTimeout(() => {
+      shellSurfaceTransitionTimerRef.current = null;
+      setShellSurfaceTransitioning(false);
+    }, 420);
+  }
+
+  function handleShellSurfaceTransitionEnd(event: React.TransitionEvent<HTMLDivElement>) {
+    if (event.target !== event.currentTarget || event.propertyName !== 'padding-top') return;
+    clearShellSurfaceTransition();
+  }
+
   function openNewChatLauncher() {
     if (!closeProfileInspector()) return;
+    beginShellSurfaceTransition('council', 'new-chat');
+    openThreadAbortRef.current?.abort();
+    setSelectedThreadId('');
+    setOpeningThreadId('');
+    setThreadOpenError('');
     setActiveNav('council');
     setActiveView('new-chat');
     newChatInputRef.current = '';
@@ -4851,20 +5068,22 @@ function App() {
     setSelectedNewChatWorkspaceId(null);
     setProjectPickerOpen(false);
     setNewChatPermissionMode(uiSettings.defaultPermissionMode || 'manual');
-    setNewChatExecutionMode('chat');
     setNewChatPlanEnabled(false);
+    setNewChatCollaborationEnabled(false);
     setCollaborationModeError(null);
     void discardAttachmentDrafts();
   }
 
   function openNavSection(sectionId: string) {
     if (!closeProfileInspector()) return;
+    beginShellSurfaceTransition(sectionId, 'thread');
     setActiveView('thread');
     setActiveNav(sectionId);
   }
 
   function openSettingsSection(section: SettingsSection = 'workbench') {
     if (!closeProfileInspector()) return;
+    beginShellSurfaceTransition('settings', 'thread');
     setUserMenuOpen(false);
     setSettingsSection(section);
     setActiveView('thread');
@@ -4875,6 +5094,7 @@ function App() {
     if (!closeProfileInspector()) return;
     setUserMenuOpen(false);
     if (activeThread) {
+      beginShellSurfaceTransition('council', 'thread');
       setActiveNav('council');
       setActiveView('thread');
       return;
@@ -4885,12 +5105,14 @@ function App() {
   async function openWorkspace(workspace: Workspace) {
     if (!closeProfileInspector()) return;
     if (workspace.spaceId && workspace.spaceId !== activeSpaceId) await switchSpace(workspace.spaceId);
+    beginShellSurfaceTransition('council', 'thread');
     setActiveNav('council');
     await loadThreads(workspace.id, workspace.activeThreadId);
   }
 
   async function openConversation(threadId: string) {
     if (!closeProfileInspector()) return;
+    beginShellSurfaceTransition('council', 'thread');
     setActiveNav('council');
     await openThread(threadId);
   }
@@ -4996,11 +5218,11 @@ function App() {
   }
 
   async function answerPlanQuestion(batch: PlanQuestionBatch, answers: Record<string, { selectedLabel?: string; note?: string }>) {
-    if (!activeThread || !activePlan || planAction) return;
+    if (!activeThread || !activeProposal || planAction) return;
     setPlanAction('answer');
     setPlanActionError('');
     try {
-      const res = await fetch(`/api/threads/${activeThread.id}/plans/${activePlan.id}/questions/${batch.id}/answer`, {
+      const res = await fetch(`/api/threads/${activeThread.id}/plans/${activeProposal.id}/questions/${batch.id}/answer`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ answers }),
@@ -5019,11 +5241,11 @@ function App() {
   }
 
   async function cancelPlanQuestion(batch: PlanQuestionBatch) {
-    if (!activeThread || !activePlan || planAction) return;
+    if (!activeThread || !activeProposal || planAction) return;
     setPlanAction('cancel-question');
     setPlanActionError('');
     try {
-      const res = await fetch(`/api/threads/${activeThread.id}/plans/${activePlan.id}/questions/${batch.id}/cancel`, {
+      const res = await fetch(`/api/threads/${activeThread.id}/plans/${activeProposal.id}/questions/${batch.id}/cancel`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ source: 'question_tray' }),
@@ -5042,12 +5264,12 @@ function App() {
   }
 
   async function submitPlanFeedback() {
-    if (!activeThread || !activePlan || !planFeedbackDraft.trim() || planAction) return;
+    if (!activeThread || !activeProposal || !planFeedbackDraft.trim() || planAction) return;
     const feedback = planFeedbackDraft.trim();
     setPlanAction('feedback');
     setPlanActionError('');
     try {
-      const res = await fetch(`/api/threads/${activeThread.id}/plans/${activePlan.id}/feedback`, {
+      const res = await fetch(`/api/threads/${activeThread.id}/plans/${activeProposal.id}/feedback`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ feedback }),
@@ -5058,7 +5280,7 @@ function App() {
       setActiveThread(nextThread);
       setPlanFeedbackDraft('');
       setPlanFeedbackOpen(false);
-      const author = agents.find((agent) => agent.id === activePlan.authorAgentId) || activeComposerAgent;
+      const author = agents.find((agent) => agent.id === activeProposal.authorAgentId) || activeComposerAgent;
       const startedAt = Date.now();
       await runHermesAgentThread(
         activeThread.id,
@@ -5072,6 +5294,29 @@ function App() {
       );
     } catch (error) {
       setPlanActionError(error instanceof Error ? error.message : '计划反馈提交失败。');
+    } finally {
+      setPlanAction('');
+    }
+  }
+
+  async function requestCollaborationRevision(planId: string, feedback: string) {
+    if (!activeThread || !feedback.trim() || planAction) return;
+    const plan = activeThread.planSessions?.find((item) => item.id === planId);
+    if (!plan) return;
+    setPlanAction('feedback');
+    setPlanActionError('');
+    try {
+      const res = await fetch(`/api/threads/${activeThread.id}/plans/${planId}/feedback`, {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ feedback: feedback.trim() }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(data.error || '协作方案调整失败。');
+      const nextThread = data.thread as Thread;
+      setActiveThread(nextThread);
+      const author = agents.find((agent) => agent.id === plan.authorAgentId) || activeComposerAgent;
+      await runHermesAgentThread(activeThread.id, feedback.trim(), nextThread.selectedAgents || selectedAgentIds, Date.now(), author ? { kind: 'agent', agent: author } : null, [], undefined, { suppressUserMessage: true });
+    } catch (error) {
+      setPlanActionError(error instanceof Error ? error.message : '协作方案调整失败。');
     } finally {
       setPlanAction('');
     }
@@ -5324,23 +5569,73 @@ function App() {
     }
   }
 
+  async function prepareCollaborationIntent(thread: Thread) {
+    const response = await fetch(`/api/threads/${thread.id}/collaboration-mode`, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        mode: 'collaboration',
+        purpose: 'collaboration',
+        authorAgentId: activeComposerAgent?.id || thread.activeAgentId || thread.defaultAgentId || '',
+      }),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(data.error || '协作方案准备失败。');
+    if (data.thread) setActiveThread(data.thread as Thread);
+    return data.thread as Thread;
+  }
+
+  async function startSuggestedCollaboration(message: ChatEvent) {
+    if (!activeThread || !message.collaborationSuggestion || collaborationSuggestionStartingId) return;
+    setCollaborationSuggestionStartingId(message.id);
+    setPlanActionError('');
+    try {
+      const prepared = await prepareCollaborationIntent(activeThread);
+      const author = agents.find((agent) => agent.id === message.collaborationSuggestion?.sourceAgentId) || activeComposerAgent;
+      await runHermesAgentThread(
+        prepared.id,
+        `请根据用户当前目标生成多 Agent 协作方案：${message.collaborationSuggestion.title}\n\n${message.collaborationSuggestion.reason}`,
+        prepared.selectedAgents || selectedAgentIds,
+        Date.now(),
+        author ? { kind: 'agent', agent: author } : null,
+        [],
+        undefined,
+        { suppressUserMessage: true, messageIntent: 'collaboration' },
+      );
+    } catch (error) {
+      setPlanActionError(error instanceof Error ? error.message : '协作方案生成失败。');
+    } finally {
+      setCollaborationSuggestionStartingId('');
+    }
+  }
+
   async function sendMessage() {
     const text = input.trim();
     const runAttachments = attachments.flatMap((item) => item.status === 'ready' && item.attachment ? [item.attachment] : []);
     const runContext = draftContext;
     const hasRunContext = Boolean(runContext.browserAnnotations.length || runContext.reviewComments.length);
     if (isRunning || !activeThread || attachments.some((item) => item.status !== 'ready') || (!text && !runAttachments.length && !hasRunContext)) return;
+    let sourceThread = activeThread;
+    const collaborationEnabled = collaborationIntentEnabled && !activeWorkflowRunning;
+    try {
+      if (collaborationEnabled && !activeProposal) {
+        sourceThread = await prepareCollaborationIntent(activeThread);
+      }
+    } catch (error) {
+      setPlanActionError(error instanceof Error ? error.message : '协作方案准备失败。');
+      return;
+    }
     const startedAt = Date.now();
     const clientMessageId = typeof crypto.randomUUID === 'function' ? `client-message-${crypto.randomUUID()}` : `client-message-${startedAt}`;
-    const threadId = activeThread.id;
-    const threadWorkspaceId = activeThread.workspaceId;
-    const threadMode = activeThread.mode;
+    const threadId = sourceThread.id;
+    const threadWorkspaceId = sourceThread.workspaceId;
+    const threadMode = sourceThread.mode;
     setThreadFollowState(true);
     const target = resolveRunTarget(text, agents, activeComposerAgent);
     resetRunUi(threadId, { isRunning: true, startPending: true, startedAt, target });
     const optimisticThread = {
-      ...activeThread,
-      messages: [...activeThread.messages, { id: clientMessageId, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments, ...(hasRunContext ? { context: runContext } : {}) }],
+      ...sourceThread,
+      messages: [...sourceThread.messages, { id: clientMessageId, agentId: 'user', agentName: '你', role: 'Workspace Owner', content: text, attachments: runAttachments, ...(hasRunContext ? { context: runContext } : {}) }],
     };
     addPendingMessage(threadId, clientMessageId);
     setActiveThread(optimisticThread);
@@ -5350,10 +5645,11 @@ function App() {
         const routedThread = await runHermesAgentThread(threadId, text, [...selectedAgentIds], startedAt, target, runAttachments, () => {
           runAccepted = true;
           setInput('');
-          writeThreadDraft(activeThread, '');
+          writeThreadDraft(sourceThread, '');
           clearAttachmentDrafts();
           setDraftContext({ browserAnnotations: [], reviewComments: [] });
-        }, { messageContext: runContext, clientMessageId });
+          if (collaborationEnabled) setCollaborationIntentByThreadId((current) => ({ ...current, [threadId]: false }));
+      }, { messageContext: runContext, clientMessageId, messageIntent: collaborationEnabled ? 'collaboration' : 'chat' });
         if (routedThread) setActiveThread((current) => current?.id === threadId ? routedThread : current);
       } catch (error) {
         const failure = error as Error & { code?: string };
@@ -5753,10 +6049,10 @@ function App() {
       </header>
     )}
     {!cleanShell && (
-    <div data-appearance={effectiveAppDark ? 'dark' : 'light'} data-space-color-mode={activeSpaceTheme.colorMode || 'custom'} className={`app ${isWorkbenchShell ? 'workbench-shell desktop-shell mac-desktop-shell' : ''} ${isDesktopShell ? 'native-desktop-shell' : 'managed-web-shell'} ${isWindowsDesktop ? 'windows-shell' : ''} ${isMacConversationShell ? 'workbench-conversation-shell mac-conversation-shell' : ''} ${['org', 'settings', 'models', 'channels', 'plugins', 'kanban', 'jobs', 'monitoring'].includes(activeNav) || activeView === 'new-chat' || spaceEditorReplacesPage ? 'management-mode' : ''} ${isSettingsNav ? 'settings-mode' : ''} ${spaceEditorReplacesPage ? 'workspace-create-mode' : ''} ${macSpaceEditorOpen ? 'mac-space-editor-open' : ''} ${rightRailKind ? 'has-right-rail' : ''} ${rightRailOpen ? 'right-rail-open' : ''} ${rightRailOverlaysMain ? 'right-rail-overlay' : ''} ${browserFullWorkspace ? 'browser-full-workspace' : ''} ${activeView === 'new-chat' && !spaceEditorReplacesPage ? 'new-chat-mode' : ''} ${libraryCollapsed ? 'library-collapsed' : ''} ${autoSidebarCollapsed && !spaceEditorReplacesPage ? 'sidebar-auto-collapsed' : ''} ${(isWorkbenchShell || isSettingsNav) && sidebarUsesCollapsedLayout && !spaceEditorReplacesPage ? 'sidebar-collapsed' : ''} ${macSidebarOverlayVisible ? 'mac-sidebar-overlay-visible' : ''} ${macSidebarOverlayOpen ? 'mac-sidebar-overlay-open' : ''} ${macSidebarOverlayClosing ? 'mac-sidebar-overlay-closing' : ''} ${uiSettings.density === 'compact' ? 'compact-density' : ''}`} style={workspaceMaterialStyle}>
+    <div data-appearance={effectiveAppDark ? 'dark' : 'light'} data-space-color-mode={activeSpaceTheme.colorMode || 'custom'} className={`app ${isWorkbenchShell ? 'workbench-shell desktop-shell mac-desktop-shell' : ''} ${isDesktopShell ? 'native-desktop-shell' : 'managed-web-shell'} ${isWindowsDesktop ? 'windows-shell' : ''} ${isMacConversationShell ? 'workbench-conversation-shell mac-conversation-shell' : ''} ${isMacDesktop && isWorkspaceSurfaceNav ? 'mac-workspace-surface-shell' : ''} ${['org', 'settings', 'models', 'channels', 'plugins', 'inbox', 'kanban', 'jobs', 'monitoring'].includes(activeNav) || activeView === 'new-chat' || spaceEditorReplacesPage ? 'management-mode' : ''} ${isSettingsNav ? 'settings-mode' : ''} ${isWorkspaceSurfaceNav ? 'workspace-surface-mode' : ''} ${shellSurfaceTransitioning ? 'shell-surface-transitioning' : ''} ${spaceEditorReplacesPage ? 'workspace-create-mode' : ''} ${macSpaceEditorOpen ? 'mac-space-editor-open' : ''} ${rightRailKind ? 'has-right-rail' : ''} ${rightRailOpen ? 'right-rail-open' : ''} ${rightRailOverlaysMain ? 'right-rail-overlay' : ''} ${browserFullWorkspace ? 'browser-full-workspace' : ''} ${activeView === 'new-chat' && !spaceEditorReplacesPage ? 'new-chat-mode' : ''} ${libraryCollapsed ? 'library-collapsed' : ''} ${autoSidebarCollapsed && !spaceEditorReplacesPage ? 'sidebar-auto-collapsed' : ''} ${(isWorkbenchShell || isSettingsNav) && sidebarUsesCollapsedLayout && !spaceEditorReplacesPage ? 'sidebar-collapsed' : ''} ${macSidebarOverlayVisible ? 'mac-sidebar-overlay-visible' : ''} ${macSidebarOverlayOpen ? 'mac-sidebar-overlay-open' : ''} ${macSidebarOverlayClosing ? 'mac-sidebar-overlay-closing' : ''} ${uiSettings.density === 'compact' ? 'compact-density' : ''}`} style={workspaceMaterialStyle} onTransitionEnd={handleShellSurfaceTransitionEnd}>
       {isDesktopShell && !isSettingsNav && (
         <>
-          {!isMacConversationShell && workbenchLeftActions}
+          {!isMacWorkspaceSurfaceShell && workbenchLeftActions}
           {rightRailKind && (!isMacConversationShell || !isMacDesktop) && (
             <IconTooltipButton
               className={rightRailOpen ? 'desktop-window-control desktop-right-rail-toggle active' : 'desktop-window-control desktop-right-rail-toggle'}
@@ -5891,7 +6187,7 @@ function App() {
               const Icon = item.icon;
               return (
                 <button className={activeNav === item.id && activeView !== 'new-chat' ? 'rail-action active' : 'rail-action'} key={item.id} onClick={() => openNavSection(item.id)} title={item.label} aria-label={item.label}>
-                  <Icon size={16} /><span>{item.label}</span>
+                  <Icon size={16} /><span>{item.label}</span>{item.id === 'inbox' && (inboxActionCount || inboxUnreadCount) > 0 && <em className={inboxActionCount ? 'rail-action-badge action' : 'rail-action-badge'}>{inboxActionCount || inboxUnreadCount}</em>}
                 </button>
               );
             })}
@@ -5941,7 +6237,7 @@ function App() {
                       {hasThreads && !collapsed && (
                         <div className="project-thread-list">
                           {workspaceThreads.map((thread) => (
-                            <div className={activeView !== 'new-chat' && thread.id === activeThread?.id ? 'rail-subitem active' : 'rail-subitem'} data-rail-hover-row key={thread.id} onContextMenu={(event) => openRailContextMenu(event, { kind: 'thread', thread })}>
+                            <div className={activeView !== 'new-chat' && thread.id === (selectedThreadId || activeThread?.id) ? 'rail-subitem active' : 'rail-subitem'} data-rail-hover-row key={thread.id} onContextMenu={(event) => openRailContextMenu(event, { kind: 'thread', thread })}>
                               <ThreadRailContent thread={thread} agents={agents} onOpen={() => void openConversation(thread.id)} onMore={(event) => openRailContextMenu(event, { kind: 'thread', thread })} />
                             </div>
                           ))}
@@ -5957,7 +6253,7 @@ function App() {
               <div className="rail-section-head"><span>对话</span><button className="mini-add" onClick={openNewChatLauncher} aria-label="新建单聊"><Plus size={14} /></button></div>
               <div className="rail-list">
                 {visibleConversations.length ? visibleConversations.map((thread) => (
-                  <div className={activeView !== 'new-chat' && thread.id === activeThread?.id ? 'rail-item active' : 'rail-item'} data-rail-hover-row key={thread.id} onContextMenu={(event) => openRailContextMenu(event, { kind: 'thread', thread })}>
+                  <div className={activeView !== 'new-chat' && thread.id === (selectedThreadId || activeThread?.id) ? 'rail-item active' : 'rail-item'} data-rail-hover-row key={thread.id} onContextMenu={(event) => openRailContextMenu(event, { kind: 'thread', thread })}>
                     <ThreadRailContent thread={thread} agents={agents} onOpen={() => void openConversation(thread.id)} onMore={(event) => openRailContextMenu(event, { kind: 'thread', thread })} />
                   </div>
                 )) : <div className="empty-rail">这个工作区还没有单 Agent 对话。</div>}
@@ -6188,7 +6484,7 @@ function App() {
             : undefined}
         />
       )}
-      {!isMacConversationShell && (
+      {!isMacConversationShell && !isWorkspaceSurfaceNav && (
         <ResizeHandle
           side="left"
           currentWidth={sidebarWidth}
@@ -6225,7 +6521,7 @@ function App() {
             onCommit={commitContextWidth}
           />
         )}
-        {activeView !== 'new-chat' && !isSettingsNav && !spaceEditorReplacesPage && !isMacConversationShell && <header className="topbar">
+        {activeView !== 'new-chat' && !isSettingsNav && !spaceEditorReplacesPage && !isMacWorkspaceSurfaceShell && <header className="topbar">
           <div className="topbar-title">
             <span className="topbar-title-icon"><FileText size={17} /></span>
             <h1>{isManagementSection ? activeSection?.label : activeThread?.title || activeSection?.label || '新对话'}</h1>
@@ -6430,6 +6726,9 @@ function App() {
               >
                 <AttachmentTray attachments={attachments} notice={attachmentNotice} onRemove={removeAttachment} onRetry={retryAttachment} />
                 {attachmentDragActive && <div className="attachment-drop-overlay"><ArrowDownToLine size={22} /><strong>松开即可添加附件</strong></div>}
+                <AnimatePresence initial={false}>
+                  {newChatCollaborationEnabled && <CollaborationIntentIndicator key="new-chat-collaboration" />}
+                </AnimatePresence>
                 <MentionTextarea
                   value={newChatInput}
                   onChange={(value) => { newChatInputRef.current = value; setNewChatInput(value); }}
@@ -6438,18 +6737,20 @@ function App() {
                   agents={agents}
                   selectedAgentIds={[newChatAgent?.id || globalDefaultAgentId].filter(Boolean)}
                   placeholder="随意输入，随意@"
+                  collaborationEnabled={newChatCollaborationEnabled}
+                  onCollaborationChange={(enabled) => { setNewChatCollaborationEnabled(enabled); if (enabled) setNewChatPlanEnabled(false); }}
                 />
                 <div className="composer-toolbar">
                   <div className="composer-left-tools">
                     <ComposerAddMenu
                       planEnabled={newChatPlanEnabled}
-                      planBusy={newChatStarting}
+                      planBusy={newChatStarting || newChatCollaborationEnabled}
                       onAddFile={() => fileInputRef.current?.click()}
-                      onEnablePlan={() => setNewChatPlanEnabled(true)}
+                      onEnablePlan={() => { setNewChatPlanEnabled(true); setNewChatCollaborationEnabled(false); }}
                     />
-                    <input ref={fileInputRef} className="file-input" type="file" multiple accept={attachmentAcceptValue} onChange={(event) => handleAttachmentChange(event.target.files)} />
-                    <PermissionModeControl compact={conversationMainCompact} value={newChatPermissionMode} onChange={setNewChatPermissionMode} />
-                    <ExecutionModeControl value={newChatExecutionMode} disabled={newChatStarting || newChatPlanEnabled} onChange={(mode) => { setNewChatExecutionMode(mode); setCollaborationModeError(null); }} />
+                      <input ref={fileInputRef} className="file-input" type="file" multiple accept={attachmentAcceptValue} onChange={(event) => handleAttachmentChange(event.target.files)} />
+                      <PermissionModeControl compact={conversationMainCompact} value={newChatPermissionMode} onChange={setNewChatPermissionMode} />
+                      <CollaborationIntentControl active={newChatCollaborationEnabled} disabled={newChatStarting || newChatPlanEnabled} onChange={(enabled) => { setNewChatCollaborationEnabled(enabled); if (enabled) setNewChatPlanEnabled(false); }} />
                     {newChatPlanEnabled && <PlanModeIndicator busy={newChatStarting} onClose={() => setNewChatPlanEnabled(false)} />}
                   </div>
                   <div className="composer-right-tools">
@@ -6480,7 +6781,7 @@ function App() {
                   </div>
                 </div>
               </div>
-              {collaborationModeError && newChatExecutionMode === 'work' && (
+              {collaborationModeError && (
                 <CollaborationRuntimeErrorCard error={collaborationModeError} loading={newChatStarting} onRetry={() => void startNewChat()} />
               )}
               <AppMenu open={projectPickerOpen} onOpenChange={setProjectPickerOpen} modal={false}>
@@ -6512,6 +6813,7 @@ function App() {
           <SettingsPage
             vaults={vaults}
             models={models}
+            modelCapabilities={modelCapabilities}
             agents={agents}
             hermesStatus={hermesStatus}
             hermesBootstrap={hermesBootstrap}
@@ -6599,8 +6901,17 @@ function App() {
           <ChannelsPage profiles={hermesBootstrap?.profiles.length ? hermesBootstrap.profiles : hermesStatus?.profiles || []} defaultProfile={defaultAgentProfileName || uiSettings.defaultProfile || hermesBootstrap?.approval.profileName || 'default'} />
         ) : activeNav === 'plugins' ? (
           <PluginsPage agents={agents} profiles={hermesBootstrap?.profiles.length ? hermesBootstrap.profiles : hermesStatus?.profiles || []} />
+        ) : activeNav === 'inbox' ? (
+          <WorkspaceSurface>
+            <InboxPage items={inboxItems} loading={inboxLoading} error={inboxError} onRefresh={() => void refreshInbox()} onOpen={async (item) => {
+              if (!item.readAt) await updateInboxItem(item.id, { read: true }).catch(() => null);
+              setActiveNav('council');
+              await openThread(item.threadId);
+              window.setTimeout(() => window.dispatchEvent(new CustomEvent('frakio:open-collaboration-rail', { detail: { threadId: item.threadId, workflowId: item.workflowId } })), 80);
+            }} />
+          </WorkspaceSurface>
         ) : activeNav === 'kanban' ? (
-          <KanbanPage agents={agents} />
+          <WorkspaceSurface><CollaborationCenterPage agents={agents} /></WorkspaceSurface>
         ) : activeNav === 'jobs' ? (
           <JobsPage profiles={hermesBootstrap?.profiles.length ? hermesBootstrap.profiles : hermesStatus?.profiles || []} defaultProfile={defaultAgentProfileName || uiSettings.defaultProfile || hermesBootstrap?.approval.profileName || 'default'} />
         ) : activeNav === 'monitoring' ? (
@@ -6609,6 +6920,7 @@ function App() {
           <OrgPage
             agents={agents}
             models={models}
+            modelCapabilities={modelCapabilities}
             selectedOrgAgentId={selectedOrgAgentId}
             onSelectAgent={selectOrgAgent}
             onProfilesChanged={refreshOrg}
@@ -6667,10 +6979,21 @@ function App() {
               )}
               <div className="thread" ref={threadScrollRef}>
                 <div className="thread-content" ref={threadContentRef}>
+                {openingThreadId && <div className="thread-opening-skeleton" role="status" aria-live="polite">
+                  <span /><span /><span /><span />
+                  <small>正在打开对话…</small>
+                </div>}
+                {!openingThreadId && threadOpenError && <div className="thread-opening-error" role="alert"><TriangleAlert size={16} /><span>{threadOpenError}</span><button type="button" onClick={() => void openThread(selectedThreadId)}>重试</button></div>}
                 {visibleMessages.map((message) => {
                   const transcript = activeThread?.runTranscripts?.find((item) => item.messageId === message.id || (message.externalRunId && item.runId === message.externalRunId));
+                  const messageAgent = message.agentId === 'user' || message.agentId === 'system' ? null : agents.find((agent) => agent.id === message.agentId) || null;
+                  const messageModelOverride = messageAgent ? activeThread?.agentModelOverrides?.[messageAgent.id] || '' : '';
+                  const messageModelValue = messageAgent ? messageModelOverride || modelValueForAgent(messageAgent, models, {}, uiSettings.defaultModel) : '';
+                  const messageRunOverride = messageAgent ? activeThread?.agentRunOverrides?.[messageAgent.id] || {} : {};
                   const messagePlan = message.planId ? activeThread?.planSessions?.find((plan) => plan.id === message.planId) : null;
                   const messagePlanDraft = messagePlan?.drafts.find((draft) => draft.revision === message.planRevision);
+                  const collaborationPlanMessage = message.contentType === 'plan' && messagePlan?.purpose === 'collaboration';
+                  const collaborationPlanResponse = message.contentType === 'collaboration_plan_response' && messagePlan?.purpose === 'collaboration';
                   const messageRunId = message.externalRunId || messagePlanDraft?.submittedByRunId || '';
                   const showMessageActions = message.agentId !== 'user'
                     && message.agentId !== 'system'
@@ -6684,8 +7007,21 @@ function App() {
                     key={message.id}
                     ref={(node) => { messageRefs.current[message.id] = node; }}
                   >
-                    <article className={message.agentId === 'user' ? 'message user has-user-identity' : 'message'}>
-                      {message.agentId !== 'user' && <MessageAvatar message={message} agents={agents} />}
+                    {!collaborationPlanMessage && <article className={message.agentId === 'user' ? 'message user has-user-identity' : 'message'}>
+                      {message.agentId !== 'user' && (messageAgent ? <MessageAgentSessionConfig
+                        message={message}
+                        agent={messageAgent}
+                        runtimeId={effectiveRuntimeForAgentUi(messageAgent, activeThread)}
+                        models={hermesProfileModelOptions}
+                        value={messageModelValue}
+                        modelOverride={messageModelOverride}
+                        runOverride={messageRunOverride}
+                        capabilities={modelCapabilities}
+                        open={messageAgentConfigOpenId === message.id}
+                        onOpenChange={(open) => setMessageAgentConfigOpenId(open ? message.id : '')}
+                        onChange={(value) => updateThreadAgentModelOverride(messageAgent.id, value)}
+                        onRunOverrideChange={(override) => updateThreadAgentRunOverride(messageAgent.id, override)}
+                      /> : <MessageAvatar message={message} agents={agents} />)}
                       <div className="message-body">
                         {message.agentId !== 'user' && <div className="message-meta">
                           <strong>{message.agentName}</strong>
@@ -6704,15 +7040,17 @@ function App() {
                         {message.workArtifacts && message.workArtifacts.length > 0 && <WorkMessageArtifacts artifacts={message.workArtifacts} workspaceId={activeWorkspace?.id || activeThread?.workspaceId || ''} />}
                         {message.agentId === 'user' ? (
                           message.content ? <p className="message-text">{message.content}</p> : null
+                        ) : message.contentType === 'collaboration_suggestion' && message.collaborationSuggestion ? (
+                          <CollaborationSuggestionCard suggestion={message.collaborationSuggestion} busy={collaborationSuggestionStartingId === message.id} disabled={isRunning || Boolean(activeProposal)} onStart={() => void startSuggestedCollaboration(message)} />
                         ) : message.contentType === 'plan' && messagePlan && messagePlanDraft ? (
-                          <PlanCard
+                          messagePlan.purpose === 'collaboration' ? null : <PlanCard
                             plan={messagePlan}
                             draft={messagePlanDraft}
                             agents={agents}
                             latest={messagePlan.currentRevision === messagePlanDraft.revision}
                             readOnly={Boolean(messagePlan.readOnly)}
                             busy={Boolean(planAction)}
-                            feedbackOpen={planFeedbackOpen && messagePlan.id === activePlan?.id}
+                            feedbackOpen={planFeedbackOpen && messagePlan.id === activeProposal?.id}
                             feedback={planFeedbackDraft}
                             error={planActionError}
                             onFeedbackChange={setPlanFeedbackDraft}
@@ -6727,6 +7065,13 @@ function App() {
                             ? <RunTranscriptContent content={message.content} groups={transcript.groups} runFinished={transcript.status !== 'running'} threadId={activeThread?.id} workspaceId={activeThread?.workspaceId} />
                             : <MarkdownMessage content={message.content} threadId={activeThread?.id} workspaceId={activeThread?.workspaceId} />
                         )}
+                        {collaborationPlanResponse && <InlineCollaborationBlock
+                          thread={activeThread}
+                          agents={agents}
+                          anchorMessageId={message.id}
+                          anchorPlanId={message.planId}
+                          onAdjust={(planId, feedback) => void requestCollaborationRevision(planId, feedback)}
+                        />}
                         {message.handoffs?.some((handoff) => handoff.status === 'failed') && <div className="message-handoffs" aria-label="Agent 转交失败">{message.handoffs.filter((handoff) => handoff.status === 'failed').map((handoff) => <span className="message-handoff failed" key={handoff.routeId}><Network size={13} />{`转交 ${handoff.targetAgentName} 失败`}<button onClick={() => void retryHandoff(handoff.routeId)}>重试</button></span>)}</div>}
                         {message.changeSetId && message.changeSummary && message.changeSummary.fileCount > 0 && (
                           <button className="message-change-summary" type="button" onClick={() => openRightRailTab('review')}>
@@ -6750,10 +7095,17 @@ function App() {
                         )}
                       </div>
                       {message.agentId === 'user' && <MessageAvatar message={message} agents={agents} userProfile={userProfile} />}
-                    </article>
+                    </article>}
+                    {message.agentId !== 'user' && !collaborationPlanResponse && <InlineCollaborationBlock
+                      thread={activeThread}
+                      agents={agents}
+                      anchorMessageId={message.id}
+                      anchorPlanId={message.planId}
+                      onAdjust={(planId, feedback) => void requestCollaborationRevision(planId, feedback)}
+                    />}
                   </div>;
                 })}
-                <ChatCollaborationEvents thread={activeThread} />
+                <InlineCollaborationBlock thread={activeThread} agents={agents} fallback={!visibleMessages.some((message) => message.contentType === 'collaboration_plan_response')} onAdjust={(planId, feedback) => void requestCollaborationRevision(planId, feedback)} />
                 {!isRunning && <PersistedInterruptedRuns thread={activeThread} agents={agents} />}
                 {activeRunUi?.compactionRecords?.map((record) => (
                   <ContextCompactionRecord key={record.operationId} record={record} />
@@ -6795,7 +7147,7 @@ function App() {
                 <div ref={threadBottomRef} />
                 </div>
               </div>
-              <ThreadOverviewRail rounds={overviewRounds} activeRoundId={activeOverviewRoundId} onJumpToRound={jumpToThreadRound} />
+              {!openingThreadId && <ThreadOverviewRail rounds={overviewRounds} activeRoundId={activeOverviewRoundId} onJumpToRound={jumpToThreadRound} />}
               <div className="composer-shell">
                 {!isFollowingLatest && hasNewThreadContent && (
                   <button
@@ -6807,13 +7159,13 @@ function App() {
                     <ArrowDownToLine size={16} aria-hidden="true" />
                   </button>
                 )}
-                {pendingPlanQuestion ? (
+                {pendingProposalQuestion ? (
                   <PlanQuestionPanel
-                    batch={pendingPlanQuestion}
+                    batch={pendingProposalQuestion}
                     submitting={Boolean(planAction)}
                     error={planActionError}
-                    onSubmit={(answers) => void answerPlanQuestion(pendingPlanQuestion, answers)}
-                    onCancel={() => void cancelPlanQuestion(pendingPlanQuestion)}
+                    onSubmit={(answers) => void answerPlanQuestion(pendingProposalQuestion, answers)}
+                    onCancel={() => void cancelPlanQuestion(pendingProposalQuestion)}
                   />
                 ) : runClarification || runApproval ? (
                   <RunDecisionPanel
@@ -6828,7 +7180,8 @@ function App() {
                   />
                 ) : (
                   <div
-                    className={`composer ${attachmentDragActive ? 'attachment-drag-active' : ''}`}
+                    className={`composer ${attachmentDragActive ? 'attachment-drag-active' : ''}${openingThreadId ? ' thread-opening' : ''}`}
+                    aria-busy={Boolean(openingThreadId)}
                     onDragEnter={handleAttachmentDragEnter}
                     onDragOver={handleAttachmentDragOver}
                     onDragLeave={handleAttachmentDragLeave}
@@ -6844,9 +7197,14 @@ function App() {
                     </button>
                   )}
                   {attachmentDragActive && <div className="attachment-drop-overlay"><ArrowDownToLine size={22} /><strong>松开即可添加附件</strong></div>}
-                  {activePlan
-                    ? <div className="work-mode-hint plan-mode-hint"><Lightbulb size={14} /><span>先调查并整理计划，批准前不会修改项目或启动任务</span></div>
-                    : (activeThread?.executionMode || 'chat') === 'work' && <div className="work-mode-hint"><Briefcase size={14} /><span>{activeThread?.collaboration?.workflows?.some((workflow) => workflow.currentRootTaskId && workflow.status !== 'completed') ? '补充内容会交给协调 Agent 调整当前方案' : '发送任务后，协调 Agent 会拆解并发布执行方案'}</span></div>}
+                  {activeProposal
+                    ? activeCollaborationProposal
+                      ? <div className="work-mode-hint collaboration-mode-hint collaboration-plan-hint"><UsersRound size={13} /><span>正在整理多 Agent 协作方案，确认前不会创建任务</span></div>
+                      : <div className="work-mode-hint plan-mode-hint"><Lightbulb size={14} /><span>先调查并整理计划，批准前不会修改项目或启动任务</span></div>
+                    : activeWorkflowRunning && <div className="work-mode-hint collaboration-mode-hint"><UsersRound size={13} /><span>协作正在运行，发送内容将作为当前任务引导</span></div>}
+                  <AnimatePresence initial={false}>
+                    {collaborationIntentEnabled && <CollaborationIntentIndicator key="thread-collaboration" adjusting={Boolean(activeThread?.collaboration?.workflows?.some((workflow) => ['active', 'paused'].includes(workflow.status)))} />}
+                  </AnimatePresence>
                   <MentionTextarea
                     value={input}
                     onChange={setInput}
@@ -6854,50 +7212,52 @@ function App() {
                     sendKey={uiSettings.sendKey || 'enter'}
                     agents={agents}
                     selectedAgentIds={selectedAgentIds}
-                    placeholder={(activeThread?.executionMode || 'chat') === 'work' ? '描述要完成的任务，首条消息可 @ 指定协调 Agent' : '随意输入，随意@'}
+                    placeholder="随意输入，随意@"
+                    collaborationEnabled={collaborationIntentEnabled}
+                    onCollaborationChange={(enabled) => setCollaborationIntentByThreadId((current) => ({ ...current, [activeThread!.id]: enabled }))}
                   />
 	                  <div className="composer-toolbar">
 	                    <div className="composer-left-tools">
 	                      <ComposerAddMenu
 	                        planEnabled={Boolean(activePlan)}
-	                        planBusy={Boolean(planAction) || isRunning}
+                        planBusy={Boolean(activeProposal) || Boolean(planAction) || isRunning || collaborationIntentEnabled || activeWorkflowRunning}
 	                        onAddFile={() => fileInputRef.current?.click()}
 	                        onEnablePlan={() => void setThreadPlanMode(true)}
 	                      />
-	                      <input ref={fileInputRef} className="file-input" type="file" multiple accept={attachmentAcceptValue} onChange={(event) => handleAttachmentChange(event.target.files)} />
-	                      <PermissionModeControl compact={conversationMainCompact} value={permissionMode} onChange={(mode) => void updateThreadPermissionMode(mode)} />
-	                      <ExecutionModeControl value={activeThread?.executionMode || 'chat'} disabled={isRunning || Boolean(activePlan)} switching={modeSwitching} onChange={(mode) => void updateThreadExecutionMode(mode)} />
-	                      {activePlan && <PlanModeIndicator busy={Boolean(planAction)} onClose={() => void setThreadPlanMode(false)} />}
+                      <input ref={fileInputRef} className="file-input" type="file" multiple accept={attachmentAcceptValue} onChange={(event) => handleAttachmentChange(event.target.files)} />
+                      <PermissionModeControl compact={conversationMainCompact} value={permissionMode} onChange={(mode) => void updateThreadPermissionMode(mode)} />
+                      <CollaborationIntentControl active={collaborationIntentEnabled} disabled={isRunning || Boolean(planAction) || Boolean(activePlan) || Boolean(activeProposal) || activeWorkflowRunning} adjusting={activeWorkflowRunning} onChange={(enabled) => setCollaborationIntentByThreadId((current) => ({ ...current, [activeThread!.id]: enabled }))} />
+                      {activePlan && <PlanModeIndicator busy={Boolean(planAction)} onClose={() => void setThreadPlanMode(false)} />}
 	                    </div>
 	                    <div className="composer-right-tools">
-	                      <ProviderModelPicker
-	                        className="composer-model composer-agent-model"
-	                        runtimeId={activeComposerRuntimeId}
-	                        agentName={activeComposerAgent?.name || ''}
-	                        value={activeComposerProfileModelValue}
-	                        models={hermesProfileModelOptions}
-                        emptyLabel={activeComposerAgent ? '未配置模型' : '请先新建 Agent'}
+                      <ProviderModelPicker
+                        className="composer-model composer-agent-model"
+                        runtimeId={activeComposerRuntimeId}
+                        agentName={activeComposerAgent?.name || ''}
+                        value={activeComposerProfileModelValue}
+                        models={hermesProfileModelOptions}
+                        emptyLabel="未配置模型"
                         ariaLabel={activeComposerAgent ? `${activeComposerAgent.name} 的 Frakio Model Center 模型` : 'Frakio Model Center 模型'}
                         title="Frakio Model Center"
-	                        allowDefault
-	                        usingDefault={!activeThreadModelOverride}
-	                        capabilities={modelCapabilities}
-	                        runOverride={activeThreadRunOverride}
-	                        onRunOverrideChange={(override) => activeComposerAgent ? updateThreadAgentRunOverride(activeComposerAgent.id, override) : undefined}
-	                        onChange={(value) => activeComposerAgent ? updateThreadAgentModelOverride(activeComposerAgent.id, value) : undefined}
-	                      />
+                        allowDefault
+                        usingDefault={!activeThreadModelOverride}
+                        runOverride={activeThreadRunOverride}
+                        capabilities={modelCapabilities}
+                        onRunOverrideChange={(override) => activeComposerAgent ? updateThreadAgentRunOverride(activeComposerAgent.id, override) : undefined}
+                        onChange={(value) => activeComposerAgent ? updateThreadAgentModelOverride(activeComposerAgent.id, value) : undefined}
+                      />
 	                      <ComposerRunButton
 	                        isRunning={isRunning}
 	                        hasActiveRun={Boolean(activeHermesRun)}
 	                        isStopping={runStopping}
-	                        canSend={!workflowControlInProgress && attachments.every((item) => item.status === 'ready') && Boolean(input.trim() || attachments.length || draftContext.browserAnnotations.length || draftContext.reviewComments.length)}
-	                        runningLabel={(activeThread?.executionMode || 'chat') === 'work' ? '停止当前协调运行，不会暂停全部任务' : undefined}
+                        canSend={!openingThreadId && !workflowControlInProgress && attachments.every((item) => item.status === 'ready') && Boolean(input.trim() || attachments.length || draftContext.browserAnnotations.length || draftContext.reviewComments.length)}
+                        runningLabel={activeThread?.collaboration?.workflows?.some((workflow) => workflow.status === 'active') ? '停止当前会话运行，不会暂停后台协作' : undefined}
 	                        onSend={() => void sendMessage()}
 	                        onStop={() => void stopActiveRun()}
 	                      />
 	                    </div>
 	                  </div>
-	                  {planActionError && !pendingPlanQuestion && <div className="plan-inline-error" role="alert">{planActionError}</div>}
+	                  {planActionError && !pendingProposalQuestion && <div className="plan-inline-error" role="alert">{planActionError}</div>}
 	                </div>
                 )}
               </div>
@@ -6943,6 +7303,7 @@ function App() {
             onRetryCollaboration={() => void updateThreadExecutionMode('work')}
             panelTab={rightRailTab}
             hasOpenTabs={openRightRailTabs.length > 0}
+            collaborationTaskRequest={collaborationTaskRequest}
             onOpenTab={openRightRailTab}
             onCloseTab={closeRightRailTab}
             />
@@ -8092,6 +8453,73 @@ const kanbanStatusLabels: Record<KanbanTaskStatus, string> = {
 };
 const kanbanStatusOrder = Object.keys(kanbanStatusLabels) as KanbanTaskStatus[];
 
+function WorkspaceSurface({ children }: { children: React.ReactNode }) {
+  return <section className="workspace-surface-content">{children}</section>;
+}
+
+function InboxPage({ items, loading, error, onRefresh, onOpen }: { items: InboxItem[]; loading: boolean; error: string; onRefresh: () => void; onOpen: (item: InboxItem) => void }) {
+  const pending = items.filter((item) => item.actionRequired && !item.resolvedAt);
+  const updates = items.filter((item) => !item.actionRequired || item.resolvedAt);
+  const renderItem = (item: InboxItem) => <button type="button" className={`inbox-item priority-${item.priority}${item.readAt ? '' : ' unread'}${item.actionRequired && !item.resolvedAt ? ' action-required' : ''}`} key={item.id} onClick={() => onOpen(item)}>
+    <span className="inbox-item-icon">{item.type === 'workflow_completed' ? <CheckCircle2 size={16} /> : item.type === 'approval_required' || item.type === 'answer_required' ? <CircleHelp size={16} /> : <TriangleAlert size={16} />}</span>
+    <span className="inbox-item-copy"><small>{item.threadTitle || '对话'} · {formatTime(item.updatedAt)}</small><strong>{item.title}</strong><p>{item.summary || '点击查看详情'}</p></span>
+    <span className="inbox-item-state">{item.actionRequired && !item.resolvedAt ? '待处理' : !item.readAt ? '未读' : ''}<ChevronRight size={15} /></span>
+  </button>;
+  return <section className="inbox-page">
+    <header><div><small>跨会话提醒</small><h1>收件箱</h1><p>协作完成、失败、审批和需要回答的事项会集中在这里。</p></div><button type="button" onClick={onRefresh} disabled={loading}><RefreshCw size={15} className={loading ? 'spin' : ''} />刷新</button></header>
+    {error && <div className="resource-error">{error}</div>}
+    {loading && !items.length ? <div className="inbox-loading"><LoaderCircle size={18} className="spin" />正在读取提醒…</div> : <div className="inbox-groups">
+      {pending.length > 0 && <section><header><strong>待处理</strong><span>{pending.length}</span></header><div>{pending.map(renderItem)}</div></section>}
+      <section><header><strong>最新消息</strong><span>{updates.filter((item) => !item.readAt).length || ''}</span></header><div>{updates.map(renderItem)}{!updates.length && !pending.length && <div className="inbox-empty"><Bell size={24} /><strong>暂时没有提醒</strong><p>协作任务的关键状态会出现在这里。</p></div>}</div></section>
+    </div>}
+  </section>;
+}
+
+function CollaborationCenterPage({ agents }: { agents: Agent[] }) {
+  const [workflows, setWorkflows] = useState<Array<CollaborationWorkflowSnapshot & { threadId: string; threadTitle: string }>>([]);
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState('');
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+
+  const load = useCallback(async (silent = false) => {
+    if (!silent) setLoading(true);
+    try {
+      const data = await requestJson<{ workflows: Array<CollaborationWorkflowSnapshot & { threadId: string; threadTitle: string }> }>('/api/collaboration/overview');
+      setWorkflows(data.workflows || []);
+      setError('');
+    } catch (err) {
+      if (!silent) setError(err instanceof Error ? err.message : '协作状态读取失败');
+    } finally {
+      if (!silent) setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+    const timer = window.setInterval(() => void load(true), 3000);
+    return () => window.clearInterval(timer);
+  }, [load]);
+
+  const visible = workflows.filter((workflow) => workflow.status !== 'archived');
+  const activeCount = visible.filter((workflow) => workflow.status === 'active').length;
+  const pausedCount = visible.filter((workflow) => workflow.status === 'paused').length;
+  const waitingCount = visible.reduce((count, workflow) => count + workflow.tasks.filter((task) => ['blocked', 'scheduled', 'todo', 'pending_confirmation', 'waiting_dependency', 'waiting_input', 'paused'].includes(task.status)).length, 0);
+  const selected = visible.find((workflow) => workflow.id === selectedWorkflowId) || null;
+
+  return <section className="collaboration-center-page">
+    <div className="collaboration-center-hero"><div><small>Frakio Collaboration</small><h2>协作</h2><p>跨会话查看正在执行、等待和已完成的 Workflow。</p></div><button type="button" className="icon-btn" onClick={() => void load()} aria-label="刷新协作状态" title="刷新"><RefreshCw size={16} /></button></div>
+    <div className="collaboration-center-stats"><span><strong>{activeCount}</strong><small>执行中</small></span><span><strong>{pausedCount}</strong><small>已暂停</small></span><span><strong>{waitingCount}</strong><small>等待处理</small></span><span><strong>{visible.length}</strong><small>全部 Workflow</small></span></div>
+    {error && <div className="form-error">{error}</div>}
+    {loading ? <div className="empty-state">正在读取协作状态...</div> : visible.length ? <div className="collaboration-center-grid">{visible.map((workflow) => {
+      const tasks = workflow.tasks.filter((task) => task.status !== 'archived');
+      const done = tasks.filter((task) => ['done', 'completed'].includes(task.status)).length;
+      const coordinator = agents.find((agent) => agent.id === workflow.coordinatorAgentId);
+      return <button type="button" key={`${workflow.threadId}:${workflow.id}`} onClick={() => setSelectedWorkflowId(workflow.id)}><header><span><small>{workflow.threadTitle}</small><strong>{workflow.name}</strong></span><em className={`status-${workflow.status}`}>{workflow.status === 'active' ? '执行中' : workflow.status === 'paused' ? '已暂停' : workflow.status === 'completed' ? '已完成' : workflow.status}</em></header><div className="collaboration-progress"><span style={{ width: `${tasks.length ? Math.round(done / tasks.length * 100) : 0}%` }} /></div><footer><span>{done}/{tasks.length} 完成</span><span>{coordinator?.name || '未指定协调 Agent'}</span></footer></button>;
+    })}</div> : <div className="empty-state">暂无协作 Workflow。复杂任务的计划确认后会出现在这里。</div>}
+    {selected && createPortal(<div className="modal-backdrop" onClick={() => setSelectedWorkflowId('')}><div className="modal collaboration-center-detail" role="dialog" aria-modal="true" onClick={(event) => event.stopPropagation()}><div className="modal-head"><div><small>{selected.threadTitle}</small><h2>{selected.name}</h2><p>{selected.tasks.length} 个任务 · {selected.status}</p></div><button className="icon-btn" onClick={() => setSelectedWorkflowId('')} aria-label="关闭"><X size={18} /></button></div><div className="collaboration-center-task-list">{selected.tasks.filter((task) => task.status !== 'archived').map((task) => <div key={task.id}><span className={`collaboration-task-dot status-${task.status}`} /><span><strong>{task.title}</strong><small>{task.assignee || '未分配'} · {collaborationStatusLabel(task.status)}</small></span></div>)}</div></div></div>, document.body)}
+  </section>;
+}
+
 function KanbanPage({ agents }: { agents: Agent[] }) {
   const [boards, setBoards] = useState<KanbanBoard[]>([]);
   const [board, setBoard] = useState('default');
@@ -8518,6 +8946,11 @@ function collaborationEventLabel(type: string) {
   const labels: Record<string, string> = {
     'workflow.created': '工作流已创建',
     'workflow.completed': '工作流已完成',
+    'workflow.failed': '工作流执行失败',
+    'workflow.finalization_requested': '正在准备最终交付',
+    'workflow.finalization_started': '协调 Agent 正在汇总',
+    'workflow.delivery_ready': '最终交付已完成',
+    'workflow.finalization_failed': '最终汇总失败',
     'workflow.pause_started': '正在暂停全部任务',
     'workflow.paused': '工作流已暂停',
     'workflow.pause_failed': '暂停未完全生效',
@@ -8530,50 +8963,666 @@ function collaborationEventLabel(type: string) {
     'task.waiting': '任务进入等待',
     'task.resumed': '任务自动恢复',
     'task.completed': '任务已完成',
+    'task.review': '等待验收',
     'task.failed': '任务执行异常',
+    'task.cancelled': '任务已取消',
     'dependency.created': '新增任务依赖',
     'dependency.satisfied': '依赖已经满足',
     'artifact.published': '交付物已发布',
+    'artifact.conflict': '交付物发生冲突',
     'escalation.started': '阻塞已经升级',
     'escalation.resolved': '阻塞已经解决',
     'human.required': '需要人工介入',
     'intervention.sent': '用户已经介入',
     'mode.changed': '对话模式已切换',
-    'plan.published': '执行方案已发布',
-    'plan.revised': '执行方案已修订',
+    'plan.published': '协作方案已确认',
+    'plan.revised': '协作方案已修订',
     'capability.blocked': '协作工具未加载',
   };
   return labels[type] || type;
 }
 
-function collaborationStatusLabel(status: KanbanTaskStatus) {
-  return kanbanStatusLabels[status] || status;
+function collaborationWorkflowStatusLabel(status: CollaborationWorkflow['status']) {
+  return ({ active: '执行中', paused: '已暂停', completed: '已完成', failed: '执行失败', cancelled: '已结束', archived: '已归档' } as Record<string, string>)[status] || status;
+}
+
+function collaborationStatusLabel(status: CollaborationTaskStatus) {
+  return ({
+    ...kanbanStatusLabels,
+    pending_confirmation: '待确认',
+    waiting_dependency: '等待依赖',
+    waiting_input: '等待输入',
+    completed: '已完成',
+    failed: '失败',
+    paused: '已暂停',
+    cancelled: '已结束',
+  } as Record<CollaborationTaskStatus, string>)[status] || status;
+}
+
+function compactCollaborationLabel(value: string, fallback: string) {
+  const source = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!source) return fallback;
+  if (source.length <= 28) return source;
+  const segment = source.split(/[：:→|｜]/)[0].trim();
+  return (segment || source).slice(0, 28) || fallback;
+}
+
+function CollaborationTaskStatusLabel({ status }: { status: CollaborationTaskStatus }) {
+  const label = collaborationStatusLabel(status);
+  const reducedMotion = useReducedMotion();
+  return <small className={`collaboration-task-status status-${status}`} aria-label={label}><AnimatePresence initial={false} mode="popLayout"><motion.span key={status} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} exit={{ opacity: 0, y: -8 }} transition={{ duration: reducedMotion ? 0 : 0.18, ease: 'easeOut' }}>{label}</motion.span></AnimatePresence></small>;
+}
+
+type CollaborationCardLifecycle = 'proposal' | 'running' | 'finalizing' | 'completed' | 'delivery_failed' | 'paused' | 'failed' | 'cancelled';
+
+function collaborationLifecycleLabel(lifecycle: CollaborationCardLifecycle) {
+  return ({
+    proposal: '待确认',
+    running: '执行中',
+    finalizing: '正在汇总',
+    completed: '已完成',
+    delivery_failed: '汇总失败',
+    paused: '已暂停',
+    failed: '执行失败',
+    cancelled: '已结束',
+  } as Record<CollaborationCardLifecycle, string>)[lifecycle];
+}
+
+function collaborationCardLifecycle(workflow: CollaborationWorkflowSnapshot | null | undefined, proposal: CollaborationProposal | null | undefined, tasks: CollaborationTask[]): CollaborationCardLifecycle {
+  if (!workflow) {
+    if (proposal?.status === 'cancelled') return 'cancelled';
+    if (proposal?.status === 'failed') return 'failed';
+    return 'proposal';
+  }
+  if (workflow.status === 'cancelled') return 'cancelled';
+  if (workflow.status === 'paused') return 'paused';
+  const allTasksFinished = tasks.length > 0 && tasks.every((task) => ['done', 'completed', 'cancelled', 'failed'].includes(task.status));
+  const allExecutionTasksCompleted = tasks.length > 0 && tasks.every((task) => ['done', 'completed'].includes(task.status));
+  if (workflow.finalization?.state === 'failed' && allExecutionTasksCompleted) return 'delivery_failed';
+  if (workflow.status === 'failed') return 'failed';
+  if (!allTasksFinished) return 'running';
+  return workflow.status === 'completed' || workflow.finalization?.state === 'delivered' ? 'completed' : 'finalizing';
+}
+
+function useCollaborationCompletionCelebrations(snapshot: CollaborationSnapshot | null, workflowId = '') {
+  const [taskIds, setTaskIds] = useState<Set<string>>(() => new Set());
+  const stateRef = useRef({ identity: '', cursor: 0 });
+  const timersRef = useRef<Map<string, number>>(new Map());
+  useEffect(() => {
+    if (!snapshot || !workflowId) return;
+    const identity = `${snapshot.threadId}:${workflowId}`;
+    if (stateRef.current.identity !== identity) {
+      stateRef.current = { identity, cursor: snapshot.cursor };
+      setTaskIds(new Set());
+      return;
+    }
+    const previousCursor = stateRef.current.cursor;
+    stateRef.current.cursor = Math.max(previousCursor, snapshot.cursor);
+    const completedTaskIds = snapshot.events
+      .filter((event) => event.workflowId === workflowId && event.type === 'task.completed' && event.cursor > previousCursor && event.taskId)
+      .map((event) => String(event.taskId));
+    if (!completedTaskIds.length) return;
+    setTaskIds((current) => new Set([...current, ...completedTaskIds]));
+    for (const taskId of completedTaskIds) {
+      const currentTimer = timersRef.current.get(taskId);
+      if (currentTimer) window.clearTimeout(currentTimer);
+      const timer = window.setTimeout(() => {
+        timersRef.current.delete(taskId);
+        setTaskIds((current) => {
+          const next = new Set(current);
+          next.delete(taskId);
+          return next;
+        });
+      }, 650);
+      timersRef.current.set(taskId, timer);
+    }
+  }, [snapshot?.threadId, snapshot?.cursor, workflowId]);
+  useEffect(() => () => {
+    for (const timer of timersRef.current.values()) window.clearTimeout(timer);
+    timersRef.current.clear();
+  }, []);
+  return taskIds;
+}
+
+function CollaborationTaskSquare({ completed, celebrating, status }: { completed: boolean; celebrating: boolean; status: CollaborationTaskStatus }) {
+  const reducedMotion = Boolean(useReducedMotion());
+  return <span className={`collaboration-task-square status-${status}${celebrating && !reducedMotion ? ' is-celebrating' : ''}`} aria-hidden="true">
+    {completed && <motion.svg className="collaboration-task-check" viewBox="0 0 20 20" initial={celebrating && !reducedMotion ? { scale: .75 } : false} animate={{ scale: 1 }} transition={{ duration: reducedMotion ? 0 : .22, ease: 'easeOut' }}><motion.path d="M4.5 10.5 8 14l7.5-8" fill="none" stroke="currentColor" strokeLinecap="round" strokeLinejoin="round" strokeWidth="2.2" initial={celebrating && !reducedMotion ? { pathLength: 0 } : false} animate={{ pathLength: 1 }} transition={{ duration: reducedMotion ? 0 : .24, delay: reducedMotion ? 0 : .08, ease: 'easeOut' }} /></motion.svg>}
+    {celebrating && !reducedMotion && <span className="collaboration-task-confetti">{Array.from({ length: 8 }, (_, index) => <i style={{ '--particle-index': index } as React.CSSProperties} key={index} />)}</span>}
+  </span>;
+}
+
+function CollaborationSummaryCard({
+  title,
+  tasks,
+  agents,
+  lifecycle,
+  density = 'chat',
+  collapsed = false,
+  onToggleCollapsed,
+  onOpenTask,
+  celebratingTaskIds,
+  children,
+}: {
+  title: string;
+  tasks: CollaborationTask[];
+  agents: Agent[];
+  lifecycle: CollaborationCardLifecycle;
+  density?: 'chat' | 'rail';
+  collapsed?: boolean;
+  onToggleCollapsed?: () => void;
+  onOpenTask?: (task: CollaborationTask) => void;
+  celebratingTaskIds?: Set<string>;
+  children?: React.ReactNode;
+}) {
+  const done = tasks.filter((task) => ['done', 'completed'].includes(task.status)).length;
+  const taskCount = tasks.length;
+  const completed = lifecycle === 'completed';
+  const displayTitle = compactCollaborationLabel(title, '协作任务');
+  const lifecycleLabel = collaborationLifecycleLabel(lifecycle);
+  return <section className={`collaboration-summary-card density-${density} state-${lifecycle}${collapsed ? ' is-collapsed' : ''}`} aria-label={title}>
+    <header className="collaboration-summary-head">
+      {collapsed && completed && onToggleCollapsed ? <button type="button" className="collaboration-summary-collapse" onClick={onToggleCollapsed}>
+        <span><strong>{title}</strong><small>{done} / {taskCount} 已完成</small></span><ChevronRight size={16} />
+      </button> : <span className="collaboration-summary-title"><ChevronDown size={16} aria-hidden="true" /><strong title={title}>{displayTitle}</strong><small>· {taskCount} 项 · {lifecycleLabel}</small></span>}
+    </header>
+    {!collapsed && <>
+      <div className="collaboration-summary-tasks">
+        {tasks.slice(0, 8).map((task) => {
+          const agent = agents.find((item) => item.name === task.assignee || item.id === task.assignee);
+          const taskDone = ['done', 'completed'].includes(task.status);
+          const active = ['running', 'doing'].includes(task.status);
+          const label = compactCollaborationLabel(task.title, '任务');
+          return <button type="button" key={task.id} className={`collaboration-summary-task status-${task.status}${active ? ' is-active' : ''}`} onClick={() => onOpenTask?.(task)} disabled={!onOpenTask}>
+            <CollaborationTaskSquare completed={taskDone} celebrating={Boolean(celebratingTaskIds?.has(task.id))} status={task.status} />
+            <strong title={task.title}>{label}</strong>
+            <span className="collaboration-summary-owner">{agent ? <AgentAvatar agent={agent} size="sm" /> : <span className="agent-avatar sm">{String(task.assignee || '?').slice(0, 1)}</span>}</span>
+            <CollaborationTaskStatusLabel status={task.status} />
+          </button>;
+        })}
+      </div>
+      {children}
+    </>}
+  </section>;
+}
+
+const collaborationRuntimeEventTypes = [
+  'run.accepted', 'run.started', 'message.delta', 'reasoning.delta', 'tool.started', 'tool.completed',
+  'approval.requested', 'approval.resolved', 'clarify.requested', 'clarify.resolved',
+  'context.compaction.started', 'context.compaction.completed', 'run.interrupting', 'run.completed', 'run.failed', 'run.cancelled',
+];
+
+function CollaborationTaskSessionPanel({ threadId, workflow, task, snapshotCursor, onBack }: {
+  threadId: string;
+  workflow: CollaborationWorkflowSnapshot;
+  task: CollaborationTask;
+  snapshotCursor: number;
+  onBack: () => void;
+}) {
+  const [detail, setDetail] = useState<CollaborationTaskDetail | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
+  const [intervention, setIntervention] = useState('');
+  const [attachments, setAttachments] = useState<AttachmentDraft[]>([]);
+  const [sending, setSending] = useState(false);
+  const [approvalBusy, setApprovalBusy] = useState('');
+  const [hasNewContent, setHasNewContent] = useState(false);
+  const streamRef = useRef<HTMLDivElement | null>(null);
+  const followStreamRef = useRef(true);
+  const refreshTimerRef = useRef<number | null>(null);
+  const versionRef = useRef('');
+  const attachmentInputRef = useRef<HTMLInputElement | null>(null);
+
+  const refreshDetail = useCallback(async () => {
+    try {
+      const endpoint = workflow.nativeOnly
+        ? `/api/workflows/${encodeURIComponent(workflow.id)}/tasks/${encodeURIComponent(task.id)}`
+        : `/api/hermes/kanban/tasks/${encodeURIComponent(task.id)}?board=${encodeURIComponent(workflow.boardSlug)}`;
+      const data = await requestJson<{ detail: CollaborationTaskDetail }>(endpoint);
+      setDetail(data.detail);
+      setError('');
+    } catch (nextError) {
+      setError(nextError instanceof Error ? nextError.message : '工作会话加载失败。');
+    } finally {
+      setLoading(false);
+    }
+  }, [task.id, workflow.id]);
+
+  useEffect(() => { void refreshDetail(); }, [refreshDetail, snapshotCursor]);
+
+  const latestRun = detail?.runs?.at(-1) || null;
+  useEffect(() => {
+    if (!latestRun?.id || ['ended', 'failed', 'aborted'].includes(latestRun.status)) return undefined;
+    const cursor = Math.max(0, Number(latestRun.presentation?.lastCursor || 0));
+    const source = new EventSource(`/api/runtime-runs/${latestRun.id}/events?cursor=${cursor}`);
+    const scheduleRefresh = () => {
+      if (refreshTimerRef.current !== null) return;
+      refreshTimerRef.current = window.setTimeout(() => {
+        refreshTimerRef.current = null;
+        void refreshDetail();
+      }, 120);
+    };
+    for (const eventType of collaborationRuntimeEventTypes) source.addEventListener(eventType, scheduleRefresh);
+    source.onerror = scheduleRefresh;
+    return () => {
+      source.close();
+      if (refreshTimerRef.current !== null) window.clearTimeout(refreshTimerRef.current);
+      refreshTimerRef.current = null;
+    };
+  }, [latestRun?.id, latestRun?.status, refreshDetail]);
+
+  const presentation = latestRun?.presentation || null;
+  const contentVersion = `${presentation?.revision || 0}:${presentation?.lastCursor || 0}:${Array.isArray(detail?.events) ? detail.events.length : Array.isArray(detail?.runtimeEvents) ? detail.runtimeEvents.length : 0}:${Array.isArray(detail?.artifacts) ? detail.artifacts.length : 0}`;
+  useLayoutEffect(() => {
+    const node = streamRef.current;
+    if (!node || versionRef.current === contentVersion) return;
+    const initial = !versionRef.current;
+    versionRef.current = contentVersion;
+    if (initial || followStreamRef.current) {
+      node.scrollTop = node.scrollHeight;
+      setHasNewContent(false);
+    } else {
+      setHasNewContent(true);
+    }
+  }, [contentVersion]);
+
+  const scrollToLatest = () => {
+    const node = streamRef.current;
+    if (!node) return;
+    node.scrollTop = node.scrollHeight;
+    followStreamRef.current = true;
+    setHasNewContent(false);
+  };
+
+  async function sendIntervention() {
+    const attachmentIds = attachments.flatMap((item) => item.attachment?.id ? [item.attachment.id] : []);
+    if ((!intervention.trim() && !attachmentIds.length) || sending) return;
+    setSending(true);
+    try {
+      await requestJson(`/api/threads/${threadId}/collaboration/interventions`, {
+        method: 'POST',
+        body: JSON.stringify({ workflowId: workflow.id, taskId: task.id, action: 'message', message: intervention.trim(), attachmentIds, idempotencyKey: globalThis.crypto.randomUUID() }),
+      });
+      setIntervention('');
+      attachments.forEach((item) => item.previewUrl && URL.revokeObjectURL(item.previewUrl));
+      setAttachments([]);
+      await refreshDetail();
+    } finally {
+      setSending(false);
+    }
+  }
+
+  async function addAttachments(files: FileList | null) {
+    const selected = Array.from(files || []).slice(0, Math.max(0, 10 - attachments.length));
+    if (!selected.length) return;
+    const queued = selected.map((file): AttachmentDraft => ({ localId: crypto.randomUUID(), file, previewUrl: '', status: 'uploading' }));
+    setAttachments((current) => [...current, ...queued]);
+    await Promise.all(queued.map(async (draft) => {
+      try {
+        const response = await fetch(`/api/attachments?name=${encodeURIComponent(draft.file.name)}`, { method: 'POST', headers: { 'Content-Type': draft.file.type || 'application/octet-stream' }, body: draft.file });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.attachment) throw new Error(data.error || '上传失败');
+        setAttachments((current) => current.map((item) => item.localId === draft.localId ? { ...item, status: 'ready', attachment: data.attachment } : item));
+      } catch (nextError) {
+        setAttachments((current) => current.map((item) => item.localId === draft.localId ? { ...item, status: 'error', error: nextError instanceof Error ? nextError.message : '上传失败' } : item));
+      }
+    }));
+    if (attachmentInputRef.current) attachmentInputRef.current.value = '';
+  }
+
+  function removeAttachment(localId: string) {
+    const attachment = attachments.find((item) => item.localId === localId)?.attachment;
+    setAttachments((current) => current.filter((item) => item.localId !== localId));
+    if (attachment?.id) void fetch(`/api/attachments/${attachment.id}`, { method: 'DELETE' }).catch(() => null);
+  }
+
+  async function resolveApproval(decision: 'approve_once' | 'deny') {
+    const approvalId = presentation?.approval?.id;
+    if (!latestRun?.id || !approvalId || approvalBusy) return;
+    setApprovalBusy(decision);
+    try {
+      await requestJson(`/api/runtime-runs/${latestRun.id}/approve`, { method: 'POST', body: JSON.stringify({ approvalId, decision }) });
+      await refreshDetail();
+    } finally {
+      setApprovalBusy('');
+    }
+  }
+
+  const statusText = ({ pending_confirmation: '待确认', running: '执行中', doing: '执行中', blocked: '等待依赖', waiting_dependency: '等待依赖', waiting_input: '等待输入', todo: '待执行', ready: '待执行', review: '待验收', done: '已完成', completed: '已完成', failed: '失败', paused: '已暂停', cancelled: '已结束' } as Record<string, string>)[detail?.task.status || task.status] || detail?.task.status || task.status;
+  const collaborationEvents = (Array.isArray(detail?.events) ? detail.events : Array.isArray(detail?.runtimeEvents) ? detail.runtimeEvents : []) as CollaborationEvent[];
+  const artifacts = Array.isArray(detail?.artifacts) ? detail.artifacts : [];
+  const parents = Array.isArray(detail?.parents) ? detail.parents : [];
+  const children = Array.isArray(detail?.children) ? detail.children : [];
+
+  return (
+      <section className="collaboration-agent-panel" aria-labelledby={`collaboration-task-${task.id}`}>
+        <div className="modal-head collaboration-agent-head">
+          <div><button type="button" className="collaboration-session-back" onClick={onBack}><ArrowLeft size={14} />协作总览</button><small>{task.assignee || detail?.task.assigneeAgentId || 'Agent'} · {detail?.task.runtimeId || latestRun?.runtimeId || 'Runtime'}</small><h2 id={`collaboration-task-${task.id}`}>{task.title}</h2><p>{statusText} · 工作会话</p></div>
+        </div>
+        <div
+          className="collaboration-agent-stream"
+          ref={streamRef}
+          onScroll={(event) => {
+            const node = event.currentTarget;
+            const nearBottom = node.scrollHeight - node.scrollTop - node.clientHeight < 72;
+            followStreamRef.current = nearBottom;
+            if (nearBottom) setHasNewContent(false);
+          }}
+        >
+          {loading && !detail && <div className="resource-empty"><LoaderCircle className="spin" size={16} />正在载入工作会话</div>}
+          {error && <div className="collaboration-session-error"><TriangleAlert size={15} />{error}<button onClick={() => void refreshDetail()}>重试</button></div>}
+          {detail && <>
+            <div className="collaboration-session-meta">
+              <span><Clock3 size={14} />{latestRun ? `${latestRun.runtimeId || detail?.task.runtimeId || 'Runtime'} · ${latestRun.status}` : '尚未启动 Run'}</span>
+              <span><Link2 size={14} />{parents.length} 个上游 · {children.length} 个下游</span>
+              <span><FileText size={14} />{artifacts.length} 个产物</span>
+            </div>
+            {presentation?.approval && <section className="collaboration-session-approval">
+              <div><ShieldAlert size={16} /><span><strong>{presentation.approval.title || '等待操作确认'}</strong><small>{presentation.approval.command || presentation.approval.tool || 'Agent 请求执行受控操作'}</small></span></div>
+              <div><button disabled={Boolean(approvalBusy)} onClick={() => void resolveApproval('deny')}>拒绝</button><button className="primary" disabled={Boolean(approvalBusy)} onClick={() => void resolveApproval('approve_once')}>{approvalBusy ? '正在处理' : '允许一次'}</button></div>
+            </section>}
+            {presentation?.clarification && <section className="collaboration-session-clarification"><CircleHelp size={16} /><span><strong>等待你的补充</strong><small>{presentation.clarification.question}</small></span></section>}
+            {(presentation?.content || presentation?.activityGroups?.length) ? <section className="collaboration-session-output">
+              <RunTranscriptContent
+                content={presentation.content || ''}
+                groups={presentation.activityGroups || []}
+                streaming={!['ended', 'failed', 'aborted'].includes(latestRun?.status || '')}
+                runFinished={['ended', 'failed', 'aborted'].includes(latestRun?.status || '')}
+                showAwaiting={latestRun?.status === 'running'}
+                threadId={threadId}
+              />
+            </section> : <div className="collaboration-session-events">
+              {collaborationEvents.map((event) => { const label = event.title || event.detail || event.payload?.title || event.payload?.detail || collaborationEventLabel(event.type) || event.type; return <div className="collaboration-agent-event" key={event.id}><span className="collaboration-event-dot" /><div><strong>{label}</strong><small>{formatTime(event.createdAt)}</small></div></div>; })}
+              {!collaborationEvents.length && <div className="resource-empty">Agent 尚未产生可展示的内容。</div>}
+            </div>}
+            {(parents.length > 0 || children.length > 0) && <section className="collaboration-session-section"><header><Network size={14} />任务依赖</header><div className="collaboration-session-chips">{parents.map((id) => <span key={`parent-${id}`}>上游 · {id}</span>)}{children.map((id) => <span key={`child-${id}`}>下游 · {id}</span>)}</div></section>}
+            {artifacts.length > 0 && <section className="collaboration-session-section"><header><FileText size={14} />交付产物</header><div className="collaboration-session-artifacts">{artifacts.map((artifact) => <button key={artifact.id} type="button" onClick={() => void window.frakioDesktop?.showItemInFolder?.(artifact.path)}><File size={14} /><span><strong>{artifact.metadata?.name || artifact.path.split('/').at(-1) || '产物'}</strong><small>{artifact.path}</small></span>{window.frakioDesktop?.showItemInFolder && <FolderOpen size={14} />}</button>)}</div></section>}
+          </>}
+        </div>
+        {hasNewContent && <button type="button" className="collaboration-new-content" onClick={scrollToLatest}><ArrowDownToLine size={14} />查看新内容</button>}
+        {attachments.length > 0 && <div className="collaboration-intervention-attachments">{attachments.map((item) => <span key={item.localId}><FileText size={12} /><em>{item.file.name}</em><small>{item.status === 'uploading' ? '上传中' : item.status === 'error' ? '失败' : ''}</small><button type="button" onClick={() => removeAttachment(item.localId)} aria-label={`移除 ${item.file.name}`}><X size={12} /></button></span>)}</div>}
+        <div className="collaboration-agent-composer"><input ref={attachmentInputRef} className="file-input" type="file" multiple accept={attachmentAcceptValue} onChange={(event) => void addAttachments(event.target.files)} /><button type="button" className="top-icon-btn" onClick={() => attachmentInputRef.current?.click()} aria-label="添加附件" title="添加附件"><Plus size={15} /></button><textarea value={intervention} onChange={(event) => setIntervention(event.target.value)} onKeyDown={(event) => { if ((event.metaKey || event.ctrlKey) && event.key === 'Enter') void sendIntervention(); }} placeholder="补充方向、资料或约束…" rows={2} /><button type="button" className="send-btn" disabled={(!intervention.trim() && !attachments.some((item) => item.status === 'ready')) || sending} onClick={() => void sendIntervention()} aria-label="发送引导"><ArrowUp size={14} /></button></div>
+      </section>
+  );
+}
+
+function InlineCollaborationBlock({ thread, agents, anchorMessageId, anchorPlanId, fallback = false, onAdjust }: {
+  thread: Thread | null;
+  agents: Agent[];
+  anchorMessageId?: string;
+  anchorPlanId?: string;
+  fallback?: boolean;
+  onAdjust: (planId: string, feedback: string) => void;
+}) {
+  const collaborationState = useThreadCollaboration<CollaborationSnapshot>(thread?.id);
+  const snapshot = collaborationState.snapshot;
+  const syncPending = collaborationState.syncPending;
+  const [sticky, setSticky] = useState(false);
+  const [dismissedStickySignature, setDismissedStickySignature] = useState('');
+  const [busy, setBusy] = useState<'confirm' | 'cancel' | ''>('');
+  const [adjusting, setAdjusting] = useState(false);
+  const [feedback, setFeedback] = useState('');
+  const [actionError, setActionError] = useState('');
+  const [workflowControlBusy, setWorkflowControlBusy] = useState<'pause' | 'resume' | 'cancel' | ''>('');
+  const [finalizationRetrying, setFinalizationRetrying] = useState(false);
+  const blockRef = useRef<HTMLDivElement | null>(null);
+  const proposal = (snapshot?.proposals || []).find((item) =>
+    (anchorMessageId && item.proposalMessageId === anchorMessageId)
+    || (anchorPlanId && item.sourcePlanId === anchorPlanId),
+  ) || null;
+  const anchoredWorkflow = proposal?.workflowId
+    ? snapshot?.workflows.find((item) => item.id === proposal.workflowId)
+    : snapshot?.workflows.find((item) => item.approvedPlanId === anchorPlanId);
+  const workflow = anchoredWorkflow || (fallback
+    ? [...(snapshot?.workflows || [])].reverse().find((item) => item.status !== 'archived' && !(item.approvedPlanId && (thread?.messages || []).some((message) => message.planId === item.approvedPlanId)))
+    : null);
+  const celebratingTaskIds = useCollaborationCompletionCelebrations(snapshot, workflow?.id || '');
+  const workflowSignature = workflow ? `${workflow.id}:${workflow.status}` : proposal ? `${proposal.id}:${proposal.revision}:${proposal.status}` : '';
+  useEffect(() => {
+    setSticky(false);
+    setDismissedStickySignature('');
+  }, [thread?.id]);
+  useEffect(() => {
+    const node = blockRef.current;
+    if (!node || !workflow || workflow.status === 'archived' || proposal?.status !== 'confirmed') {
+      setSticky(false);
+      return undefined;
+    }
+    const root = node.closest('.thread');
+    if (!root) {
+      setSticky(false);
+      return undefined;
+    }
+    const observer = new IntersectionObserver(([entry]) => setSticky(!entry.isIntersecting && entry.boundingClientRect.top < root.getBoundingClientRect().top), { root, threshold: 0.02 });
+    observer.observe(node);
+    return () => {
+      observer.disconnect();
+    };
+  }, [workflowSignature, proposal?.status]);
+  const proposalSteps = Array.isArray((proposal?.content as any)?.steps) ? (proposal?.content as any).steps : Array.isArray((proposal?.content as any)?.tasks) ? (proposal?.content as any).tasks : [];
+  const tasks: CollaborationTask[] = workflow?.tasks.filter((task) => task.status !== 'archived' && task.id !== workflow.currentRootTaskId) || proposalSteps.map((step: any, index: number): CollaborationTask => ({ id: String(step.taskId || step.key || index), title: String(step.title || '未命名任务'), assignee: agents.find((agent) => agent.id === step.assigneeAgentId)?.name || step.assigneeAgentId || '未分配', status: 'pending_confirmation' }));
+  const lifecycle = collaborationCardLifecycle(workflow, proposal, tasks);
+  if ((!workflow && !proposal) || !tasks.length) return null;
+  const done = tasks.filter((task) => ['done', 'completed'].includes(task.status)).length;
+  const confirmed = Boolean(workflow || proposal?.status === 'confirmed');
+  async function confirmProposal() {
+    if (!thread?.id || !proposal || busy) return;
+    setBusy('confirm'); setActionError('');
+    try {
+      const data = await requestJson<{ snapshot: CollaborationSnapshot }>(`/api/threads/${thread.id}/collaboration/proposals/${proposal.id}/confirm`, { method: 'POST', body: JSON.stringify({ revision: proposal.revision, confirmedBy: 'user' }) });
+      publishThreadCollaborationSnapshot(data.snapshot);
+      window.dispatchEvent(new CustomEvent('frakio:collaboration-snapshot', { detail: data.snapshot }));
+      window.dispatchEvent(new CustomEvent('frakio:thread-refresh-request', { detail: { threadId: thread.id } }));
+    } catch (error) { setActionError(error instanceof Error ? error.message : '协作启动失败。'); }
+    finally { setBusy(''); }
+  }
+  async function cancelProposal() {
+    if (!thread?.id || !proposal || busy) return;
+    setBusy('cancel'); setActionError('');
+    try {
+      await requestJson(`/api/threads/${thread.id}/collaboration/proposals/${proposal.id}/cancel`, { method: 'POST', body: JSON.stringify({}) });
+      await refreshThreadCollaboration(thread.id);
+    } catch (error) { setActionError(error instanceof Error ? error.message : '取消协作方案失败。'); }
+    finally { setBusy(''); }
+  }
+  async function controlWorkflow(action: 'pause' | 'resume' | 'cancel') {
+    if (!thread?.id || !workflow || workflowControlBusy) return;
+    if (action === 'cancel' && !window.confirm('结束协作后，未完成任务将停止。')) return;
+    setWorkflowControlBusy(action);
+    setActionError('');
+    try {
+      const data = await requestJson<{ snapshot: CollaborationSnapshot }>(`/api/threads/${thread.id}/collaboration/workflows/${workflow.id}/${action}`, {
+        method: 'POST',
+        body: JSON.stringify({ idempotencyKey: `${action}:${globalThis.crypto.randomUUID()}` }),
+      });
+      publishThreadCollaborationSnapshot(data.snapshot);
+      window.dispatchEvent(new CustomEvent('frakio:collaboration-snapshot', { detail: data.snapshot }));
+      window.dispatchEvent(new CustomEvent('frakio:thread-refresh-request', { detail: { threadId: thread.id } }));
+    } catch (error) { setActionError(error instanceof Error ? error.message : '协作控制失败。'); }
+    finally { setWorkflowControlBusy(''); }
+  }
+  async function retryFinalization() {
+    if (!thread?.id || !workflow || finalizationRetrying) return;
+    setFinalizationRetrying(true);
+    setActionError('');
+    try {
+      const data = await requestJson<{ snapshot: CollaborationSnapshot }>(`/api/threads/${thread.id}/collaboration/workflows/${workflow.id}/retry-finalization`, {
+        method: 'POST',
+        body: JSON.stringify({ idempotencyKey: `retry-finalization:${globalThis.crypto.randomUUID()}` }),
+      });
+      publishThreadCollaborationSnapshot(data.snapshot);
+    } catch (error) {
+      setActionError(error instanceof Error ? error.message : '最终汇总重试失败。');
+    } finally {
+      setFinalizationRetrying(false);
+    }
+  }
+  return <>
+    <section className="inline-collaboration-block" ref={blockRef} aria-label={proposal?.title || workflow?.name || '协作任务'}>
+      {syncPending && <div className="collaboration-sync-pending" role="status"><LoaderCircle size={13} className="spin" />状态待同步</div>}
+      <CollaborationSummaryCard title={proposal?.title || workflow?.name || '协作任务'} tasks={tasks} agents={agents} lifecycle={lifecycle} celebratingTaskIds={celebratingTaskIds} onOpenTask={workflow ? (task) => window.dispatchEvent(new CustomEvent('frakio:open-collaboration-task', { detail: { threadId: thread?.id, workflowId: workflow.id, taskId: task.id } })) : undefined}>
+        {!confirmed && proposal?.status !== 'cancelled' && <>
+        {adjusting && <div className="collaboration-adjust"><textarea value={feedback} onChange={(event) => setFeedback(event.target.value)} placeholder="说明需要调整的方向" rows={2} /><button disabled={!feedback.trim()} onClick={() => { onAdjust(String(proposal?.sourcePlanId || ''), feedback); setAdjusting(false); setFeedback(''); }}>提交调整</button></div>}
+        <div className="collaboration-proposal-actions"><button onClick={() => void cancelProposal()} disabled={Boolean(busy)}>取消</button><button onClick={() => setAdjusting((value) => !value)}>调整方案</button><button className="primary" onClick={() => void confirmProposal()} disabled={Boolean(busy)}>{busy === 'confirm' ? '正在启动' : '确认执行'}</button></div>
+      </>}
+      {confirmed && workflow && ['active', 'paused'].includes(workflow.status) && <div className="collaboration-workflow-inline-actions">
+        <button type="button" onClick={() => void controlWorkflow(workflow.status === 'paused' ? 'resume' : 'pause')} disabled={Boolean(workflowControlBusy)}>{workflowControlBusy === 'pause' || workflowControlBusy === 'resume' ? <LoaderCircle size={14} className="spin" /> : workflow.status === 'paused' ? <Play size={14} fill="currentColor" /> : <Pause size={14} fill="currentColor" />}{workflow.status === 'paused' ? '恢复协作' : '暂停协作'}</button>
+        <button type="button" className="danger" onClick={() => void controlWorkflow('cancel')} disabled={Boolean(workflowControlBusy)}>{workflowControlBusy === 'cancel' ? <LoaderCircle size={14} className="spin" /> : <Square size={13} fill="currentColor" />}结束协作</button>
+      </div>}
+      {workflow?.finalization?.state === 'running' && <div className="collaboration-final-delivery-status"><LoaderCircle size={14} className="spin" /><span><strong>执行任务已经完成</strong><small>协调 Agent 正在整理最终交付</small></span></div>}
+      {workflow?.finalization?.state === 'delivered' && workflow.finalDelivery?.status === 'ready' && <button type="button" className="collaboration-final-delivery-link" onClick={() => window.dispatchEvent(new CustomEvent('frakio:open-collaboration-rail', { detail: { threadId: thread?.id, workflowId: workflow.id } }))}><CheckCircle2 size={15} /><span><strong>Iris 已完成最终汇总</strong><small>{workflow.finalDelivery.summary || '查看本次协作交付'}</small></span><ChevronRight size={15} /></button>}
+      {workflow?.finalization?.state === 'failed' && <div className="collaboration-final-delivery-status failed"><TriangleAlert size={14} /><span><strong>任务已完成，最终汇总失败</strong><small>{workflow.finalization.error || '可以只重新生成总结，不会重跑任务。'}</small></span><button type="button" disabled={finalizationRetrying} onClick={() => void retryFinalization()}>{finalizationRetrying ? '重试中' : '重新生成总结'}</button></div>}
+      {actionError && <div className="collaboration-card-error">{actionError}</div>}
+      </CollaborationSummaryCard>
+    </section>
+    {confirmed && <CollaborationActivityList tasks={tasks} events={snapshot?.events || []} agents={agents} onOpen={(task) => workflow && window.dispatchEvent(new CustomEvent('frakio:open-collaboration-task', { detail: { threadId: thread?.id, workflowId: workflow.id, taskId: task.id } }))} />}
+    {sticky && dismissedStickySignature !== workflowSignature && <div className="sticky-collaboration-bar"><button type="button" className="sticky-collaboration-main" onClick={() => window.dispatchEvent(new CustomEvent('frakio:open-collaboration-rail', { detail: { threadId: thread?.id, workflowId: workflow?.id } }))}><Activity size={14} /><span><strong>{lifecycle === 'completed' ? '协作已完成' : lifecycle === 'delivery_failed' ? '任务完成，汇总失败' : workflow?.name || proposal?.title}</strong><small>{lifecycle === 'completed' ? '查看 Iris 总结' : lifecycle === 'delivery_failed' ? '点击重新生成总结' : `${done}/${tasks.length} 完成`}</small></span><ChevronRight size={15} /></button><button type="button" className="sticky-collaboration-dismiss" onClick={() => setDismissedStickySignature(workflowSignature)} aria-label="关闭协作任务条" title="关闭"><X size={13} /></button></div>}
+  </>;
+}
+
+const collaborationWaitingCopies = [
+  (upstream: string) => upstream ? `我先候着，等 ${upstream} 把结果交过来…` : '我先候着，轮到我就开始…',
+  (upstream: string) => upstream ? `${upstream} 还在忙，我在这里等着…` : '前面的任务还在进行，我在这里等着…',
+  () => '结果一到，我就接着处理…',
+  () => '我这边准备好了，就等前面的交付…',
+  () => '还没轮到我，我先在这里候着…',
+  () => '上游还在忙，我随时可以接手…',
+];
+
+function collaborationTextHash(value: string) {
+  let hash = 0;
+  for (const character of value) hash = ((hash << 5) - hash + character.codePointAt(0)!) | 0;
+  return Math.abs(hash);
+}
+
+function compactCollaborationActivity(value: string) {
+  const source = String(value || '').replace(/\s+/g, ' ').trim();
+  return source.length <= 32 ? source : `${source.slice(0, 31)}…`;
+}
+
+function collaborationActivityCopy(task: CollaborationTask, waitingClock: number) {
+  const status = task.status;
+  const activity = task.activity;
+  const taskTitle = compactCollaborationLabel(task.title, '这项任务');
+  if (['done', 'completed'].includes(status)) return { text: `我已搞定「${taskTitle}」`, phase: 'completed' };
+  if (status === 'waiting_input') return { text: '我还缺一点信息，等你补充后继续…', phase: 'waiting_input' };
+  if (status === 'paused') return { text: '我先停在这里，恢复后继续处理。', phase: 'paused' };
+  if (status === 'failed') return { text: `这里没有跑通，需要重新处理「${taskTitle}」`, phase: 'failed' };
+  if (['cancelled', 'archived'].includes(status)) return { text: '这项任务已经结束。', phase: 'cancelled' };
+  if (status === 'review') return { text: '我已经交付，正在等验收…', phase: 'waiting_input' };
+  if (['running', 'doing'].includes(status)) {
+    const target = String(activity?.target || '').trim();
+    const copyByKind: Partial<Record<RunActivityItem['kind'], string>> = {
+      read: target ? `我正在读「${target}」…` : '我正在读取需要的资料…',
+      search: target ? `我正在项目里查找「${target}」…` : '我正在项目里查找相关内容…',
+      edit: target ? `我正在调整「${target}」…` : '我正在整理需要修改的内容…',
+      write: target ? `我正在写入「${target}」…` : '我正在写入交付内容…',
+      command: '我正在运行验证，确认结果是否正确…',
+      web: '我正在查找需要的公开资料…',
+      skill: '我正在调用合适的能力继续处理…',
+      collaboration: '我正在整理协作任务的最新进展…',
+      other: '我正在继续处理这项任务…',
+    };
+    const projected = activity?.kind ? copyByKind[activity.kind] : '';
+    const displayName = String(activity?.displayName || '').replace(/^我/, '').trim();
+    const fallback = displayName && !/^(执行任务|任务已开始)$/.test(displayName)
+      ? `我${displayName.startsWith('正在') ? '' : '正在'}${displayName}${displayName.endsWith('…') ? '' : '…'}`
+      : `我正在处理「${taskTitle}」…`;
+    return { text: compactCollaborationActivity(projected || fallback), phase: 'running' };
+  }
+  const waitingSince = Date.parse(String(activity?.waitingSince || activity?.changedAt || '')) || waitingClock;
+  const bucket = Math.max(0, Math.floor((waitingClock - waitingSince) / 12_000));
+  const index = (collaborationTextHash(task.id) + bucket) % collaborationWaitingCopies.length;
+  const upstream = (activity?.upstreamAgentNames || []).slice(0, 2).join('、');
+  return { text: compactCollaborationActivity(collaborationWaitingCopies[index](upstream)), phase: 'waiting_dependency' };
+}
+
+function collaborationTextSegments(value: string) {
+  if (typeof Intl !== 'undefined' && 'Segmenter' in Intl) {
+    const Segmenter = Intl.Segmenter as typeof Intl.Segmenter;
+    return [...new Segmenter('zh-CN', { granularity: 'grapheme' }).segment(value)].map((entry) => entry.segment);
+  }
+  return Array.from(value);
+}
+
+function AnimatedCollaborationActivityText({ text, active }: { text: string; active: boolean }) {
+  const reducedMotion = Boolean(useReducedMotion());
+  const [visible, setVisible] = useState(text);
+  const [announced, setAnnounced] = useState(text);
+  const timersRef = useRef<number[]>([]);
+  useEffect(() => {
+    for (const timer of timersRef.current) window.clearTimeout(timer);
+    timersRef.current = [];
+    if (reducedMotion || visible === text) {
+      setVisible(text);
+      setAnnounced(text);
+      return undefined;
+    }
+    const previous = collaborationTextSegments(visible);
+    const next = collaborationTextSegments(text);
+    const eraseStep = Math.max(8, Math.floor(160 / Math.max(1, previous.length)));
+    const typeStep = Math.max(12, Math.min(28, Math.floor(420 / Math.max(1, next.length))));
+    previous.forEach((_, index) => {
+      timersRef.current.push(window.setTimeout(() => setVisible(previous.slice(0, previous.length - index - 1).join('')), eraseStep * (index + 1)));
+    });
+    const eraseDuration = eraseStep * previous.length;
+    next.forEach((_, index) => {
+      timersRef.current.push(window.setTimeout(() => setVisible(next.slice(0, index + 1).join('')), eraseDuration + 36 + typeStep * (index + 1)));
+    });
+    timersRef.current.push(window.setTimeout(() => setAnnounced(text), eraseDuration + 36 + typeStep * next.length));
+    return () => {
+      for (const timer of timersRef.current) window.clearTimeout(timer);
+      timersRef.current = [];
+    };
+  }, [text, reducedMotion]);
+  const waitingEllipsis = !active && visible.endsWith('…');
+  return <span className={`collaboration-activity-summary${active ? ' is-active' : ''}`} title={text}><span aria-hidden="true">{waitingEllipsis ? visible.slice(0, -1) : visible}{waitingEllipsis && <i className="collaboration-waiting-ellipsis">…</i>}</span><span className="visually-hidden" role="status" aria-live="polite">{announced}</span></span>;
+}
+
+function CollaborationActivityList({ tasks, events, agents, onOpen }: { tasks: CollaborationTask[]; events: CollaborationEvent[]; agents: Agent[]; onOpen: (task: CollaborationTask) => void }) {
+  const hasWaitingTasks = tasks.some((task) => ['pending_confirmation', 'ready', 'todo', 'scheduled', 'blocked', 'waiting_dependency'].includes(task.status));
+  const [waitingClock, setWaitingClock] = useState(() => Date.now());
+  useEffect(() => {
+    if (!hasWaitingTasks) return undefined;
+    let timer = 0;
+    const schedule = () => {
+      if (document.hidden) return;
+      timer = window.setTimeout(() => {
+        setWaitingClock(Date.now());
+        schedule();
+      }, 1000);
+    };
+    const onVisibilityChange = () => {
+      if (timer) window.clearTimeout(timer);
+      timer = 0;
+      if (!document.hidden) {
+        setWaitingClock(Date.now());
+        schedule();
+      }
+    };
+    schedule();
+    document.addEventListener('visibilitychange', onVisibilityChange);
+    return () => {
+      if (timer) window.clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisibilityChange);
+    };
+  }, [hasWaitingTasks]);
+  if (!tasks.length) return null;
+  return <div className="collaboration-activity-trace">{tasks.map((task) => {
+    const agent = agents.find((item) => item.name === task.assignee || item.id === task.assignee);
+    const fallbackEvent = [...events].reverse().find((item) => item.taskId === task.id);
+    const activity = collaborationActivityCopy(task, waitingClock);
+    const active = activity.phase === 'running';
+    return <button type="button" key={task.id} className={`is-${activity.phase}${active ? ' is-live' : ''}`} onClick={() => onOpen(task)} title={fallbackEvent?.detail || activity.text}>{agent ? <AgentAvatar agent={agent} size="sm" /> : <span className="agent-avatar sm">{String(task.assignee || '?').slice(0, 1)}</span>}<strong>{agent?.name || task.assignee || 'Agent'}</strong><span className="collaboration-activity-copy"><AnimatedCollaborationActivityText text={activity.text} active={active} /></span></button>;
+  })}</div>;
 }
 
 function ChatCollaborationEvents({ thread }: { thread: Thread | null }) {
-  const [events, setEvents] = useState<CollaborationEvent[]>(thread?.collaboration?.events || []);
-  useEffect(() => {
-    setEvents(thread?.collaboration?.events || []);
-    if (!thread?.id) return undefined;
-    void requestJson<{ snapshot: CollaborationSnapshot }>(`/api/threads/${thread.id}/collaboration`)
-      .then((data) => setEvents(data.snapshot.events || []))
-      .catch(() => {});
-    const onSnapshot = (event: Event) => {
-      const snapshot = (event as CustomEvent<CollaborationSnapshot>).detail;
-      if (snapshot?.threadId === thread.id) setEvents(snapshot.events || []);
-    };
-    window.addEventListener('frakio:collaboration-snapshot', onSnapshot);
-    return () => window.removeEventListener('frakio:collaboration-snapshot', onSnapshot);
-  }, [thread?.id]);
-  if ((thread?.executionMode || 'chat') !== 'work') return null;
-  const highSignal = events.filter((event) => ['plan.published', 'plan.revised', 'workflow.paused', 'workflow.pause_failed', 'workflow.resumed', 'workflow.cancelled', 'task.waiting', 'task.resumed', 'task.completed', 'escalation.started', 'human.required', 'intervention.sent'].includes(event.type)).slice(-3);
+  const { snapshot } = useThreadCollaboration<CollaborationSnapshot>(thread?.id);
+  const events = snapshot?.events || thread?.collaboration?.events || [];
+  const highSignal = events.filter((event) => ['plan.published', 'plan.revised', 'workflow.paused', 'workflow.pause_failed', 'workflow.resumed', 'workflow.cancelled', 'task.waiting', 'task.resumed', 'task.completed', 'task.failed', 'escalation.started', 'human.required', 'intervention.sent'].includes(event.type)).slice(-3);
   if (!highSignal.length) return null;
-  return <div className="chat-collaboration-events">
-    {highSignal.map((event) => <div className={event.type === 'human.required' || event.type === 'task.waiting' || event.type === 'workflow.pause_failed' ? 'waiting' : event.type === 'workflow.paused' ? 'paused' : event.type === 'workflow.cancelled' ? 'cancelled' : ''} key={event.id}>
-      <span><Activity size={14} /></span>
-      <span><strong>{event.title || collaborationEventLabel(event.type)}</strong><small>{event.type.startsWith('plan.') ? `${event.payload?.taskCount || 0} 项任务 · ${(event.payload?.agentIds || []).length} 位 Agent${event.detail ? ` · ${event.detail}` : ''}` : event.detail || collaborationEventLabel(event.type)}</small></span>
-    </div>)}
-  </div>;
+  return <div className="chat-collaboration-events">{highSignal.map((event) => <div className={event.type === 'human.required' || event.type === 'task.waiting' || event.type === 'workflow.pause_failed' ? 'waiting' : event.type === 'workflow.paused' ? 'paused' : event.type === 'workflow.cancelled' ? 'cancelled' : ''} key={event.id}><span><Activity size={14} /></span><span><strong>{event.title || collaborationEventLabel(event.type)}</strong><small>{event.type.startsWith('plan.') ? `${event.payload?.taskCount || 0} 项任务 · ${(event.payload?.agentIds || []).length} 位 Agent${event.detail ? ` · ${event.detail}` : ''}` : event.detail || collaborationEventLabel(event.type)}</small></span></div>)}</div>;
 }
 
 function IconTooltipButton({
@@ -8733,18 +9782,22 @@ function CollaborationContextPanel(props: ContextPanelProps & {
   onRetryCollaboration: () => void;
   panelTab: RightRailTab;
   hasOpenTabs: boolean;
+  collaborationTaskRequest: { id: string; threadId: string; workflowId?: string; taskId?: string } | null;
   onOpenTab: (tab: RightRailTab) => void;
   onCloseTab: (tab: RightRailTab) => void;
 }) {
   const { thread, agents } = props;
   const panelTab = props.panelTab;
-  const [view, setView] = useState<'relations' | 'activity'>('relations');
-  const [snapshot, setSnapshot] = useState<CollaborationSnapshot | null>(null);
+  const collaborationState = useThreadCollaboration<CollaborationSnapshot>(thread?.id);
+  const snapshot = collaborationState.snapshot;
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState('');
   const [selectedTaskId, setSelectedTaskId] = useState('');
   const [taskDetail, setTaskDetail] = useState<any>(null);
-  const [error, setError] = useState('');
+  const [localError, setError] = useState('');
   const [busy, setBusy] = useState('');
   const [intervention, setIntervention] = useState('');
+  const [interventionAttachments, setInterventionAttachments] = useState<AttachmentDraft[]>([]);
+  const interventionFileInputRef = useRef<HTMLInputElement | null>(null);
   const [reassignAgentId, setReassignAgentId] = useState('');
   const [overviewOpen, setOverviewOpen] = useState(false);
   const [overview, setOverview] = useState<Array<CollaborationWorkflowSnapshot & { threadId: string; threadTitle: string }>>([]);
@@ -8753,18 +9806,21 @@ function CollaborationContextPanel(props: ContextPanelProps & {
   const [workflowControlBusy, setWorkflowControlBusy] = useState<'pause' | 'resume' | 'cancel' | ''>('');
   const [workflowControlError, setWorkflowControlError] = useState('');
   const [deliveryExporting, setDeliveryExporting] = useState(false);
+  const [finalizationRetrying, setFinalizationRetrying] = useState(false);
   const [workerOutputMode, setWorkerOutputMode] = useState<'summary' | 'all'>(thread?.workerOutputMode === 'all' ? 'all' : 'summary');
-  const cursorRef = useRef(0);
-  const activeWorkflow = snapshot?.workflows.find((item) => item.id === snapshot.activeWorkflowId) || snapshot?.workflows[0] || null;
+  const error = localError || collaborationState.error;
+  const syncPending = collaborationState.syncPending;
+  const activeWorkflow = snapshot?.workflows.find((item) => item.id === selectedWorkflowId)
+    || snapshot?.workflows.find((item) => item.id === snapshot.activeWorkflowId)
+    || [...(snapshot?.workflows || [])].reverse().find((item) => item.status !== 'archived')
+    || null;
+  const celebratingTaskIds = useCollaborationCompletionCelebrations(snapshot, activeWorkflow?.id || '');
   const selectedTask = activeWorkflow?.tasks.find((task) => task.id === selectedTaskId) || null;
 
   async function loadSnapshot() {
     if (!thread?.id) return;
     try {
-      const data = await requestJson<{ snapshot: CollaborationSnapshot }>(`/api/threads/${thread.id}/collaboration`);
-      setSnapshot(data.snapshot);
-      window.dispatchEvent(new CustomEvent('frakio:collaboration-snapshot', { detail: data.snapshot }));
-      cursorRef.current = Math.max(cursorRef.current, Number(data.snapshot.cursor || 0));
+      await refreshThreadCollaboration(thread.id);
       setError('');
     } catch (err: any) {
       setError(err.message || '协作状态读取失败');
@@ -8772,7 +9828,7 @@ function CollaborationContextPanel(props: ContextPanelProps & {
   }
 
   useEffect(() => {
-    setSnapshot(null);
+    setSelectedWorkflowId('');
     setSelectedTaskId('');
     setTaskDetail(null);
     setControlMenuOpen(false);
@@ -8780,13 +9836,24 @@ function CollaborationContextPanel(props: ContextPanelProps & {
     setWorkflowControlBusy('');
     setWorkflowControlError('');
     setWorkerOutputMode(thread?.workerOutputMode === 'all' ? 'all' : 'summary');
-    cursorRef.current = 0;
-    void loadSnapshot();
-  }, [thread?.id, thread?.executionMode]);
+  }, [thread?.id]);
 
   useEffect(() => {
     if (props.collaborationModeLoading || props.collaborationModeError) props.onOpenTab('collaboration');
   }, [props.collaborationModeLoading, props.collaborationModeError]);
+
+  useEffect(() => {
+    const request = props.collaborationTaskRequest;
+    if (!request || request.threadId !== thread?.id) return undefined;
+    let cancelled = false;
+    const openTask = async () => {
+      props.onOpenTab('collaboration');
+      if (request.workflowId && request.workflowId !== activeWorkflow?.id) await selectWorkflow(request.workflowId);
+      if (!cancelled) setSelectedTaskId(request.taskId || '');
+    };
+    void openTask();
+    return () => { cancelled = true; };
+  }, [props.collaborationTaskRequest?.id, thread?.id]);
 
   useEffect(() => {
     if (!controlMenuOpen && !cancelConfirmOpen) return undefined;
@@ -8808,47 +9875,17 @@ function CollaborationContextPanel(props: ContextPanelProps & {
   }, [controlMenuOpen, cancelConfirmOpen, workflowControlBusy]);
 
   useEffect(() => {
-    if (!thread?.id) return undefined;
-    const query = new URLSearchParams({ afterCursor: String(cursorRef.current) });
-    const stream = new EventSource(`/api/threads/${thread.id}/collaboration/events?${query.toString()}`);
-    const onSnapshot = (event: MessageEvent) => {
-      try {
-        const next = JSON.parse(event.data) as CollaborationSnapshot;
-        const previousCursor = cursorRef.current;
-        setSnapshot(next);
-        window.dispatchEvent(new CustomEvent('frakio:collaboration-snapshot', { detail: next }));
-        cursorRef.current = Math.max(cursorRef.current, Number(next.cursor || 0));
-        if (next.cursor > previousCursor && next.events.some((item) => item.cursor > previousCursor && ['task.completed', 'workflow.completed', 'workflow.paused', 'workflow.resumed', 'workflow.cancelled'].includes(item.type))) {
-          window.dispatchEvent(new CustomEvent('frakio:thread-refresh-request', { detail: { threadId: next.threadId } }));
-        }
-        setError('');
-      } catch {
-        setError('协作实时数据无法解析');
-      }
-    };
-    stream.addEventListener('collaboration.snapshot', onSnapshot as EventListener);
-    for (const type of ['workflow.created', 'workflow.completed', 'workflow.pause_started', 'workflow.paused', 'workflow.pause_failed', 'workflow.resume_started', 'workflow.resumed', 'workflow.cancelled', 'workflow.archived', 'mode.changed', 'plan.published', 'plan.revised', 'capability.blocked', 'task.created', 'task.started', 'task.waiting', 'task.resumed', 'task.completed', 'task.failed', 'dependency.created', 'dependency.satisfied', 'artifact.published', 'escalation.started', 'escalation.resolved', 'human.required', 'intervention.sent']) {
-      stream.addEventListener(type, (event: MessageEvent) => {
-        try {
-          const next = JSON.parse(event.data) as CollaborationEvent;
-          cursorRef.current = Math.max(cursorRef.current, Number(next.cursor || 0));
-          setSnapshot((current) => current ? { ...current, cursor: Math.max(current.cursor, next.cursor), events: [...current.events.filter((item) => item.id !== next.id), next].slice(-200) } : current);
-        } catch { /* the next snapshot repairs malformed event payloads */ }
-      });
-    }
-    stream.onerror = () => setError('实时连接正在重连…');
-    return () => stream.close();
-  }, [thread?.id]);
-
-  useEffect(() => {
     if (!selectedTaskId || !activeWorkflow) {
       setTaskDetail(null);
       return;
     }
-    void requestJson<{ detail: any }>(`/api/hermes/kanban/tasks/${encodeURIComponent(selectedTaskId)}?board=${encodeURIComponent(activeWorkflow.boardSlug)}`)
+    const endpoint = activeWorkflow.nativeOnly
+      ? `/api/workflows/${encodeURIComponent(activeWorkflow.id)}/tasks/${encodeURIComponent(selectedTaskId)}`
+      : `/api/hermes/kanban/tasks/${encodeURIComponent(selectedTaskId)}?board=${encodeURIComponent(activeWorkflow.boardSlug)}`;
+    void requestJson<{ detail: any }>(endpoint)
       .then((data) => setTaskDetail(data.detail))
       .catch(() => setTaskDetail(null));
-  }, [selectedTaskId, activeWorkflow?.boardSlug, activeWorkflow?.tasks.length]);
+  }, [selectedTaskId, activeWorkflow?.id, activeWorkflow?.nativeOnly, activeWorkflow?.boardSlug, activeWorkflow?.tasks.length]);
 
   useEffect(() => {
     if (!selectedTask) {
@@ -8860,9 +9897,7 @@ function CollaborationContextPanel(props: ContextPanelProps & {
   }, [selectedTask?.id, selectedTask?.assignee, activeWorkflow?.coordinatorAgentId, agents]);
 
   async function selectWorkflow(workflowId: string) {
-    if (!thread) return;
-    await requestJson(`/api/threads/${thread.id}/collaboration/workflows/${workflowId}`, { method: 'PATCH', body: JSON.stringify({ active: true }) });
-    setSnapshot((current) => current ? { ...current, activeWorkflowId: workflowId } : current);
+    setSelectedWorkflowId(workflowId);
     setSelectedTaskId('');
   }
 
@@ -8877,7 +9912,7 @@ function CollaborationContextPanel(props: ContextPanelProps & {
         method: 'POST',
         body: JSON.stringify({ idempotencyKey: `${action}:${globalThis.crypto.randomUUID()}` }),
       });
-      setSnapshot(data.snapshot);
+      publishThreadCollaborationSnapshot(data.snapshot);
       window.dispatchEvent(new CustomEvent('frakio:collaboration-snapshot', { detail: data.snapshot }));
       setCancelConfirmOpen(false);
     } catch (err: any) {
@@ -8895,15 +9930,41 @@ function CollaborationContextPanel(props: ContextPanelProps & {
     try {
       await requestJson(`/api/threads/${thread.id}/collaboration/interventions`, {
         method: 'POST',
-        body: JSON.stringify({ workflowId: activeWorkflow.id, taskId: selectedTaskId, action, message: intervention.trim(), reason: intervention.trim(), targetAgentId }),
+        body: JSON.stringify({ workflowId: activeWorkflow.id, taskId: selectedTaskId, action, message: intervention.trim(), reason: intervention.trim(), targetAgentId, attachmentIds: interventionAttachments.flatMap((item) => item.attachment?.id ? [item.attachment.id] : []) }),
       });
       setIntervention('');
+      interventionAttachments.forEach((item) => item.previewUrl && URL.revokeObjectURL(item.previewUrl));
+      setInterventionAttachments([]);
       await loadSnapshot();
     } catch (err: any) {
       setError(err.message || '介入失败');
     } finally {
       setBusy('');
     }
+  }
+
+  async function addInterventionAttachments(files: FileList | null) {
+    const selected = Array.from(files || []).slice(0, Math.max(0, 10 - interventionAttachments.length));
+    if (!selected.length) return;
+    const queued = selected.map((file): AttachmentDraft => ({ localId: crypto.randomUUID(), file, previewUrl: '', status: 'uploading' }));
+    setInterventionAttachments((current) => [...current, ...queued]);
+    await Promise.all(queued.map(async (draft) => {
+      try {
+        const response = await fetch(`/api/attachments?name=${encodeURIComponent(draft.file.name)}`, { method: 'POST', headers: { 'Content-Type': draft.file.type || 'application/octet-stream' }, body: draft.file });
+        const data = await response.json().catch(() => ({}));
+        if (!response.ok || !data.attachment) throw new Error(data.error || '上传失败');
+        setInterventionAttachments((current) => current.map((item) => item.localId === draft.localId ? { ...item, status: 'ready', attachment: data.attachment } : item));
+      } catch (error) {
+        setInterventionAttachments((current) => current.map((item) => item.localId === draft.localId ? { ...item, status: 'error', error: error instanceof Error ? error.message : '上传失败' } : item));
+      }
+    }));
+    if (interventionFileInputRef.current) interventionFileInputRef.current.value = '';
+  }
+
+  function removeInterventionAttachment(localId: string) {
+    const attachment = interventionAttachments.find((item) => item.localId === localId)?.attachment;
+    setInterventionAttachments((current) => current.filter((item) => item.localId !== localId));
+    if (attachment?.id) void fetch(`/api/attachments/${attachment.id}`, { method: 'DELETE' }).catch(() => null);
   }
 
   async function openOverview() {
@@ -8941,11 +10002,33 @@ function CollaborationContextPanel(props: ContextPanelProps & {
     }
   }
 
-  const activeTasks = activeWorkflow?.tasks.filter((task) => task.status !== 'archived') || [];
-  const activeTaskCount = activeTasks.filter((task) => !['done', 'archived'].includes(task.status)).length;
-  const doneCount = activeTasks.filter((task) => task.status === 'done').length;
-  const dependencyByTask = new Map((snapshot?.events || []).filter((event) => event.type === 'dependency.created').map((event) => [event.taskId, event.payload?.parentTaskId]));
-  const waitingCount = activeTasks.filter((task) => task.status === 'blocked' || task.status === 'todo' || (dependencyByTask.has(task.id) && task.status !== 'done')).length;
+  async function retryWorkflowFinalization() {
+    if (!thread || !activeWorkflow || finalizationRetrying) return;
+    setFinalizationRetrying(true);
+    setError('');
+    try {
+      const data = await requestJson<{ snapshot: CollaborationSnapshot }>(`/api/threads/${thread.id}/collaboration/workflows/${activeWorkflow.id}/retry-finalization`, {
+        method: 'POST',
+        body: JSON.stringify({ idempotencyKey: `retry-finalization:${globalThis.crypto.randomUUID()}` }),
+      });
+      publishThreadCollaborationSnapshot(data.snapshot);
+    } catch (err: any) {
+      setError(err.message || '最终汇总重试失败');
+    } finally {
+      setFinalizationRetrying(false);
+    }
+  }
+
+  const activeTasks = activeWorkflow?.tasks.filter((task) => task.status !== 'archived' && task.id !== activeWorkflow.currentRootTaskId) || [];
+  const activeTaskCount = activeTasks.filter((task) => ['running', 'doing'].includes(task.status)).length;
+  const doneCount = activeTasks.filter((task) => ['done', 'completed'].includes(task.status)).length;
+  const activeLifecycle = collaborationCardLifecycle(activeWorkflow, null, activeTasks);
+  const taskStatusById = new Map(activeTasks.map((task) => [task.id, task.status]));
+  const dependencyByTask = new Map<string, string>((snapshot?.events || [])
+    .filter((event) => event.type === 'dependency.created')
+    .map((event) => [String(event.taskId || ''), String(event.payload?.parentTaskId || '')] as [string, string])
+    .filter(([, parentTaskId]) => Boolean(parentTaskId) && !['done', 'completed'].includes(taskStatusById.get(String(parentTaskId)) || '')));
+  const waitingCount = activeTasks.filter((task) => ['blocked', 'todo', 'pending_confirmation', 'waiting_dependency', 'waiting_input', 'paused'].includes(task.status) || dependencyByTask.has(task.id)).length;
   const workflowControlState = activeWorkflow?.control?.state || 'idle';
   const workflowPaused = activeWorkflow?.status === 'paused';
   const workflowCancelled = activeWorkflow?.status === 'cancelled';
@@ -8953,6 +10036,7 @@ function CollaborationContextPanel(props: ContextPanelProps & {
   const workflowPauseFailed = workflowControlState === 'pause_failed';
   const workflowControlPending = Boolean(workflowControlBusy) || ['pausing', 'resuming', 'cancelling'].includes(workflowControlState);
   const taskControlsDisabled = workflowPaused || workflowCancelled || workflowControlPending || workflowPauseFailed;
+  const pendingRuntimeCount = activeWorkflow?.control?.pendingRunIds?.length || 0;
 
   return (
     <div className="context-inner collaboration-context-panel">
@@ -8962,17 +10046,17 @@ function CollaborationContextPanel(props: ContextPanelProps & {
           : panelTab === 'sources' ? <SourcesPanel threadId={thread?.id || ''} vault={props.activeVault} onOpenVaultSettings={props.onOpenVaultSettings} onClose={() => props.onCloseTab('sources')} />
             : panelTab === 'review' ? <ReviewPanel thread={thread} workspace={props.workspace} liveChangeSet={props.liveChangeSet} onDraftContextChanged={props.onDraftContextChanged} /> : (
         <div className="collaboration-panel-body">
-          <div className="collaboration-panel-head">
-            <div><small>{(thread?.executionMode || 'chat') === 'work' ? '协作执行' : activeWorkflow ? '后台 Work' : 'Chat 模式'}</small><strong>{activeWorkflow?.name || ((thread?.executionMode || 'chat') === 'work' ? '正在准备工作流' : '当前不接入任务看板')}</strong></div>
-            <span className="collaboration-head-actions">{(thread?.executionMode || 'chat') === 'work' && <button className="worker-output-toggle" onClick={() => void toggleWorkerOutputMode()} title="切换成员输出展示">{workerOutputMode === 'summary' ? '摘要' : '全部'}</button>}<button className="top-icon-btn" onClick={() => void openOverview()} title="全局总览"><Boxes size={16} /></button></span>
-          </div>
+          {!selectedTask && <div className="collaboration-panel-head">
+            <div><small>{activeWorkflow ? '后台协作' : '协作中心'}</small><strong>{activeWorkflow?.name || '当前会话协作'}</strong></div>
+            <span className="collaboration-head-actions"><button className="top-icon-btn" onClick={() => void openOverview()} title="全局总览"><Boxes size={16} /></button></span>
+          </div>}
+          {syncPending && <div className="collaboration-sync-pending" role="status"><LoaderCircle size={13} className="spin" />状态待同步，正在读取最新状态</div>}
           {props.collaborationModeLoading && <div className="collaboration-runtime-loading"><LoaderCircle size={18} className="spin" /><span>正在准备协作运行时…</span></div>}
           {props.collaborationModeError && <CollaborationRuntimeErrorCard error={props.collaborationModeError} loading={props.collaborationModeLoading} onRetry={props.onRetryCollaboration} />}
-          {snapshot?.workflows.length ? (
+          {!selectedTask && collaborationState.loading && !snapshot ? (
+            <div className="collaboration-panel-loading" role="status"><LoaderCircle size={18} className="spin" /><span>正在读取当前会话协作…</span></div>
+          ) : !selectedTask && snapshot?.workflows.length ? (
             <div className="collaboration-workflow-toolbar">
-              <select className="collaboration-workflow-select" value={activeWorkflow?.id || ''} onChange={(event) => void selectWorkflow(event.target.value)} disabled={workflowControlPending}>
-                {snapshot.workflows.filter((workflow) => workflow.status !== 'archived').map((workflow) => <option value={workflow.id} key={workflow.id}>{workflow.name} · {workflow.status}</option>)}
-              </select>
               {activeWorkflow && !workflowCancelled && !workflowCompleted && <button className={`collaboration-workflow-control ${workflowPaused ? 'resume' : ''}`} disabled={workflowControlPending} onClick={() => void controlWorkflow(workflowPaused ? 'resume' : 'pause')} aria-label={workflowPaused ? '恢复当前工作流的全部任务' : '暂停当前工作流的全部任务'} title={workflowPaused ? '恢复当前工作流的全部任务' : '暂停当前工作流的全部任务'}>
                 {workflowControlPending && workflowControlBusy !== 'cancel' ? <LoaderCircle className="spin" size={15} /> : workflowPaused ? <Play size={15} fill="currentColor" /> : <Pause size={15} fill="currentColor" />}
               </button>}
@@ -8982,65 +10066,29 @@ function CollaborationContextPanel(props: ContextPanelProps & {
               </div>}
               {activeWorkflow && workflowCompleted && <button className="worker-output-toggle" disabled={deliveryExporting} onClick={() => void exportWorkDelivery()} title="将本次结果写入项目交付物目录">{deliveryExporting ? '导出中' : '导出结果'}</button>}
             </div>
-          ) : (
+          ) : !selectedTask ? (
             <div className="collaboration-empty-start">
-              {(thread?.executionMode || 'chat') === 'work' ? <Briefcase size={24} /> : <MessageSquare size={24} />}
-              <strong>{(thread?.executionMode || 'chat') === 'work' ? '工作流正在准备' : '当前是 Chat 模式'}</strong>
-              <p>{(thread?.executionMode || 'chat') === 'work' ? '创建完成后，发送第一条任务即可开始规划。' : '普通聊天和 @Agent 不会创建看板任务。需要协作执行时，在输入框下方切换到 Work。'}</p>
+              <Activity size={24} />
+              <strong>当前会话还没有协作工作流</strong>
+              <p>复杂任务会先生成执行计划，确认后在这里显示。</p>
             </div>
-          )}
-          {activeWorkflow && <>
+          ) : null}
+          {selectedTask && activeWorkflow ? <CollaborationTaskSessionPanel threadId={thread?.id || ''} workflow={activeWorkflow} task={selectedTask} snapshotCursor={snapshot?.cursor || 0} onBack={() => setSelectedTaskId('')} /> : activeWorkflow && <>
             {(workflowControlPending || workflowPaused || workflowPauseFailed || workflowCancelled) && <div className={`collaboration-workflow-state ${workflowPauseFailed ? 'failed' : workflowCancelled ? 'cancelled' : workflowPaused ? 'paused' : 'pending'}`}>
               {workflowControlPending && <LoaderCircle className="spin" size={15} />}
-              <span><strong>{workflowControlBusy === 'pause' || workflowControlState === 'pausing' ? `正在停止 ${activeTasks.filter((task) => task.status === 'running').length} 个 Agent…` : workflowControlBusy === 'resume' || workflowControlState === 'resuming' ? '协调 Agent 正在应用你的补充' : workflowControlBusy === 'cancel' || workflowControlState === 'cancelling' ? '正在结束协作…' : workflowPauseFailed ? '暂停未完全生效' : workflowCancelled ? '协作已结束' : '全部任务已暂停'}</strong><small>{workflowPauseFailed ? `${activeWorkflow.control?.failedTaskIds.length || 0} 个任务仍未停止` : workflowPaused ? `${activeWorkflow.control?.heldInterventionCount || 0} 条补充指令已暂存` : workflowCancelled ? '已完成结果和运行记录仍可查看' : '正在保留任务现场'}</small></span>
+              <span><strong>{workflowControlBusy === 'pause' || workflowControlState === 'pausing' ? `正在停止 ${activeTasks.filter((task) => task.status === 'running').length} 个 Agent…` : workflowControlBusy === 'resume' || workflowControlState === 'resuming' ? '协调 Agent 正在应用你的补充' : workflowControlBusy === 'cancel' || workflowControlState === 'cancelling' ? '正在结束协作…' : workflowPauseFailed ? '暂停未完全生效' : workflowCancelled ? '协作已结束' : pendingRuntimeCount ? `调度已暂停，${pendingRuntimeCount} 个 Runtime 正在结束` : '全部任务已暂停'}</strong><small>{workflowPauseFailed ? `${activeWorkflow.control?.failedTaskIds.length || 0} 个任务仍未停止` : workflowPaused ? `${activeWorkflow.control?.heldInterventionCount || 0} 条补充指令已暂存` : workflowCancelled ? pendingRuntimeCount ? `${pendingRuntimeCount} 个 Runtime 仍在结束，迟到结果不会改写任务` : '已完成结果和运行记录仍可查看' : '正在保留任务现场'}</small></span>
               {workflowPauseFailed && <button disabled={Boolean(workflowControlBusy)} onClick={() => void controlWorkflow('pause')}>重试</button>}
             </div>}
             {workflowControlError && <div className="collaboration-workflow-control-error">{workflowControlError}</div>}
-            <div className="collaboration-progress-copy"><strong>{doneCount} / {activeTasks.length} 已完成</strong><span>{waitingCount} 等待</span></div>
-            <div className="collaboration-progress"><span style={{ width: `${activeTasks.length ? Math.round(doneCount / activeTasks.length * 100) : 0}%` }} /></div>
-            <div className="collaboration-view-switch">
-              <button className={view === 'relations' ? 'active' : ''} onClick={() => setView('relations')}>任务关系</button>
-              <button className={view === 'activity' ? 'active' : ''} onClick={() => setView('activity')}>实时动态</button>
-            </div>
-            {view === 'relations' ? <>
-              <div className="collaboration-task-list">
-                {activeTasks.map((task) => {
-                  const dependency = dependencyByTask.get(task.id);
-                  const selected = task.id === selectedTaskId;
-                  return <button className={`${selected ? 'selected ' : ''}${task.status === 'blocked' || dependency ? 'waiting ' : ''}${task.status === 'done' ? 'done' : ''}`} key={task.id} onClick={() => setSelectedTaskId(task.id)}>
-                    <span className={`collaboration-task-dot status-${task.status}`} />
-                    <span><strong>{task.title}</strong><small>{dependency ? `等待 ${dependency}` : `${task.assignee || '未分配'} · ${collaborationStatusLabel(task.status)}`}</small></span>
-                    <ChevronRight size={14} />
-                  </button>;
-                })}
-                {!activeTasks.length && <div className="resource-empty">发送任务后，协调 Agent 会在这里发布任务图。</div>}
-              </div>
-            </> : (
-              <div className="collaboration-activity-list">
-                {[...(snapshot?.events || [])].filter((event) => event.workflowId === activeWorkflow.id).reverse().map((event) => <button key={event.id} onClick={() => event.taskId && setSelectedTaskId(event.taskId)}>
-                  <span className={`collaboration-event-dot ${event.type.includes('waiting') || event.type.includes('human') ? 'waiting' : event.type.includes('completed') || event.type.includes('resolved') ? 'done' : ''}`} />
-                  <span><strong>{event.title || collaborationEventLabel(event.type)}</strong><small>{collaborationEventLabel(event.type)} · {formatTime(event.createdAt)}</small></span>
-                </button>)}
-                {!snapshot?.events.length && <div className="resource-empty">动态会在 Agent 开始协作后出现。</div>}
-              </div>
-            )}
-            {selectedTask && <div className="collaboration-task-detail">
-              <div className="collaboration-detail-title"><span><strong>{selectedTask.title}</strong><small>{collaborationStatusLabel(selectedTask.status)} · {selectedTask.assignee || '未分配'}</small></span><button className="top-icon-btn" onClick={() => setSelectedTaskId('')}><X size={14} /></button></div>
-              {(taskDetail?.parents?.length || taskDetail?.children?.length) && <div className="collaboration-links"><span>依赖：{taskDetail.parents?.join('、') || '无'}</span><span>下游：{taskDetail.children?.join('、') || '无'}</span></div>}
-              <p>{selectedTask.body || selectedTask.result || taskDetail?.latest_summary || '暂无任务说明'}</p>
-              <textarea value={intervention} onChange={(event) => setIntervention(event.target.value)} placeholder="向当前任务发送指令…" rows={2} />
-              <div className="collaboration-reassign">
-                <select value={reassignAgentId} onChange={(event) => setReassignAgentId(event.target.value)} aria-label="转交给 Agent">
-                  {agents.map((agent) => <option value={agent.id} key={agent.id}>{agent.name}</option>)}
-                </select>
-                <button disabled={!reassignAgentId || Boolean(busy) || taskControlsDisabled} onClick={() => void sendIntervention('reassign', reassignAgentId)}>转交</button>
-              </div>
-              <div className="collaboration-intervention-actions">
-                {selectedTask.status === 'blocked' ? <button disabled={taskControlsDisabled} onClick={() => void sendIntervention('resume')}>恢复</button> : <button disabled={taskControlsDisabled} onClick={() => void sendIntervention('pause')}>暂停</button>}
-                <button disabled={taskControlsDisabled} onClick={() => void sendIntervention('human_required')}>人工介入</button>
-                <button className="send-btn" disabled={!intervention.trim() || Boolean(busy) || workflowCancelled} onClick={() => void sendIntervention('message')}><Send size={13} />发送</button>
-              </div>
-            </div>}
+            <section className="rail-collaboration-overview" aria-label="协作总览">
+              <div className="rail-collaboration-stats"><strong>{doneCount} / {activeTasks.length} 已完成</strong><span>{activeTaskCount} 个 Agent 执行中</span></div>
+              <div className="inline-collaboration-progress"><i style={{ width: `${activeTasks.length ? Math.round(doneCount / activeTasks.length * 100) : 0}%` }} /></div>
+              {activeTasks.length ? <CollaborationSummaryCard title={activeWorkflow.name || '协作任务'} tasks={activeTasks} agents={agents} lifecycle={activeLifecycle} density="rail" celebratingTaskIds={celebratingTaskIds} onOpenTask={(task) => setSelectedTaskId(task.id)} /> : <div className="resource-empty">发送任务后，协调 Agent 会在这里发布任务图。</div>}
+              <CollaborationActivityList tasks={activeTasks} events={(snapshot?.events || []).filter((event) => event.workflowId === activeWorkflow.id)} agents={agents} onOpen={(task) => setSelectedTaskId(task.id)} />
+              {['requested', 'running'].includes(activeWorkflow.finalization?.state || '') && <section className="collaboration-final-delivery-panel pending"><LoaderCircle size={17} className="spin" /><div><strong>协调 Agent 正在整理最终交付</strong><p>执行任务已经完成，正在汇总交付内容。</p></div></section>}
+              {activeWorkflow.finalization?.state === 'failed' && <section className="collaboration-final-delivery-panel failed"><TriangleAlert size={17} /><div><strong>任务已完成，最终汇总失败</strong><p>{activeWorkflow.finalization.error || activeWorkflow.finalDelivery?.error || '可以只重新生成总结，不会重新执行已经完成的任务。'}</p><button type="button" disabled={finalizationRetrying} onClick={() => void retryWorkflowFinalization()}>{finalizationRetrying ? <><LoaderCircle size={13} className="spin" />正在重试</> : '重新生成总结'}</button></div></section>}
+              {activeWorkflow.finalDelivery?.status === 'ready' && <section className="collaboration-final-delivery-panel ready"><header><CheckCircle2 size={17} /><span><small>协调 Agent 最终交付</small><strong>{agents.find((agent) => agent.id === activeWorkflow.finalDelivery?.coordinatorAgentId)?.name || 'Iris'} 已完成汇总</strong></span></header><MarkdownMessage content={activeWorkflow.finalDelivery.content} threadId={thread?.id} workspaceId={thread?.workspaceId || undefined} /></section>}
+            </section>
           </>}
           {error && <div className="resource-error">{error}</div>}
         </div>
@@ -9052,8 +10100,8 @@ function CollaborationContextPanel(props: ContextPanelProps & {
             <div className="collaboration-overview-grid">
               {overview.filter((workflow) => workflow.status !== 'archived').map((workflow) => {
                 const tasks = workflow.tasks.filter((task) => task.status !== 'archived');
-                const done = tasks.filter((task) => task.status === 'done').length;
-                const blocked = tasks.filter((task) => task.status === 'blocked').length;
+                const done = tasks.filter((task) => ['done', 'completed'].includes(task.status)).length;
+                const blocked = tasks.filter((task) => ['blocked', 'waiting_dependency', 'waiting_input'].includes(task.status)).length;
                 const coordinator = agents.find((agent) => agent.id === workflow.coordinatorAgentId);
                 return <article key={`${workflow.threadId}:${workflow.id}`}><header><span><small>{workflow.threadTitle}</small><strong>{workflow.name}</strong></span><em>{workflow.status}</em></header><div className="collaboration-overview-stats"><span>{done}/{tasks.length} 完成</span><span>{blocked} 阻塞</span><span>{coordinator?.name || '未指定协调人'}</span></div><div className="collaboration-progress"><span style={{ width: `${tasks.length ? done / tasks.length * 100 : 0}%` }} /></div></article>;
               })}
@@ -9868,61 +10916,20 @@ function PermissionModeControl({ value, compact = false, onChange }: { value: Pe
   );
 }
 
-function ExecutionModeControl({ value, disabled, switching = false, onChange }: { value: 'chat' | 'work'; disabled?: boolean; switching?: boolean; onChange: (mode: 'chat' | 'work') => void }) {
-  const [visualMode, setVisualMode] = useState<'chat' | 'work'>(value);
-  const menuId = useId();
-  const CurrentIcon = visualMode === 'work' ? Briefcase : MessageSquare;
+function CollaborationIntentControl({ active, disabled = false, adjusting = false, onChange }: { active: boolean; disabled?: boolean; adjusting?: boolean; onChange: (active: boolean) => void }) {
+  const label = adjusting ? '调整协作' : '协作';
+  return <button type="button" className={`composer-collaboration-toggle${active ? ' active' : ''}`} aria-pressed={active} aria-label={label} title={label} disabled={disabled} onClick={() => onChange(!active)}><UsersRound size={15} /><span>协作</span></button>;
+}
 
-  useEffect(() => {
-    if (switching || visualMode === value) return;
-    setVisualMode(value);
-  }, [switching, value, visualMode]);
-
-  function selectMode(mode: 'chat' | 'work') {
-    if (disabled || switching) return;
-    if (visualMode !== mode) setVisualMode(mode);
-    if (value !== mode) onChange(mode);
-  }
-
-  return (
-    <AppMenu modal={false}>
-      <div className={`execution-mode-control is-${visualMode}${disabled ? ' is-disabled' : ''}`} data-mode={visualMode}>
-        <AppMenuTrigger asChild>
-          <button
-            type="button"
-            className="execution-mode-trigger"
-            aria-label={`运行模式：${visualMode === 'work' ? 'Work' : 'Chat'}`}
-            aria-busy={switching || undefined}
-            disabled={disabled || switching}
-            title={visualMode === 'work' ? 'Work：多 Agent 协作执行模式' : 'Chat：普通聊天模式'}
-          >
-            <CurrentIcon size={15} />
-            <span>{visualMode === 'work' ? 'Work' : 'Chat'}</span>
-            <ChevronDown size={13} />
-          </button>
-        </AppMenuTrigger>
-        <AppMenuContent id={menuId} className="execution-mode-menu-v2" side="top" align="start" aria-label="选择对话运行模式">
-          {(['chat', 'work'] as const).map((mode) => {
-            const Icon = mode === 'work' ? Briefcase : MessageSquare;
-            const selected = visualMode === mode;
-            return (
-              <AppMenuItem
-                className={selected ? 'selected execution-mode-option' : 'execution-mode-option'}
-                role="menuitemradio"
-                aria-checked={selected}
-                key={mode}
-                onSelect={() => selectMode(mode)}
-              >
-                <Icon size={17} />
-                <span><strong>{mode === 'work' ? 'Work' : 'Chat'}</strong><small>{mode === 'work' ? '多 Agent 协作执行' : '普通对话'}</small></span>
-                {selected && <Check size={15} />}
-              </AppMenuItem>
-            );
-          })}
-        </AppMenuContent>
-      </div>
-    </AppMenu>
-  );
+function CollaborationIntentIndicator({ adjusting = false }: { adjusting?: boolean }) {
+  const reducedMotion = useReducedMotion();
+  return <motion.div
+    className="work-mode-hint collaboration-mode-hint"
+    initial={{ height: 0, marginBottom: 0, opacity: 0, y: -4 }}
+    animate={{ height: 19, marginBottom: 7, opacity: 1, y: 0 }}
+    exit={{ height: 0, marginBottom: 0, opacity: 0, y: -4 }}
+    transition={{ duration: reducedMotion ? 0 : 0.18, ease: 'easeOut' }}
+  ><UsersRound size={13} /><span>{adjusting ? '调整协作模式' : '启用协作模式'}</span></motion.div>;
 }
 
 function ComposerAddMenu({ planEnabled, planBusy, onAddFile, onEnablePlan }: {
@@ -10265,6 +11272,10 @@ function PlanQuestionPanel({ batch, submitting, error, onSubmit, onCancel }: {
   );
 }
 
+function CollaborationSuggestionCard({ suggestion, busy, disabled, onStart }: { suggestion: { title: string; reason: string }; busy: boolean; disabled: boolean; onStart: () => void }) {
+  return <section className="collaboration-suggestion-card"><span className="collaboration-suggestion-icon"><Network size={16} /></span><div><strong>{suggestion.title}</strong><p>{suggestion.reason}</p></div><button type="button" className="secondary-btn" disabled={busy || disabled} onClick={onStart}>{busy ? <LoaderCircle className="spin" size={14} /> : <Network size={14} />}发起协作</button></section>;
+}
+
 function PlanCard({ plan, draft, agents, latest, readOnly = false, busy, feedbackOpen, feedback, error, onFeedbackChange, onOpenFeedback, onCloseFeedback, onSubmitFeedback, onExecute, onCancel }: {
   plan: PlanSession;
   draft: PlanDraft;
@@ -10282,6 +11293,7 @@ function PlanCard({ plan, draft, agents, latest, readOnly = false, busy, feedbac
   onExecute: () => void;
   onCancel: () => void;
 }) {
+  const collaborationPlan = plan.purpose === 'collaboration' || plan.targetExecutionMode === 'collaboration' || plan.targetExecutionMode === 'work';
   const waitingApproval = !readOnly && latest && plan.status === 'waiting_approval';
   const canExecute = !readOnly && latest && (plan.status === 'waiting_approval' || plan.status === 'failed');
   const visibleError = error || (plan.status === 'failed' ? plan.error : '');
@@ -10298,8 +11310,8 @@ function PlanCard({ plan, draft, agents, latest, readOnly = false, busy, feedbac
   return (
     <section className={`plan-card${latest ? ' is-latest' : ' is-superseded'}`}>
       <header>
-        <span className="plan-card-icon"><Lightbulb size={17} /></span>
-        <div><small>{plan.targetExecutionMode === 'work' ? 'Work 计划' : 'Chat 计划'} · 第 {draft.revision} 版</small><h3>{draft.title}</h3></div>
+        <span className="plan-card-icon">{collaborationPlan ? <Network size={17} /> : <Lightbulb size={17} />}</span>
+        <div><small>{collaborationPlan ? '协作方案' : '执行计划'} · 第 {draft.revision} 版</small><h3>{draft.title}</h3></div>
         <span className={`plan-card-status status-${plan.status}`}>{statusLabel}</span>
       </header>
       <p className="plan-card-summary">{draft.summary}</p>
@@ -10335,9 +11347,9 @@ function PlanCard({ plan, draft, agents, latest, readOnly = false, busy, feedbac
       {canExecute && !feedbackOpen && (
         <footer>
           <button type="button" className="plan-cancel-btn" disabled={busy} onClick={onCancel}>取消</button>
-          {waitingApproval && <button type="button" className="secondary-btn" disabled={busy} onClick={onOpenFeedback}>修改计划</button>}
+          {waitingApproval && <button type="button" className="secondary-btn" disabled={busy} onClick={onOpenFeedback}>{collaborationPlan ? '调整方案' : '修改计划'}</button>}
           <button type="button" className="send-btn plan-execute-btn" disabled={busy} onClick={onExecute}>
-            {busy ? <LoaderCircle className="spin" size={14} /> : <Play size={14} />}{plan.status === 'failed' ? '重试执行' : '开始执行'}
+            {busy ? <LoaderCircle className="spin" size={14} /> : <Play size={14} />}{plan.status === 'failed' ? '重试执行' : collaborationPlan ? '开始协作' : '开始执行'}
           </button>
         </footer>
       )}
@@ -13100,9 +14112,10 @@ function HermesBackupPanel({ status, busy, onCreate, onRollback, onDelete, onCle
   );
 }
 
-function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, hermesRuntime, hermesDiagnostics, hermesApiAvailability, hermesError, updatesStatus, updatesBusy, updatesError, updatesResult, desktopUpdateState, onCheckDesktopUpdate, onDownloadDesktopUpdate, onCancelDesktopUpdate, onOpenDesktopUpdate, onCheckHermesRuntime, onInstallHermesRuntime, onActivateHermesRuntime, onUseBundledHermesRuntime, onDeleteHermesRuntime, onCreateHermesBackup, onRollbackHermesBackup, onDeleteHermesBackup, onCleanupHermesBackups, userProfile, uiSettings, telemetryStatus, isImportingHermes, vaultPathInput, setVaultPathInput, vaultError, vaultBusy, addVault, reindexVault, deleteVault, resolveLegacyVaultBinding, onImportHermes, onRunFirstUseGuide, firstUseGuideRunning, onStartHermesRuntime, onRefreshHermesRuntime, onStartProfileGateway, onStopProfileGateway, onUpdateUi, onUserProfileSaved, pinnedNav, onTogglePinned, modelError, saveModel, deleteModel, fetchAvailableModels, onCapabilityChanged, activeSection, onSectionChange, archivedThreads, onRefreshArchivedThreads, onRestoreThread, onDeleteThread, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreateAgent, profileEditor, onUpdateDefaultAgent, onOpenMemorySource }: {
+function SettingsPage({ vaults, models, modelCapabilities, agents, hermesStatus, hermesBootstrap, hermesRuntime, hermesDiagnostics, hermesApiAvailability, hermesError, updatesStatus, updatesBusy, updatesError, updatesResult, desktopUpdateState, onCheckDesktopUpdate, onDownloadDesktopUpdate, onCancelDesktopUpdate, onOpenDesktopUpdate, onCheckHermesRuntime, onInstallHermesRuntime, onActivateHermesRuntime, onUseBundledHermesRuntime, onDeleteHermesRuntime, onCreateHermesBackup, onRollbackHermesBackup, onDeleteHermesBackup, onCleanupHermesBackups, userProfile, uiSettings, telemetryStatus, isImportingHermes, vaultPathInput, setVaultPathInput, vaultError, vaultBusy, addVault, reindexVault, deleteVault, resolveLegacyVaultBinding, onImportHermes, onRunFirstUseGuide, firstUseGuideRunning, onStartHermesRuntime, onRefreshHermesRuntime, onStartProfileGateway, onStopProfileGateway, onUpdateUi, onUserProfileSaved, pinnedNav, onTogglePinned, modelError, saveModel, deleteModel, fetchAvailableModels, onCapabilityChanged, activeSection, onSectionChange, archivedThreads, onRefreshArchivedThreads, onRestoreThread, onDeleteThread, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreateAgent, profileEditor, onUpdateDefaultAgent, onOpenMemorySource }: {
   vaults: Vault[];
   models: ModelProfile[];
+  modelCapabilities: Record<string, ModelCapability>;
   agents: Agent[];
   hermesStatus: HermesLocalStatus | null;
   hermesBootstrap: HermesBootstrapStatus | null;
@@ -13251,6 +14264,7 @@ function SettingsPage({ vaults, models, agents, hermesStatus, hermesBootstrap, h
             <OrgPage
               agents={agents}
               models={models}
+              modelCapabilities={modelCapabilities}
               selectedOrgAgentId={selectedOrgAgentId}
               onSelectAgent={onSelectAgent}
               onProfilesChanged={onProfilesChanged}
@@ -13919,7 +14933,49 @@ function calculateProviderModelMenuPlacement(trigger: DOMRect, viewportWidth: nu
   };
 }
 
-function ProviderModelPicker({ models, value, onChange, runtimeId = 'hermes', agentName = '', emptyLabel = '未配置模型', className = '', ariaLabel = '切换模型', title = '切换模型', allowDefault = false, usingDefault = false, capabilities, runOverride, onRunOverrideChange }: { models: ModelProfile[]; value: string; onChange: (value: string) => void | Promise<void>; runtimeId?: RuntimeId; agentName?: string; emptyLabel?: string; className?: string; ariaLabel?: string; title?: string; allowDefault?: boolean; usingDefault?: boolean; capabilities?: Record<string, ModelCapability>; runOverride?: AgentRunOverride; onRunOverrideChange?: (override: AgentRunOverride) => void | Promise<void> }) {
+function MessageAgentSessionConfig({ message, agent, runtimeId, models, value, modelOverride, runOverride, capabilities, open, onOpenChange, onChange, onRunOverrideChange }: {
+  message: ChatEvent;
+  agent: Agent;
+  runtimeId: RuntimeId;
+  models: ModelProfile[];
+  value: string;
+  modelOverride: string;
+  runOverride: AgentRunOverride;
+  capabilities: Record<string, ModelCapability>;
+  open: boolean;
+  onOpenChange: (open: boolean) => void;
+  onChange: (value: string) => void | Promise<void>;
+  onRunOverrideChange: (override: AgentRunOverride) => void | Promise<void>;
+}) {
+  const pickerProps = {
+    runtimeId,
+    agentName: agent.name,
+    value,
+    models,
+    emptyLabel: '未配置模型',
+    ariaLabel: `${agent.name} 的 Frakio Model Center 模型`,
+    title: 'Frakio Model Center',
+    allowDefault: true,
+    usingDefault: !modelOverride,
+    capabilities,
+    runOverride,
+    onRunOverrideChange,
+    onChange,
+  };
+  return <AppPopover open={open} onOpenChange={onOpenChange}>
+      <AppPopoverTrigger asChild>
+        <button type="button" className="message-agent-config-trigger" aria-label={`打开 ${agent.name} 的会话配置`} title={`打开 ${agent.name} 的会话配置`}>
+          <AgentMessageAvatar message={message} agent={agent} />
+        </button>
+      </AppPopoverTrigger>
+      <AppPopoverContent className="message-agent-config-popover" side="right" align="start" aria-label={`${agent.name} 会话配置`}>
+        <div className="message-agent-config-head"><strong>{agent.name}</strong><small>{agent.role || 'Agent'} · 当前会话覆盖</small></div>
+        <ProviderModelPicker {...pickerProps} className="message-agent-config-picker" />
+      </AppPopoverContent>
+    </AppPopover>;
+}
+
+function ProviderModelPicker({ models, value, onChange, runtimeId = 'hermes', agentName = '', emptyLabel = '未配置模型', className = '', ariaLabel = '切换模型', title = '切换模型', allowDefault = false, usingDefault = false, capabilities, runOverride, onRunOverrideChange, inheritRunLabel = '跟随 Agent' }: { models: ModelProfile[]; value: string; onChange: (value: string) => void | Promise<void>; runtimeId?: RuntimeId; agentName?: string; emptyLabel?: string; className?: string; ariaLabel?: string; title?: string; allowDefault?: boolean; usingDefault?: boolean; capabilities?: Record<string, ModelCapability>; runOverride?: AgentRunOverride; onRunOverrideChange?: (override: AgentRunOverride) => void | Promise<void>; inheritRunLabel?: string }) {
   const [open, setOpen] = useState(false);
   const [section, setSection] = useState<'root' | 'model' | 'reasoning' | 'speed'>('model');
   const [saving, setSaving] = useState(false);
@@ -13936,10 +14992,10 @@ function ProviderModelPicker({ models, value, onChange, runtimeId = 'hermes', ag
   const advanced = Boolean(capabilities && runOverride && onRunOverrideChange);
   const selectedCapability = capabilities?.[selected.value];
   const reasoningLabels: Record<string, string> = { off: '关闭', none: '关闭', minimal: '最低', low: '低', medium: '中', high: '高', xhigh: '超高', max: '最大', ultra: '极致' };
-  const reasoningLabel = runOverride?.reasoningEffort ? reasoningLabels[runOverride.reasoningEffort] || runOverride.reasoningEffort : '跟随 Agent';
+  const reasoningLabel = runOverride?.reasoningEffort ? reasoningLabels[runOverride.reasoningEffort] || runOverride.reasoningEffort : inheritRunLabel;
   const selectedTier = selectedCapability?.serviceTiers.find((tier) => tier.id === runOverride?.speedMode || runOverride?.speedMode === 'fast');
   const speedLabel = selectedCapability?.serviceTiers.length
-    ? selectedTier?.name || (runOverride?.speedMode === 'standard' ? '标准' : '跟随 Agent')
+    ? selectedTier?.name || (runOverride?.speedMode === 'standard' ? '标准' : inheritRunLabel)
     : selectedCapability?.serviceTierStatus === 'unsupported' ? '该模型不支持' : '能力未确认';
 
   useEffect(() => {
@@ -14040,7 +15096,8 @@ function ProviderModelPicker({ models, value, onChange, runtimeId = 'hermes', ag
             <div>{modelNamesForProvider(provider).map((modelName) => {
               const itemValue = modelChoiceValue(provider, modelName);
               const isSelected = selected.value === itemValue;
-              const compatibility = runtimeCatalog?.models.find((entry) => entry.id === provider.id)?.compatibility;
+              const catalogEntry = runtimeCatalog?.models.find((entry) => entry.id === provider.id);
+              const compatibility = catalogEntry?.modelCompatibilities?.[modelName] || catalogEntry?.compatibility;
               const usable = Boolean(compatibility?.usableModelIds.includes(modelName));
               const compatibilityLabel = compatibility?.compatibility === 'bridged' ? '通过 Frakio 兼容桥使用' : '可由当前 Runtime 直接使用';
               return <button type="button" className={`${isSelected ? 'selected' : ''}${runtimeCatalog && !usable ? ' incompatible' : ''}`} key={itemValue} onClick={() => chooseModel(itemValue)} disabled={saving || !runtimeCatalog || !usable} title={usable ? compatibilityLabel : compatibility?.reason || '当前 Runtime 不支持该模型'}><span>{modelName}{usable && compatibility?.compatibility === 'bridged' ? ' · 兼容桥' : ''}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>;
@@ -14055,7 +15112,7 @@ function ProviderModelPicker({ models, value, onChange, runtimeId = 'hermes', ag
     <section className="provider-model-subpanel">
       <header><button type="button" onClick={() => setSection('root')} disabled={saving} aria-label="返回"><ArrowLeft size={15} /></button><strong>推理强度</strong></header>
       <div className="provider-setting-options">
-        <button className={!runOverride?.reasoningEffort ? 'selected' : ''} onClick={() => chooseRunOverride({ ...runOverride, reasoningEffort: undefined })} disabled={saving} title="不发送推理强度覆盖参数"><span>跟随 Agent</span>{!runOverride?.reasoningEffort && <Check size={14} aria-hidden="true" />}</button>
+        <button className={!runOverride?.reasoningEffort ? 'selected' : ''} onClick={() => chooseRunOverride({ ...runOverride, reasoningEffort: undefined })} disabled={saving} title="不发送推理强度覆盖参数"><span>{inheritRunLabel}</span>{!runOverride?.reasoningEffort && <Check size={14} aria-hidden="true" />}</button>
         {(selectedCapability?.reasoningEfforts || []).map((effort) => { const isSelected = runOverride?.reasoningEffort === effort; return <button className={isSelected ? 'selected' : ''} key={effort} onClick={() => chooseRunOverride({ ...runOverride, reasoningEffort: effort })} disabled={saving}><span>{reasoningLabels[effort] || effort}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>; })}
       </div>
     </section>
@@ -14065,7 +15122,7 @@ function ProviderModelPicker({ models, value, onChange, runtimeId = 'hermes', ag
     <section className="provider-model-subpanel">
       <header><button type="button" onClick={() => setSection('root')} disabled={saving} aria-label="返回"><ArrowLeft size={15} /></button><strong>速度</strong></header>
       <div className="provider-setting-options">
-        <button className={!runOverride?.speedMode ? 'selected' : ''} onClick={() => chooseRunOverride({ ...runOverride, speedMode: undefined })} disabled={saving} title="不发送速度覆盖参数"><span>跟随 Agent</span>{!runOverride?.speedMode && <Check size={14} aria-hidden="true" />}</button>
+        <button className={!runOverride?.speedMode ? 'selected' : ''} onClick={() => chooseRunOverride({ ...runOverride, speedMode: undefined })} disabled={saving} title="不发送速度覆盖参数"><span>{inheritRunLabel}</span>{!runOverride?.speedMode && <Check size={14} aria-hidden="true" />}</button>
         <button className={runOverride?.speedMode === 'standard' ? 'selected' : ''} onClick={() => chooseRunOverride({ ...runOverride, speedMode: 'standard' })} disabled={saving}><span>标准</span>{runOverride?.speedMode === 'standard' && <Check size={14} aria-hidden="true" />}</button>
         {(selectedCapability?.serviceTiers || []).map((tier) => { const isSelected = runOverride?.speedMode === tier.id || runOverride?.speedMode === 'fast'; return <button className={isSelected ? 'selected' : ''} key={tier.id} onClick={() => chooseRunOverride({ ...runOverride, speedMode: tier.id })} disabled={saving} title={tier.billingNotice || tier.description || tier.name}><span>{tier.name}</span>{isSelected && <Check size={14} aria-hidden="true" />}</button>; })}
       </div>
@@ -14075,8 +15132,8 @@ function ProviderModelPicker({ models, value, onChange, runtimeId = 'hermes', ag
   const rootPanel = advanced ? (
     <section className="provider-model-root-panel">
       <button type="button" className={section === 'model' ? 'active' : ''} onClick={() => setSection('model')} disabled={saving}><span>模型</span><em>{selectedLabel}</em><ChevronRight size={14} /></button>
-      <button type="button" className={section === 'reasoning' ? 'active' : ''} onClick={() => setSection('reasoning')} disabled={saving || !selectedCapability?.reasoning} title={selectedCapability?.reasoning ? '调整当前运行的推理强度' : selectedCapability?.reasoningStatus === 'unsupported' ? '该模型不支持' : '能力未确认'}><span>推理强度</span><em>{selectedCapability?.reasoning ? reasoningLabel : selectedCapability?.reasoningStatus === 'unsupported' ? '不支持' : '未确认'}</em><ChevronRight size={14} /></button>
-      <button type="button" className={section === 'speed' ? 'active' : ''} onClick={() => setSection('speed')} disabled={saving || !selectedCapability?.serviceTiers.length} title={speedLabel}><span>速度</span><em>{selectedCapability?.serviceTiers.length ? speedLabel : selectedCapability?.serviceTierStatus === 'unsupported' ? '不支持' : '未确认'}</em><ChevronRight size={14} /></button>
+      {selectedCapability?.reasoningStatus === 'confirmed' && selectedCapability.reasoning && <button type="button" className={section === 'reasoning' ? 'active' : ''} onClick={() => setSection('reasoning')} disabled={saving} title="调整当前运行的推理强度"><span>推理强度</span><em>{reasoningLabel}</em><ChevronRight size={14} /></button>}
+      {selectedCapability?.serviceTierStatus === 'confirmed' && selectedCapability.serviceTiers.length > 0 && <button type="button" className={section === 'speed' ? 'active' : ''} onClick={() => setSection('speed')} disabled={saving} title={speedLabel}><span>速度</span><em>{speedLabel}</em><ChevronRight size={14} /></button>}
     </section>
   ) : null;
 
@@ -14349,7 +15406,7 @@ function ModelCenter({ models, profiles, defaultProfile, modelError, saveModel, 
   const slotGroups = useModelSlotGroups(models);
   useEffect(() => {
     let cancelled = false;
-    void Promise.all(['hermes', 'pi'].map(async (runtimeId) => {
+    void Promise.all(['hermes', 'pi', 'codex', 'claude'].map(async (runtimeId) => {
       try {
         const response = await fetch(`/api/runtimes/${runtimeId}/models`);
         const data = await response.json().catch(() => ({}));
@@ -14402,9 +15459,9 @@ function ModelCenter({ models, profiles, defaultProfile, modelError, saveModel, 
       </div>
       <div className="module-matrix-tabs model-center-tabs"><button className={activeTab === 'general' ? 'selected' : ''} onClick={() => setActiveTab('general')}>模型配置</button><button className={activeTab === 'accounts' ? 'selected' : ''} onClick={() => setActiveTab('accounts')}>授权账户</button><button className={activeTab === 'auxiliary' ? 'selected' : ''} onClick={() => setActiveTab('auxiliary')}>辅助模型</button></div>
       {modelError && <div className="form-error">{modelError}</div>}
-      {activeTab === 'auxiliary' ? <><MemoryReviewModelSettings models={models} /><AuxiliaryModelsPanel groups={slotGroups} /></> : activeTab === 'accounts' ? <><p className="settings-description">全局授权账户。任意 Agent 的模型配置绑定后，Hermes 与 Pi 都能使用同一账户。</p>{oauthAccountsApiError ? <div className="form-error">{oauthAccountsApiError}</div> : <OAuthAccountsPanel accounts={oauthAccounts} onChanged={refreshAccounts} />}</> : <div className="model-grid">
+      {activeTab === 'auxiliary' ? <><MemoryReviewModelSettings models={models} /><AuxiliaryModelsPanel groups={slotGroups} /></> : activeTab === 'accounts' ? <><p className="settings-description">全局授权账户。任意 Agent 的模型配置绑定后，Hermes、Pi、Codex 与 Claude 都能使用同一账户。</p>{oauthAccountsApiError ? <div className="form-error">{oauthAccountsApiError}</div> : <OAuthAccountsPanel accounts={oauthAccounts} onChanged={refreshAccounts} />}</> : <div className="model-grid">
         {models.map((model) => {
-          const runtimeCompatibility = ['hermes', 'pi'].map((runtimeId) => ({
+          const runtimeCompatibility = ['hermes', 'pi', 'codex', 'claude'].map((runtimeId) => ({
             runtimeId,
             compatibility: runtimeCatalogs[runtimeId]?.models.find((item) => item.id === model.id)?.compatibility,
           }));
@@ -14501,6 +15558,9 @@ function ModelEditorModal({ model, oauthAccounts, onAccountsChanged, onClose, on
   const [savedDraft, setSavedDraft] = useState<ModelPayload>(() => draftForModel(model));
   const [availableModels, setAvailableModels] = useState<string[]>(model?.models?.length ? model.models : [model?.model || ''].filter(Boolean));
   const [detectedCapabilities, setDetectedCapabilities] = useState<Record<string, ModelCapability>>({});
+  const [capabilityProbeInfo, setCapabilityProbeInfo] = useState<{ active?: boolean; models?: Array<{ modelId: string; status: string; stage?: string; error?: string }> }>({});
+  const [capabilityRefreshTick, setCapabilityRefreshTick] = useState(0);
+  const [retryingCapabilityModel, setRetryingCapabilityModel] = useState('');
   const [catalogInfo, setCatalogInfo] = useState<CatalogInfo | null>(null);
   const [verifyState, setVerifyState] = useState<'idle' | 'running' | 'passed' | 'failed'>('idle');
   const [verifyMessage, setVerifyMessage] = useState('');
@@ -14558,16 +15618,31 @@ function ModelEditorModal({ model, oauthAccounts, onAccountsChanged, onClose, on
     setDraft(nextDraft);
     setSavedDraft(nextDraft);
     setDetectedCapabilities({});
+    setCapabilityProbeInfo({});
     setCatalogInfo(null);
     setVerifyState('idle');
     setVerifyMessage('');
-    if (model?.id) fetch('/api/model-capabilities').then((response) => response.json()).then((data) => {
+    setRetryingCapabilityModel('');
+  }, [model?.id]);
+
+  useEffect(() => {
+    if (!model?.id) return undefined;
+    let cancelled = false;
+    let timer = 0;
+    const loadCapabilities = async () => {
+      const data = await fetch('/api/model-capabilities').then((response) => response.json()).catch(() => null);
+      if (cancelled || !data) return;
       const prefix = `${model.id}::`;
       const next = Object.fromEntries(Object.entries(data.capabilities || {}).filter(([key]) => key.startsWith(prefix)).map(([key, value]) => [key.slice(prefix.length), value]));
+      const probe = data.probes?.[model.id] || {};
       setDetectedCapabilities(next as Record<string, ModelCapability>);
+      setCapabilityProbeInfo(probe);
       setCatalogInfo(data.providers?.[model.id] || null);
-    }).catch(() => {});
-  }, [model?.id]);
+      if (probe.active) timer = window.setTimeout(loadCapabilities, 1200);
+    };
+    void loadCapabilities();
+    return () => { cancelled = true; if (timer) window.clearTimeout(timer); };
+  }, [model?.id, capabilityRefreshTick]);
 
   useEffect(() => {
     let cancelled = false;
@@ -14626,6 +15701,7 @@ function ModelEditorModal({ model, oauthAccounts, onAccountsChanged, onClose, on
     setProviderQuery(preset.label);
     setAvailableModels(nextModels);
     setDetectedCapabilities({});
+    setCapabilityProbeInfo({});
     setCatalogInfo(preset.catalog || null);
     setVerifyState('idle');
     setVerifyMessage('');
@@ -14678,6 +15754,7 @@ function ModelEditorModal({ model, oauthAccounts, onAccountsChanged, onClose, on
       capabilityOverrides: {},
     });
     setDetectedCapabilities({});
+    setCapabilityProbeInfo({});
     setCatalogInfo(null);
     setVerifyState('idle');
     setVerifyMessage('');
@@ -14748,7 +15825,7 @@ function ModelEditorModal({ model, oauthAccounts, onAccountsChanged, onClose, on
         model: nextModel,
         capabilityMode: 'auto',
       };
-      setDetectedCapabilities(result.capability && nextModel ? { [nextModel]: result.capability as ModelCapability } : {});
+      setDetectedCapabilities((result.capabilities || (result.capability && nextModel ? { [nextModel]: result.capability } : {})) as Record<string, ModelCapability>);
       setCatalogInfo(result.catalog || null);
       setAvailableModels(nextModels);
       setDraft(nextDraft);
@@ -14867,6 +15944,42 @@ function ModelEditorModal({ model, oauthAccounts, onAccountsChanged, onClose, on
   const capabilitySummary = activeCapability
     ? `${activeCapability.reasoning ? `支持 ${activeCapability.reasoningEfforts.length} 档推理` : '推理能力尚未确认'} · ${activeCapability.serviceTiers.length ? '线路接受快速模式' : '快速模式尚未确认'}${activeCapability.confidence === 'inferred' ? ' · 推断结果' : ''}`
     : '获取模型后显示自动识别结果。';
+  const capabilityProbeByModel = Object.fromEntries((capabilityProbeInfo.models || []).map((item) => [item.modelId, item]));
+  const capabilityStatusLabel = (modelName: string) => {
+    const capability = detectedCapabilities[modelName];
+    const probe = capabilityProbeByModel[modelName];
+    if (probe?.status === 'queued' || probe?.status === 'running') return probe.stage || '正在识别';
+    if (probe?.status === 'failed') return '识别失败';
+    if (capability?.status === 'confirmed') {
+      const parts = [];
+      if (capability.reasoningStatus === 'confirmed' && capability.reasoningEfforts.length) parts.push(`${capability.reasoningEfforts.length} 档推理`);
+      if (capability.serviceTierStatus === 'confirmed' && capability.serviceTiers.length) parts.push('快速模式');
+      return parts.length ? parts.join(' · ') : '能力已确认';
+    }
+    if (capability?.status === 'unsupported') return '无可调档位';
+    if (capability?.status === 'verification_failed') return '识别失败';
+    return '等待识别';
+  };
+  async function retryCapabilityProbe(modelName: string) {
+    if (!model?.id || retryingCapabilityModel) return;
+    setRetryingCapabilityModel(modelName);
+    setFetchError('');
+    try {
+      const response = await fetch(`/api/models/${model.id}/capabilities/probe`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modelId: modelName }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok) throw new Error(data.error || '能力重新识别失败。');
+      setCapabilityProbeInfo(data.probe || {});
+      setCapabilityRefreshTick((value) => value + 1);
+    } catch (error) {
+      setFetchError(error instanceof Error ? error.message : '能力重新识别失败。');
+    } finally {
+      setRetryingCapabilityModel('');
+    }
+  }
   const effectiveProtocolLabel = draft.apiMode ? protocolLabel(draft.apiMode) : '';
   const baseUrlNeedsV1 = (() => {
     if (!['auto', 'chat_completions', 'openai_responses'].includes(draft.apiModePreference || 'auto')) return false;
@@ -14923,6 +16036,13 @@ function ModelEditorModal({ model, oauthAccounts, onAccountsChanged, onClose, on
           <section className="provider-capability-settings">
             <div className="provider-capability-head"><div><strong>能力识别</strong><small>{draft.model || '请先完成检测'}</small></div><span className="provider-auto-badge">自动</span></div>
             <p className="provider-capability-summary">{capabilitySummary}</p>
+            {availableModels.length > 0 && <div className="provider-capability-models">{availableModels.map((modelName) => {
+              const probe = capabilityProbeByModel[modelName];
+              const capability = detectedCapabilities[modelName];
+              const retryable = Boolean(model?.id && (['failed', 'unresolved'].includes(probe?.status || '') || ['unknown', 'verification_failed'].includes(capability?.status || 'unknown')));
+              const retrying = retryingCapabilityModel === modelName || probe?.status === 'queued' || probe?.status === 'running';
+              return <div key={modelName} className={probe?.status === 'failed' ? 'failed' : ''} title={probe?.error || ''}><span>{modelName}</span><em>{capabilityStatusLabel(modelName)}</em>{retryable && <button type="button" className="provider-capability-retry" disabled={retrying || Boolean(retryingCapabilityModel)} onClick={() => void retryCapabilityProbe(modelName)} aria-label={`重新识别 ${modelName} 的模型能力`} title="重新识别">{retrying ? <LoaderCircle className="spin" size={13} /> : <RefreshCw size={13} />}</button>}</div>;
+            })}</div>}
           </section>
         </div>
         <div className="provider-modal-footer"><button className="secondary-btn" onClick={requestClose}>取消</button><button className="send-btn" onClick={() => void saveDraft()} disabled={saveDisabled}>{needsAuthorization ? '授权' : model ? '保存' : '添加'}</button></div>
@@ -15107,9 +16227,10 @@ function pricingSourceLabel(source?: string) {
   return '未计价';
 }
 
-function OrgPage({ agents, models, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreate, profileEditor, defaultAgentId, onUpdateDefaultAgent }: {
+function OrgPage({ agents, models, modelCapabilities, selectedOrgAgentId, onSelectAgent, onProfilesChanged, onUpdateAgent, onDeleteAgent, onCreate, profileEditor, defaultAgentId, onUpdateDefaultAgent }: {
   agents: Agent[];
   models: ModelProfile[];
+  modelCapabilities: Record<string, ModelCapability>;
   selectedOrgAgentId: string;
   onSelectAgent: (id: string) => void;
   onProfilesChanged: () => Promise<void>;
@@ -15174,7 +16295,7 @@ function OrgPage({ agents, models, selectedOrgAgentId, onSelectAgent, onProfiles
               <div><h2 id="agent-profile-modal-title">Agent Profile</h2><p>{openAgent.name} · 配置详情</p></div>
               <button className="icon-btn" onClick={closeDetail} aria-label="关闭 Agent 详情"><X size={18} /></button>
             </div>
-            <AgentProfileDetail agent={openAgent} models={models} canDelete={agents.length > 1} onChanged={onProfilesChanged} onUpdateAgent={onUpdateAgent} onDelete={() => onDeleteAgent(openAgent.id)} profileEditor={profileEditor} onDirtyChange={setDetailDirty} />
+            <AgentProfileDetail agent={openAgent} models={models} modelCapabilities={modelCapabilities} canDelete={agents.length > 1} onChanged={onProfilesChanged} onUpdateAgent={onUpdateAgent} onDelete={() => onDeleteAgent(openAgent.id)} profileEditor={profileEditor} onDirtyChange={setDetailDirty} />
           </div>
         </div>, document.body)}
       </div>
@@ -15240,12 +16361,13 @@ function AgentRuntimePolicyPanel({ agent, onUpdateAgent }: { agent: Agent; onUpd
   </section>;
 }
 
-function AgentProfileDetail({ agent, models, canDelete, onChanged, onUpdateAgent, onDelete, profileEditor, onDirtyChange }: { agent: Agent; models: ModelProfile[]; canDelete: boolean; onChanged: () => Promise<void>; onUpdateAgent: (agentId: string, payload: Partial<Agent>) => Promise<void>; onDelete: () => Promise<void>; profileEditor: ProfileEditorControls; onDirtyChange?: (dirty: boolean) => void }) {
+function AgentProfileDetail({ agent, models, modelCapabilities, canDelete, onChanged, onUpdateAgent, onDelete, profileEditor, onDirtyChange }: { agent: Agent; models: ModelProfile[]; modelCapabilities: Record<string, ModelCapability>; canDelete: boolean; onChanged: () => Promise<void>; onUpdateAgent: (agentId: string, payload: Partial<Agent>) => Promise<void>; onDelete: () => Promise<void>; profileEditor: ProfileEditorControls; onDirtyChange?: (dirty: boolean) => void }) {
   const [tab, setTab] = useState<'notes' | 'user' | 'soul' | 'runtime'>('notes');
   const [avatarError, setAvatarError] = useState('');
   const [avatarSaving, setAvatarSaving] = useState(false);
   const [avatarCropFile, setAvatarCropFile] = useState<File | null>(null);
   const [modelSaving, setModelSaving] = useState(false);
+  const [defaultRunSaving, setDefaultRunSaving] = useState(false);
   const [modelError, setModelError] = useState('');
   const [nameEditing, setNameEditing] = useState(false);
   const [nameDraft, setNameDraft] = useState(agent.name);
@@ -15311,6 +16433,18 @@ function AgentProfileDetail({ agent, models, canDelete, onChanged, onUpdateAgent
       setModelError(error instanceof Error ? error.message : '模型保存失败。');
     } finally {
       setModelSaving(false);
+    }
+  }
+  async function saveAgentDefaultRunOverride(override: AgentRunOverride) {
+    if (defaultRunSaving) return;
+    setDefaultRunSaving(true);
+    try {
+      await onUpdateAgent(agent.id, {
+        defaultReasoningEffort: override.reasoningEffort || '',
+        defaultSpeedMode: override.speedMode || '',
+      });
+    } finally {
+      setDefaultRunSaving(false);
     }
   }
   async function saveAgentName() {
@@ -15390,16 +16524,21 @@ function AgentProfileDetail({ agent, models, canDelete, onChanged, onUpdateAgent
             </button>
           ))}
         </div>
-        <label className="agent-default-model" aria-label="Agent 默认模型">
+        <label className="agent-default-model" aria-label="Agent 默认模型与运行配置">
           <span>默认模型</span>
           <ProviderModelPicker
             models={models}
             value={modelValueForAgent(agent, models)}
+            runtimeId={effectiveRuntimeForAgentUi(agent, null)}
             onChange={(value) => void saveAgentModel(value)}
             emptyLabel={modelSaving ? '保存中' : '未配置模型'}
             className="agent-default-model-picker"
             ariaLabel="选择 Agent 默认模型"
             title="选择 Agent 默认模型"
+            capabilities={modelCapabilities}
+            runOverride={{ reasoningEffort: agent.defaultReasoningEffort, speedMode: agent.defaultSpeedMode }}
+            onRunOverrideChange={(override) => void saveAgentDefaultRunOverride(override)}
+            inheritRunLabel="使用模型默认"
           />
         </label>
       </div>
@@ -15811,8 +16950,13 @@ function MessageAvatar({ message, agents, userProfile }: { message: ChatEvent; a
     );
   }
   const agent = agents.find((item) => item.id === message.agentId);
-  if (agent) return <AgentAvatar agent={agent} />;
+  if (agent) return <AgentMessageAvatar message={message} agent={agent} />;
   return <span className="agent-avatar" style={{ background: agentColor(agents, message.agentId) }}>{message.agentName.slice(0, 1)}</span>;
+}
+
+function AgentMessageAvatar({ message, agent }: { message: ChatEvent; agent: Agent }) {
+  if (message.agentAvatarUrl) return <span className="agent-avatar"><img src={message.agentAvatarUrl} alt="" /></span>;
+  return <AgentAvatar agent={agent} />;
 }
 
 function isBrowserPreviewableImage(file: File) {
@@ -15972,7 +17116,7 @@ function ImageLightbox({ attachment, onClose }: { attachment: Attachment; onClos
   );
 }
 
-function MentionTextarea({ value, onChange, onSend, sendKey, agents, selectedAgentIds, placeholder }: {
+function MentionTextarea({ value, onChange, onSend, sendKey, agents, selectedAgentIds, placeholder, collaborationEnabled = false, onCollaborationChange }: {
   value: string;
   onChange: (value: string) => void;
   onSend: () => void;
@@ -15980,6 +17124,8 @@ function MentionTextarea({ value, onChange, onSend, sendKey, agents, selectedAge
   agents: Agent[];
   selectedAgentIds: string[];
   placeholder: string;
+  collaborationEnabled?: boolean;
+  onCollaborationChange?: (enabled: boolean) => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
   const dropdownRef = useRef<HTMLDivElement | null>(null);
@@ -15988,6 +17134,7 @@ function MentionTextarea({ value, onChange, onSend, sendKey, agents, selectedAge
   const [mentionStartIndex, setMentionStartIndex] = useState(-1);
   const [activeIndex, setActiveIndex] = useState(0);
   const [isComposing, setIsComposing] = useState(false);
+  const [slashActive, setSlashActive] = useState(false);
   const options = buildMentionOptions(agents, selectedAgentIds, mentionQuery).slice(0, 8);
 
   useEffect(() => {
@@ -16044,6 +17191,24 @@ function MentionTextarea({ value, onChange, onSend, sendKey, agents, selectedAge
     setMentionActive(nextOptions.length > 0);
   }
 
+  function applyCollaborationCommand(nextValue: string) {
+    const match = nextValue.match(/^\s*\/collab(?:\s+|$)/i);
+    if (!match || !onCollaborationChange) return false;
+    onCollaborationChange(true);
+    onChange(nextValue.slice(match[0].length));
+    setSlashActive(false);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+    return true;
+  }
+
+  function selectCollaborationCommand() {
+    if (!onCollaborationChange) return;
+    onCollaborationChange(true);
+    onChange(value.replace(/^\s*\/[^\s]*\s*/i, ''));
+    setSlashActive(false);
+    requestAnimationFrame(() => textareaRef.current?.focus());
+  }
+
   function selectMention(option: MentionOption) {
     const el = textareaRef.current;
     if (!el || mentionStartIndex < 0) return;
@@ -16061,6 +17226,18 @@ function MentionTextarea({ value, onChange, onSend, sendKey, agents, selectedAge
   }
 
   function handleKeyDown(event: React.KeyboardEvent<HTMLTextAreaElement>) {
+    if (slashActive) {
+      if (event.key === 'Enter' || event.key === 'Tab') {
+        event.preventDefault();
+        selectCollaborationCommand();
+        return;
+      }
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setSlashActive(false);
+        return;
+      }
+    }
     if (mentionActive && options.length) {
       if (event.key === 'ArrowDown') {
         event.preventDefault();
@@ -16096,8 +17273,11 @@ function MentionTextarea({ value, onChange, onSend, sendKey, agents, selectedAge
         ref={textareaRef}
         value={value}
         onChange={(event) => {
-          onChange(event.target.value);
-          if (!isComposing) requestAnimationFrame(() => updateMentionState(event.target.value));
+          const nextValue = event.target.value;
+          if (applyCollaborationCommand(nextValue)) return;
+          onChange(nextValue);
+          setSlashActive(Boolean(onCollaborationChange && /^\s*\/[^\s]*$/i.test(nextValue) && '/collab'.startsWith(nextValue.trim().toLowerCase())));
+          if (!isComposing) requestAnimationFrame(() => updateMentionState(nextValue));
         }}
         onKeyDown={handleKeyDown}
         onCompositionStart={() => setIsComposing(true)}
@@ -16107,6 +17287,7 @@ function MentionTextarea({ value, onChange, onSend, sendKey, agents, selectedAge
         }}
         onClick={() => updateMentionState()}
         placeholder={placeholder}
+        data-collaboration={collaborationEnabled ? 'true' : 'false'}
       />
       {mentionActive && options.length > 0 && (
         <div className="mention-menu" ref={dropdownRef}>
@@ -16125,6 +17306,14 @@ function MentionTextarea({ value, onChange, onSend, sendKey, agents, selectedAge
               <span><strong>{option.label}</strong><small>{option.description}</small></span>
             </button>
           ))}
+        </div>
+      )}
+      {slashActive && !mentionActive && (
+        <div className="mention-menu slash-command-menu">
+          <button type="button" className="mention-option active" onMouseDown={(event) => { event.preventDefault(); selectCollaborationCommand(); }}>
+            <span className="slash-command-avatar"><Network size={14} /></span>
+            <span><strong>协作</strong><small>/collab · 生成多 Agent 协作方案</small></span>
+          </button>
         </div>
       )}
     </div>
@@ -17034,6 +18223,7 @@ function permissionIcon(mode: string) {
 function isVisibleChatMessage(message: ChatEvent) {
   const content = String(message.content || '');
   if (message.agentId === 'system') return false;
+  if (message.contentType === 'workflow_final_delivery') return false;
   if (message.agentName === 'Hermes Bridge') return false;
   if (/Local Fallback|检测到 Hermes Studio|没有可用的模型 API Key|已回退到本地模拟/.test(`${message.role} ${content}`)) return false;
   if (/^(已开启普通对话|已开启与 .+ 的单 Agent 对话|已开启临时对话|项目已创建|新项目对话已创建|Workspace 已开启)/.test(content)) return false;

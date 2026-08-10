@@ -4,7 +4,33 @@ import path from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import { reduceRunPresentation } from './presentation.mjs';
 
-const SCHEMA_VERSION = 15;
+const SCHEMA_VERSION = 19;
+const MAX_RUNTIME_EVENT_BYTES = 256 * 1024;
+const WORK_TASK_STATUSES = new Set([
+  'pending_confirmation', 'ready', 'waiting_dependency', 'running', 'waiting_input',
+  'review', 'completed', 'failed', 'paused', 'cancelled',
+]);
+
+function canonicalWorkTaskStatus(value) {
+  const requested = String(value || 'pending_confirmation');
+  const legacy = {
+    planned: 'pending_confirmation',
+    triage: 'pending_confirmation',
+    todo: 'ready',
+    scheduled: 'ready',
+    blocked: 'waiting_dependency',
+    needs_input: 'waiting_input',
+    done: 'completed',
+  }[requested];
+  const status = legacy || requested;
+  if (!WORK_TASK_STATUSES.has(status)) {
+    throw Object.assign(new Error(`Unsupported Work Task status: ${requested}`), {
+      status: 400,
+      code: 'WORK_TASK_STATUS_INVALID',
+    });
+  }
+  return status;
+}
 
 function timestamp() {
   return new Date().toISOString();
@@ -20,6 +46,20 @@ function json(value, fallback = {}) {
 
 function encode(value) {
   return JSON.stringify(value ?? {});
+}
+
+function boundedRuntimeEventPayload(value) {
+  const payload = value && typeof value === 'object' ? value : {};
+  const encoded = encode(payload);
+  if (Buffer.byteLength(encoded) <= MAX_RUNTIME_EVENT_BYTES) return payload;
+  const next = { ...payload, truncated: true, originalBytes: Buffer.byteLength(encoded) };
+  for (const key of ['delta', 'output', 'content', 'result', 'detail']) {
+    if (typeof next[key] === 'string') next[key] = next[key].slice(0, 180000);
+  }
+  const bounded = encode(next);
+  return Buffer.byteLength(bounded) <= MAX_RUNTIME_EVENT_BYTES
+    ? next
+    : { truncated: true, originalBytes: Buffer.byteLength(encoded), preview: bounded.slice(0, 180000) };
 }
 
 function placeholders(values) {
@@ -410,8 +450,10 @@ export function createRuntimeStore(filePath) {
       runtime_id TEXT,
       runtime_session_id TEXT,
       dependencies_json TEXT NOT NULL DEFAULT '[]',
-      status TEXT NOT NULL DEFAULT 'planned',
+      status TEXT NOT NULL DEFAULT 'pending_confirmation',
+      acceptance_state TEXT NOT NULL DEFAULT 'pending',
       attempt INTEGER NOT NULL DEFAULT 0,
+      lease_token TEXT NOT NULL DEFAULT '',
       lease_expires_at TEXT,
       idempotency_key TEXT NOT NULL,
       worktree_path TEXT,
@@ -421,6 +463,125 @@ export function createRuntimeStore(filePath) {
       UNIQUE(workflow_id, idempotency_key)
     );
     CREATE INDEX IF NOT EXISTS work_tasks_workflow_idx ON work_tasks(workflow_id, status, updated_at);
+    CREATE TABLE IF NOT EXISTS collaboration_workflows (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL,
+      coordinator_agent_id TEXT NOT NULL DEFAULT '',
+      project_id TEXT,
+      status TEXT NOT NULL DEFAULT 'draft',
+      active_plan_revision_id TEXT,
+      revision INTEGER NOT NULL DEFAULT 0,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS collaboration_workflows_conversation_idx ON collaboration_workflows(conversation_id, status, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS collaboration_dependencies (
+      parent_task_id TEXT NOT NULL,
+      child_task_id TEXT NOT NULL,
+      created_by_task_id TEXT,
+      reason TEXT NOT NULL DEFAULT '',
+      created_at TEXT NOT NULL,
+      PRIMARY KEY(parent_task_id, child_task_id)
+    );
+    CREATE INDEX IF NOT EXISTS collaboration_dependencies_child_idx ON collaboration_dependencies(child_task_id, created_at);
+    CREATE TABLE IF NOT EXISTS collaboration_plan_revisions (
+      id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      revision INTEGER NOT NULL,
+      content_json TEXT NOT NULL DEFAULT '{}',
+      status TEXT NOT NULL DEFAULT 'draft',
+      confirmed_by TEXT,
+      confirmed_at TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE(workflow_id, revision)
+    );
+    CREATE TABLE IF NOT EXISTS workflow_proposals (
+      id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL,
+      workflow_id TEXT,
+      source_plan_id TEXT,
+      proposal_message_id TEXT,
+      revision INTEGER NOT NULL DEFAULT 1,
+      purpose TEXT NOT NULL DEFAULT 'collaboration',
+      status TEXT NOT NULL DEFAULT 'pending_confirmation',
+      title TEXT NOT NULL DEFAULT '',
+      summary TEXT NOT NULL DEFAULT '',
+      content_json TEXT NOT NULL DEFAULT '{}',
+      idempotency_key TEXT NOT NULL,
+      confirmed_by TEXT,
+      confirmed_at TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(conversation_id, idempotency_key)
+    );
+    CREATE INDEX IF NOT EXISTS workflow_proposals_conversation_idx ON workflow_proposals(conversation_id, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS workflow_proposals_workflow_idx ON workflow_proposals(workflow_id, revision, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS collaboration_interventions (
+      id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      task_id TEXT,
+      target_agent_id TEXT,
+      status TEXT NOT NULL DEFAULT 'queued',
+      message TEXT NOT NULL,
+      idempotency_key TEXT NOT NULL,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE(workflow_id, idempotency_key)
+    );
+    CREATE TABLE IF NOT EXISTS collaboration_artifacts (
+      id TEXT PRIMARY KEY,
+      workflow_id TEXT NOT NULL,
+      task_id TEXT,
+      path TEXT NOT NULL,
+      content_hash TEXT NOT NULL DEFAULT '',
+      status TEXT NOT NULL DEFAULT 'draft',
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      published_at TEXT,
+      created_at TEXT NOT NULL,
+      UNIQUE(workflow_id, task_id, path)
+    );
+    CREATE TABLE IF NOT EXISTS collaboration_events (
+      cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      type TEXT NOT NULL,
+      workflow_id TEXT NOT NULL,
+      task_id TEXT,
+      run_id TEXT,
+      payload_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS collaboration_events_workflow_idx ON collaboration_events(workflow_id, cursor);
+    CREATE TABLE IF NOT EXISTS inbox_items (
+      cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+      id TEXT NOT NULL UNIQUE,
+      idempotency_key TEXT NOT NULL UNIQUE,
+      workspace_id TEXT NOT NULL DEFAULT '',
+      thread_id TEXT NOT NULL,
+      workflow_id TEXT,
+      task_id TEXT,
+      type TEXT NOT NULL,
+      title TEXT NOT NULL,
+      summary TEXT NOT NULL DEFAULT '',
+      priority TEXT NOT NULL DEFAULT 'normal',
+      action_required INTEGER NOT NULL DEFAULT 0,
+      read_at TEXT,
+      resolved_at TEXT,
+      metadata_json TEXT NOT NULL DEFAULT '{}',
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS inbox_items_workspace_idx ON inbox_items(workspace_id, action_required DESC, updated_at DESC);
+    CREATE INDEX IF NOT EXISTS inbox_items_thread_idx ON inbox_items(thread_id, updated_at DESC);
+    CREATE TABLE IF NOT EXISTS task_run_bindings (
+      task_id TEXT NOT NULL,
+      run_id TEXT NOT NULL,
+      lease_token TEXT NOT NULL DEFAULT '',
+      bound_at TEXT NOT NULL,
+      ended_at TEXT,
+      PRIMARY KEY(task_id, run_id)
+    );
     CREATE TABLE IF NOT EXISTS vault_documents (
       vault_id TEXT NOT NULL,
       relative_path TEXT NOT NULL,
@@ -522,6 +683,11 @@ export function createRuntimeStore(filePath) {
     CREATE INDEX IF NOT EXISTS knowledge_issues_vault_idx ON knowledge_issues(vault_id, status, severity, updated_at DESC);
   `);
   const vaultDocumentColumns = new Set(db.prepare('PRAGMA table_info(vault_documents)').all().map((column) => column.name));
+  const workTaskColumns = new Set(db.prepare('PRAGMA table_info(work_tasks)').all().map((column) => column.name));
+  const workflowProposalColumns = new Set(db.prepare('PRAGMA table_info(workflow_proposals)').all().map((column) => column.name));
+  if (!workflowProposalColumns.has('proposal_message_id')) db.exec("ALTER TABLE workflow_proposals ADD COLUMN proposal_message_id TEXT");
+  if (!workTaskColumns.has('acceptance_state')) db.exec("ALTER TABLE work_tasks ADD COLUMN acceptance_state TEXT NOT NULL DEFAULT 'pending'");
+  if (!workTaskColumns.has('lease_token')) db.exec("ALTER TABLE work_tasks ADD COLUMN lease_token TEXT NOT NULL DEFAULT ''");
   for (const [column, definition] of Object.entries({
     title: "TEXT NOT NULL DEFAULT ''",
     document_type: "TEXT NOT NULL DEFAULT ''",
@@ -744,6 +910,15 @@ export function createRuntimeStore(filePath) {
       PRIMARY KEY(thread_id, agent_id, harness_id)
     );
   `);
+  if (storedSchemaVersion > 0 && storedSchemaVersion < 18) {
+    db.exec(`
+      UPDATE work_tasks SET status='pending_confirmation' WHERE status IN ('planned', 'triage');
+      UPDATE work_tasks SET status='waiting_dependency' WHERE status='blocked';
+      UPDATE work_tasks SET status='waiting_input' WHERE status='needs_input';
+      UPDATE work_tasks SET status='ready' WHERE status IN ('todo', 'scheduled');
+      UPDATE work_tasks SET status='completed' WHERE status='done';
+    `);
+  }
   db.prepare('INSERT OR REPLACE INTO schema_meta(key, value) VALUES (?, ?)').run('schema_version', String(SCHEMA_VERSION));
 
   const mapSession = (row) => row && ({
@@ -1325,7 +1500,7 @@ export function createRuntimeStore(filePath) {
           runtimeId: input.runtimeId || run.runtimeId,
           nativeEventKey: String(input.nativeEventKey || ''),
           type: input.type,
-          payload: input.payload || {},
+          payload: boundedRuntimeEventPayload(input.payload),
           createdAt: input.createdAt || timestamp(),
         };
         const result = db.prepare(`
@@ -2365,25 +2540,39 @@ export function createRuntimeStore(filePath) {
     },
     upsertWorkTask(input) {
       const current = timestamp();
+      const status = canonicalWorkTaskStatus(input.status);
       const existing = db.prepare('SELECT * FROM work_tasks WHERE workflow_id = ? AND idempotency_key = ?')
         .get(input.workflowId, input.idempotencyKey);
       const id = existing?.id || input.id || `work_task_${randomUUID()}`;
+      const dependencies = Array.isArray(input.dependencies) ? input.dependencies.map(String).filter(Boolean) : [];
+      const visited = new Set();
+      const reaches = (candidateId) => {
+        if (candidateId === id) return true;
+        if (visited.has(candidateId)) return false;
+        visited.add(candidateId);
+        const candidate = api.getWorkTask(candidateId);
+        return Boolean(candidate?.dependencies?.some((parentId) => reaches(String(parentId))));
+      };
+      if (dependencies.some((dependencyId) => reaches(dependencyId))) {
+        throw Object.assign(new Error('工作流任务依赖形成循环。'), { code: 'WORKFLOW_DEPENDENCY_CYCLE', status: 409 });
+      }
       db.prepare(`
         INSERT INTO work_tasks(
           id, workflow_id, title, description, assignee_agent_id, runtime_id, runtime_session_id,
-          dependencies_json, status, attempt, lease_expires_at, idempotency_key, worktree_path,
+          dependencies_json, status, acceptance_state, attempt, lease_token, lease_expires_at, idempotency_key, worktree_path,
           metadata_json, created_at, updated_at
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         ON CONFLICT(id) DO UPDATE SET
           title=excluded.title, description=excluded.description, assignee_agent_id=excluded.assignee_agent_id,
           runtime_id=excluded.runtime_id, runtime_session_id=excluded.runtime_session_id,
-          dependencies_json=excluded.dependencies_json, status=excluded.status, attempt=excluded.attempt,
+          dependencies_json=excluded.dependencies_json, status=excluded.status, acceptance_state=excluded.acceptance_state, attempt=excluded.attempt,
+          lease_token=excluded.lease_token,
           lease_expires_at=excluded.lease_expires_at, worktree_path=excluded.worktree_path,
           metadata_json=excluded.metadata_json, updated_at=excluded.updated_at
       `).run(
         id, input.workflowId, input.title, input.description || '', input.assigneeAgentId || null,
-        input.runtimeId || null, input.runtimeSessionId || null, encode(input.dependencies || []),
-        input.status || 'planned', Number(input.attempt || 0), input.leaseExpiresAt || null,
+        input.runtimeId || null, input.runtimeSessionId || null, encode(dependencies),
+        status, input.acceptanceState || (status === 'completed' ? 'accepted' : 'pending'), Number(input.attempt || 0), input.leaseToken || '', input.leaseExpiresAt || null,
         input.idempotencyKey, input.worktreePath || null,
         encode({ ...json(existing?.metadata_json), ...(input.metadata || {}) }),
         existing?.created_at || current, current,
@@ -2402,7 +2591,9 @@ export function createRuntimeStore(filePath) {
         runtimeSessionId: row.runtime_session_id,
         dependencies: json(row.dependencies_json, []),
         status: row.status,
+        acceptanceState: row.acceptance_state || 'pending',
         attempt: Number(row.attempt),
+        leaseToken: row.lease_token || '',
         leaseExpiresAt: row.lease_expires_at,
         idempotencyKey: row.idempotency_key,
         worktreePath: row.worktree_path,
@@ -2418,28 +2609,42 @@ export function createRuntimeStore(filePath) {
         : db.prepare('SELECT id FROM work_tasks WHERE workflow_id = ? ORDER BY created_at').all(workflowId);
       return rows.map((row) => api.getWorkTask(row.id));
     },
-    claimWorkTask(id, { leaseMs = 120000, runtimeSessionId = null, worktreePath = null } = {}) {
+    claimWorkTask(id, { leaseMs = 120000, runtimeSessionId = null, worktreePath = null, leaseToken = randomUUID() } = {}) {
       const current = timestamp();
       const leaseExpiresAt = new Date(Date.now() + Math.max(30000, Number(leaseMs) || 120000)).toISOString();
       const result = db.prepare(`
         UPDATE work_tasks
-        SET status='running', attempt=attempt + 1, lease_expires_at=?,
+        SET status='running', acceptance_state='pending', attempt=attempt + 1, lease_token=?, lease_expires_at=?,
             runtime_session_id=COALESCE(?, runtime_session_id),
             worktree_path=COALESCE(?, worktree_path), updated_at=?
         WHERE id=? AND (
           status='ready'
           OR (status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?)
         )
-      `).run(leaseExpiresAt, runtimeSessionId, worktreePath, current, id, current);
+        AND NOT EXISTS (
+          SELECT 1 FROM work_tasks AS sibling
+          WHERE sibling.workflow_id = work_tasks.workflow_id
+            AND sibling.id <> work_tasks.id
+            AND sibling.assignee_agent_id IS work_tasks.assignee_agent_id
+            AND sibling.status IN ('running', 'waiting_input')
+            AND sibling.lease_expires_at IS NOT NULL
+            AND sibling.lease_expires_at >= ?
+        )
+        AND NOT EXISTS (
+          SELECT 1 FROM json_each(work_tasks.dependencies_json) AS dependency
+          LEFT JOIN work_tasks AS parent ON parent.id = dependency.value
+          WHERE COALESCE(parent.status, '') NOT IN ('completed', 'done')
+        )
+      `).run(leaseToken, leaseExpiresAt, runtimeSessionId, worktreePath, current, id, current, current);
       return Number(result.changes || 0) === 1 ? api.getWorkTask(id) : null;
     },
-    heartbeatWorkTask(id, { leaseMs = 120000 } = {}) {
+    heartbeatWorkTask(id, { leaseMs = 120000, leaseToken = '' } = {}) {
       const current = timestamp();
       const leaseExpiresAt = new Date(Date.now() + Math.max(30000, Number(leaseMs) || 120000)).toISOString();
       const result = db.prepare(`
         UPDATE work_tasks SET lease_expires_at=?, updated_at=?
-        WHERE id=? AND status='running'
-      `).run(leaseExpiresAt, current, id);
+        WHERE id=? AND status='running' AND (? = '' OR lease_token = ?)
+      `).run(leaseExpiresAt, current, id, leaseToken, leaseToken);
       return Number(result.changes || 0) === 1 ? api.getWorkTask(id) : null;
     },
     recoverExpiredWorkTasks(workflowId, at = timestamp()) {
@@ -2450,10 +2655,335 @@ export function createRuntimeStore(filePath) {
       `).all(workflowId, at).map((row) => row.id);
       if (!ids.length) return [];
       db.prepare(`
-        UPDATE work_tasks SET status='ready', runtime_session_id=NULL, lease_expires_at=NULL, updated_at=?
+        UPDATE work_tasks SET status='ready', runtime_session_id=NULL, lease_token='', lease_expires_at=NULL, updated_at=?
         WHERE workflow_id=? AND status='running' AND lease_expires_at IS NOT NULL AND lease_expires_at < ?
       `).run(timestamp(), workflowId, at);
       return ids.map((id) => api.getWorkTask(id)).filter(Boolean);
+    },
+    upsertCollaborationWorkflow(input) {
+      const current = timestamp();
+      const id = String(input.id || `workflow_${randomUUID()}`);
+      db.prepare(`INSERT INTO collaboration_workflows(id, conversation_id, coordinator_agent_id, project_id, status, active_plan_revision_id, revision, metadata_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ON CONFLICT(id) DO UPDATE SET conversation_id=excluded.conversation_id, coordinator_agent_id=excluded.coordinator_agent_id,
+          project_id=excluded.project_id, status=excluded.status, active_plan_revision_id=excluded.active_plan_revision_id,
+          revision=MAX(collaboration_workflows.revision, excluded.revision), metadata_json=excluded.metadata_json, updated_at=excluded.updated_at`)
+        .run(id, input.conversationId, input.coordinatorAgentId || '', input.projectId || null, input.status || 'draft', input.activePlanRevisionId || null,
+          Number(input.revision || 0), encode(input.metadata || {}), input.createdAt || current, current);
+      return api.getCollaborationWorkflow(id);
+    },
+    getCollaborationWorkflow(id) {
+      const row = db.prepare('SELECT * FROM collaboration_workflows WHERE id=?').get(id);
+      return row && ({ id: row.id, conversationId: row.conversation_id, coordinatorAgentId: row.coordinator_agent_id, projectId: row.project_id,
+        status: row.status, activePlanRevisionId: row.active_plan_revision_id, revision: Number(row.revision), metadata: json(row.metadata_json), createdAt: row.created_at, updatedAt: row.updated_at });
+    },
+    listCollaborationWorkflows(conversationId, statuses = []) {
+      const safeStatuses = statuses.filter(Boolean);
+      const rows = safeStatuses.length
+        ? db.prepare(`SELECT id FROM collaboration_workflows WHERE conversation_id=? AND status IN (${placeholders(safeStatuses)}) ORDER BY updated_at DESC`).all(conversationId, ...safeStatuses)
+        : db.prepare('SELECT id FROM collaboration_workflows WHERE conversation_id=? ORDER BY updated_at DESC').all(conversationId);
+      return rows.map((row) => api.getCollaborationWorkflow(row.id));
+    },
+    putCollaborationDependency(input) {
+      const parentTaskId = String(input.parentTaskId || '');
+      const childTaskId = String(input.childTaskId || '');
+      if (!parentTaskId || !childTaskId) throw Object.assign(new Error('任务依赖缺少父任务或子任务。'), { status: 400, code: 'WORKFLOW_DEPENDENCY_REQUIRED' });
+      const visited = new Set();
+      const reachesParent = (taskId) => {
+        if (taskId === parentTaskId) return true;
+        if (visited.has(taskId)) return false;
+        visited.add(taskId);
+        return db.prepare('SELECT child_task_id FROM collaboration_dependencies WHERE parent_task_id=?').all(taskId).some((row) => reachesParent(row.child_task_id));
+      };
+      if (parentTaskId === childTaskId || reachesParent(childTaskId)) throw Object.assign(new Error('工作流任务依赖形成循环。'), { status: 409, code: 'WORKFLOW_DEPENDENCY_CYCLE' });
+      db.prepare(`INSERT INTO collaboration_dependencies(parent_task_id, child_task_id, created_by_task_id, reason, created_at)
+        VALUES (?, ?, ?, ?, ?) ON CONFLICT(parent_task_id, child_task_id) DO NOTHING`)
+        .run(parentTaskId, childTaskId, input.createdByTaskId || null, input.reason || '', input.createdAt || timestamp());
+      return { parentTaskId, childTaskId, createdByTaskId: input.createdByTaskId || null, reason: input.reason || '' };
+    },
+    listCollaborationDependencies(taskId) {
+      return db.prepare('SELECT * FROM collaboration_dependencies WHERE parent_task_id=? OR child_task_id=? ORDER BY created_at').all(taskId, taskId).map((row) => ({
+        parentTaskId: row.parent_task_id, childTaskId: row.child_task_id, createdByTaskId: row.created_by_task_id, reason: row.reason, createdAt: row.created_at,
+      }));
+    },
+    removeCollaborationDependency(parentTaskId, childTaskId) {
+      const result = db.prepare('DELETE FROM collaboration_dependencies WHERE parent_task_id=? AND child_task_id=?').run(parentTaskId, childTaskId);
+      return Number(result.changes || 0) > 0;
+    },
+    putPlanRevision(input) {
+      const id = String(input.id || `plan_revision_${randomUUID()}`);
+      db.prepare(`INSERT INTO collaboration_plan_revisions(id, workflow_id, revision, content_json, status, confirmed_by, confirmed_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(workflow_id, revision) DO NOTHING`)
+        .run(id, input.workflowId, Number(input.revision), encode(input.content || {}), input.status || 'draft', input.confirmedBy || null, input.confirmedAt || null, input.createdAt || timestamp());
+      const row = db.prepare('SELECT * FROM collaboration_plan_revisions WHERE workflow_id=? AND revision=?').get(input.workflowId, Number(input.revision));
+      return row && ({ id: row.id, workflowId: row.workflow_id, revision: Number(row.revision), content: json(row.content_json), status: row.status, confirmedBy: row.confirmed_by, confirmedAt: row.confirmed_at, createdAt: row.created_at });
+    },
+    upsertWorkflowProposal(input) {
+      const current = timestamp();
+      const id = String(input.id || `workflow_proposal_${randomUUID()}`);
+      const conversationId = String(input.conversationId || '');
+      const idempotencyKey = String(input.idempotencyKey || id);
+      if (!conversationId) throw Object.assign(new Error('协作提案缺少会话。'), { status: 400, code: 'WORKFLOW_PROPOSAL_CONVERSATION_REQUIRED' });
+      db.prepare(`INSERT INTO workflow_proposals(
+        id, conversation_id, workflow_id, source_plan_id, proposal_message_id, revision, purpose, status,
+        title, summary, content_json, idempotency_key, confirmed_by, confirmed_at, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(conversation_id, idempotency_key) DO UPDATE SET
+        workflow_id=COALESCE(excluded.workflow_id, workflow_proposals.workflow_id),
+        source_plan_id=COALESCE(excluded.source_plan_id, workflow_proposals.source_plan_id),
+        proposal_message_id=COALESCE(excluded.proposal_message_id, workflow_proposals.proposal_message_id),
+        revision=MAX(workflow_proposals.revision, excluded.revision),
+        purpose=excluded.purpose,
+        status=CASE
+          WHEN workflow_proposals.status IN ('confirmed','cancelled') THEN workflow_proposals.status
+          ELSE excluded.status
+        END,
+        title=excluded.title,
+        summary=excluded.summary,
+        content_json=excluded.content_json,
+        confirmed_by=COALESCE(excluded.confirmed_by, workflow_proposals.confirmed_by),
+        confirmed_at=COALESCE(excluded.confirmed_at, workflow_proposals.confirmed_at),
+        updated_at=excluded.updated_at`).run(
+        id, conversationId, input.workflowId || null, input.sourcePlanId || null, input.proposalMessageId || null, Math.max(1, Number(input.revision || 1)),
+        input.purpose === 'collaboration' ? 'collaboration' : 'collaboration', input.status || 'pending_confirmation',
+        String(input.title || '').slice(0, 240), String(input.summary || '').slice(0, 4000), encode(input.content || {}),
+        idempotencyKey, input.confirmedBy || null, input.confirmedAt || null, input.createdAt || current, current,
+      );
+      const row = db.prepare('SELECT * FROM workflow_proposals WHERE conversation_id=? AND idempotency_key=?').get(conversationId, idempotencyKey);
+      return row && ({
+        id: row.id,
+        conversationId: row.conversation_id,
+        workflowId: row.workflow_id,
+        sourcePlanId: row.source_plan_id,
+        proposalMessageId: row.proposal_message_id,
+        revision: Number(row.revision),
+        purpose: row.purpose,
+        status: row.status,
+        title: row.title,
+        summary: row.summary,
+        content: json(row.content_json),
+        idempotencyKey: row.idempotency_key,
+        confirmedBy: row.confirmed_by,
+        confirmedAt: row.confirmed_at,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      });
+    },
+    getWorkflowProposal(id) {
+      const row = db.prepare('SELECT * FROM workflow_proposals WHERE id=?').get(String(id || ''));
+      return row && ({
+        id: row.id,
+        conversationId: row.conversation_id,
+        workflowId: row.workflow_id,
+        sourcePlanId: row.source_plan_id,
+        proposalMessageId: row.proposal_message_id,
+        revision: Number(row.revision),
+        purpose: row.purpose,
+        status: row.status,
+        title: row.title,
+        summary: row.summary,
+        content: json(row.content_json),
+        idempotencyKey: row.idempotency_key,
+        confirmedBy: row.confirmed_by,
+        confirmedAt: row.confirmed_at,
+        createdAt: row.created_at,
+        updatedAt: row.updated_at,
+      });
+    },
+    listWorkflowProposals(conversationId, statuses = []) {
+      const safeStatuses = statuses.filter(Boolean);
+      const rows = safeStatuses.length
+        ? db.prepare(`SELECT id FROM workflow_proposals WHERE conversation_id=? AND status IN (${placeholders(safeStatuses)}) ORDER BY updated_at DESC`).all(conversationId, ...safeStatuses)
+        : db.prepare('SELECT id FROM workflow_proposals WHERE conversation_id=? ORDER BY updated_at DESC').all(conversationId);
+      return rows.map((row) => api.getWorkflowProposal(row.id)).filter(Boolean);
+    },
+    confirmWorkflowProposal(id, { revision = 1, confirmedBy = 'user', workflowId = undefined } = {}) {
+      const current = timestamp();
+      const proposalId = String(id || '');
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const row = db.prepare('SELECT * FROM workflow_proposals WHERE id=?').get(proposalId);
+        if (!row) throw Object.assign(new Error('协作提案不存在。'), { status: 404, code: 'WORKFLOW_PROPOSAL_NOT_FOUND' });
+        if (Number(row.revision) !== Number(revision)) throw Object.assign(new Error('协作提案版本已过期。'), { status: 409, code: 'WORKFLOW_PROPOSAL_REVISION_STALE' });
+        if (row.status === 'confirmed') {
+          db.exec('COMMIT');
+          return api.getWorkflowProposal(proposalId);
+        }
+        if (!['pending_confirmation','draft'].includes(row.status)) throw Object.assign(new Error('协作提案当前不能确认。'), { status: 409, code: 'WORKFLOW_PROPOSAL_NOT_CONFIRMABLE' });
+        db.prepare("UPDATE workflow_proposals SET status='confirmed', workflow_id=COALESCE(?, workflow_id), confirmed_by=?, confirmed_at=?, updated_at=? WHERE id=? AND revision=? AND status IN ('pending_confirmation','draft')").run(workflowId || null, String(confirmedBy || 'user'), current, current, proposalId, Number(revision));
+        db.exec('COMMIT');
+        return api.getWorkflowProposal(proposalId);
+      } catch (error) {
+        try { db.exec('ROLLBACK'); } catch {}
+        throw error;
+      }
+    },
+    cancelWorkflowProposal(id) {
+      const result = db.prepare("UPDATE workflow_proposals SET status='cancelled', updated_at=? WHERE id=? AND status NOT IN ('confirmed','cancelled')").run(timestamp(), String(id || ''));
+      return Number(result.changes || 0) > 0 ? api.getWorkflowProposal(id) : null;
+    },
+    confirmPlanRevision(workflowId, revision, confirmedBy = 'user') {
+      const current = timestamp();
+      db.exec('BEGIN IMMEDIATE');
+      try {
+        const workflow = api.getCollaborationWorkflow(workflowId);
+        const plan = db.prepare('SELECT * FROM collaboration_plan_revisions WHERE workflow_id=? AND revision=?').get(workflowId, Number(revision));
+        if (!workflow || !plan) throw Object.assign(new Error('执行计划版本不存在。'), { status: 404, code: 'PLAN_REVISION_NOT_FOUND' });
+        if (Number(workflow.revision) > Number(revision)) throw Object.assign(new Error('执行计划确认已经过期。'), { status: 409, code: 'PLAN_REVISION_STALE' });
+        db.prepare("UPDATE collaboration_plan_revisions SET status='confirmed', confirmed_by=?, confirmed_at=? WHERE id=? AND status IN ('draft','pending_confirmation')").run(confirmedBy, current, plan.id);
+        db.prepare("UPDATE collaboration_workflows SET active_plan_revision_id=?, revision=?, status='active', updated_at=? WHERE id=?").run(plan.id, Number(revision), current, workflowId);
+        db.exec('COMMIT');
+        return api.getCollaborationWorkflow(workflowId);
+      } catch (error) {
+        db.exec('ROLLBACK');
+        throw error;
+      }
+    },
+    putCollaborationIntervention(input) {
+      const current = timestamp();
+      const id = String(input.id || `intervention_${randomUUID()}`);
+      db.prepare(`INSERT INTO collaboration_interventions(id, workflow_id, task_id, target_agent_id, status, message, idempotency_key, metadata_json, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(workflow_id, idempotency_key) DO UPDATE SET updated_at=excluded.updated_at`)
+        .run(id, input.workflowId, input.taskId || null, input.targetAgentId || null, input.status || 'queued', input.message || '', input.idempotencyKey, encode(input.metadata || {}), input.createdAt || current, current);
+      const row = db.prepare('SELECT * FROM collaboration_interventions WHERE workflow_id=? AND idempotency_key=?').get(input.workflowId, input.idempotencyKey);
+      return row && ({ id: row.id, workflowId: row.workflow_id, taskId: row.task_id, targetAgentId: row.target_agent_id, status: row.status, message: row.message, idempotencyKey: row.idempotency_key, metadata: json(row.metadata_json), createdAt: row.created_at, updatedAt: row.updated_at });
+    },
+    updateCollaborationIntervention(id, status, metadata = {}) {
+      const row = db.prepare('SELECT * FROM collaboration_interventions WHERE id=?').get(id);
+      if (!row) return null;
+      db.prepare('UPDATE collaboration_interventions SET status=?, metadata_json=?, updated_at=? WHERE id=?').run(status, encode({ ...json(row.metadata_json), ...metadata }), timestamp(), id);
+      return api.putCollaborationIntervention({ id: row.id, workflowId: row.workflow_id, taskId: row.task_id, targetAgentId: row.target_agent_id, status, message: row.message, idempotencyKey: row.idempotency_key, metadata: { ...json(row.metadata_json), ...metadata }, createdAt: row.created_at });
+    },
+    listCollaborationInterventions({ workflowId = '', taskId = '', statuses = [] } = {}) {
+      const clauses = [];
+      const values = [];
+      if (workflowId) { clauses.push('workflow_id=?'); values.push(String(workflowId)); }
+      if (taskId) { clauses.push('task_id=?'); values.push(String(taskId)); }
+      if (statuses.length) {
+        clauses.push(`status IN (${statuses.map(() => '?').join(',')})`);
+        values.push(...statuses.map(String));
+      }
+      const rows = db.prepare(`SELECT * FROM collaboration_interventions${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''} ORDER BY created_at, id`).all(...values);
+      return rows.map((row) => ({ id: row.id, workflowId: row.workflow_id, taskId: row.task_id, targetAgentId: row.target_agent_id, status: row.status, message: row.message, idempotencyKey: row.idempotency_key, metadata: json(row.metadata_json), createdAt: row.created_at, updatedAt: row.updated_at }));
+    },
+    putCollaborationArtifact(input) {
+      const id = String(input.id || `artifact_${randomUUID()}`);
+      db.prepare(`INSERT INTO collaboration_artifacts(id, workflow_id, task_id, path, content_hash, status, metadata_json, published_at, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT(workflow_id, task_id, path) DO UPDATE SET content_hash=excluded.content_hash,
+          status=excluded.status, metadata_json=excluded.metadata_json, published_at=excluded.published_at`)
+        .run(id, input.workflowId, input.taskId || null, input.path, input.contentHash || '', input.status || 'draft', encode(input.metadata || {}), input.publishedAt || null, input.createdAt || timestamp());
+      const row = db.prepare('SELECT * FROM collaboration_artifacts WHERE workflow_id=? AND task_id IS ? AND path=?').get(input.workflowId, input.taskId || null, input.path);
+      return row ? {
+        id: row.id,
+        workflowId: row.workflow_id,
+        taskId: row.task_id,
+        path: row.path,
+        contentHash: row.content_hash || '',
+        status: row.status,
+        metadata: json(row.metadata_json, {}),
+        publishedAt: row.published_at,
+        createdAt: row.created_at,
+      } : { id, workflowId: input.workflowId, taskId: input.taskId || null, path: input.path, contentHash: input.contentHash || '', status: input.status || 'draft', publishedAt: input.publishedAt || null };
+    },
+    listCollaborationArtifacts({ workflowId = '', path = '' } = {}) {
+      const clauses = [];
+      const args = [];
+      if (workflowId) { clauses.push('workflow_id=?'); args.push(workflowId); }
+      if (path) { clauses.push('path=?'); args.push(path); }
+      return db.prepare(`SELECT * FROM collaboration_artifacts ${clauses.length ? `WHERE ${clauses.join(' AND ')}` : ''} ORDER BY created_at`).all(...args).map((row) => ({
+        id: row.id,
+        workflowId: row.workflow_id,
+        taskId: row.task_id,
+        path: row.path,
+        contentHash: row.content_hash || '',
+        status: row.status,
+        metadata: json(row.metadata_json, {}),
+        publishedAt: row.published_at,
+        createdAt: row.created_at,
+      }));
+    },
+    appendCollaborationEvent(input) {
+      const id = String(input.id || `collaboration_event_${randomUUID()}`);
+      db.prepare(`INSERT INTO collaboration_events(id, type, workflow_id, task_id, run_id, payload_json, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(id) DO NOTHING`)
+        .run(id, input.type, input.workflowId, input.taskId || null, input.runId || null, encode(input.payload || {}), input.createdAt || timestamp());
+      const row = db.prepare('SELECT * FROM collaboration_events WHERE id=?').get(id);
+      return row && ({ id: row.id, cursor: Number(row.cursor), type: row.type, workflowId: row.workflow_id, taskId: row.task_id, runId: row.run_id, payload: json(row.payload_json), createdAt: row.created_at });
+    },
+    collaborationEventsAfter(workflowId, cursor = 0) {
+      return db.prepare('SELECT * FROM collaboration_events WHERE workflow_id=? AND cursor>? ORDER BY cursor').all(workflowId, Number(cursor || 0)).map((row) => ({
+        id: row.id, cursor: Number(row.cursor), type: row.type, workflowId: row.workflow_id, taskId: row.task_id, runId: row.run_id, payload: json(row.payload_json), createdAt: row.created_at,
+      }));
+    },
+    putInboxItem(input) {
+      const current = timestamp();
+      const id = String(input.id || `inbox_${randomUUID()}`);
+      const idempotencyKey = String(input.idempotencyKey || id);
+      db.prepare(`INSERT INTO inbox_items(
+        id, idempotency_key, workspace_id, thread_id, workflow_id, task_id, type, title, summary,
+        priority, action_required, read_at, resolved_at, metadata_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(idempotency_key) DO UPDATE SET
+        title=excluded.title, summary=excluded.summary, priority=excluded.priority,
+        action_required=excluded.action_required,
+        resolved_at=CASE WHEN excluded.action_required=0 THEN COALESCE(inbox_items.resolved_at, excluded.updated_at) ELSE inbox_items.resolved_at END,
+        metadata_json=excluded.metadata_json, updated_at=excluded.updated_at`).run(
+        id, idempotencyKey, input.workspaceId || '', input.threadId, input.workflowId || null, input.taskId || null,
+        input.type, String(input.title || '').slice(0, 240), String(input.summary || '').slice(0, 4000),
+        ['normal', 'important', 'urgent'].includes(input.priority) ? input.priority : 'normal', input.actionRequired ? 1 : 0,
+        input.readAt || null, input.resolvedAt || null, encode(input.metadata || {}), input.createdAt || current, current,
+      );
+      const row = db.prepare('SELECT * FROM inbox_items WHERE idempotency_key=?').get(idempotencyKey);
+      return row && ({
+        id: row.id, cursor: Number(row.cursor), idempotencyKey: row.idempotency_key, workspaceId: row.workspace_id,
+        threadId: row.thread_id, workflowId: row.workflow_id, taskId: row.task_id, type: row.type, title: row.title,
+        summary: row.summary, priority: row.priority, actionRequired: Boolean(row.action_required), readAt: row.read_at,
+        resolvedAt: row.resolved_at, metadata: json(row.metadata_json), createdAt: row.created_at, updatedAt: row.updated_at,
+      });
+    },
+    listInboxItems({ workspaceId = '', threadId = '', unresolvedOnly = false, unreadOnly = false, limit = 200 } = {}) {
+      const clauses = [];
+      const args = [];
+      if (workspaceId) { clauses.push('workspace_id=?'); args.push(workspaceId); }
+      if (threadId) { clauses.push('thread_id=?'); args.push(threadId); }
+      if (unresolvedOnly) clauses.push('action_required=1 AND resolved_at IS NULL');
+      if (unreadOnly) clauses.push('read_at IS NULL');
+      args.push(Math.max(1, Math.min(500, Number(limit || 200))));
+      return db.prepare(`SELECT * FROM inbox_items${clauses.length ? ` WHERE ${clauses.join(' AND ')}` : ''} ORDER BY (action_required=1 AND resolved_at IS NULL) DESC, updated_at DESC LIMIT ?`).all(...args).map((row) => ({
+        id: row.id, cursor: Number(row.cursor), idempotencyKey: row.idempotency_key, workspaceId: row.workspace_id,
+        threadId: row.thread_id, workflowId: row.workflow_id, taskId: row.task_id, type: row.type, title: row.title,
+        summary: row.summary, priority: row.priority, actionRequired: Boolean(row.action_required), readAt: row.read_at,
+        resolvedAt: row.resolved_at, metadata: json(row.metadata_json), createdAt: row.created_at, updatedAt: row.updated_at,
+      }));
+    },
+    inboxItemsAfter(cursor = 0, workspaceId = '') {
+      const rows = workspaceId
+        ? db.prepare('SELECT * FROM inbox_items WHERE cursor>? AND workspace_id=? ORDER BY cursor').all(Number(cursor || 0), workspaceId)
+        : db.prepare('SELECT * FROM inbox_items WHERE cursor>? ORDER BY cursor').all(Number(cursor || 0));
+      return rows.map((row) => ({
+        id: row.id, cursor: Number(row.cursor), idempotencyKey: row.idempotency_key, workspaceId: row.workspace_id,
+        threadId: row.thread_id, workflowId: row.workflow_id, taskId: row.task_id, type: row.type, title: row.title,
+        summary: row.summary, priority: row.priority, actionRequired: Boolean(row.action_required), readAt: row.read_at,
+        resolvedAt: row.resolved_at, metadata: json(row.metadata_json), createdAt: row.created_at, updatedAt: row.updated_at,
+      }));
+    },
+    updateInboxItem(id, patch = {}) {
+      const row = db.prepare('SELECT * FROM inbox_items WHERE id=?').get(String(id || ''));
+      if (!row) return null;
+      const readAt = patch.read === true ? timestamp() : patch.read === false ? null : row.read_at;
+      const resolvedAt = patch.resolved === true ? timestamp() : patch.resolved === false ? null : row.resolved_at;
+      db.prepare('UPDATE inbox_items SET read_at=?, resolved_at=?, updated_at=? WHERE id=?').run(readAt, resolvedAt, timestamp(), row.id);
+      return api.listInboxItems({ limit: 500 }).find((item) => item.id === row.id) || null;
+    },
+    bindTaskRun(input) {
+      db.prepare(`INSERT INTO task_run_bindings(task_id, run_id, lease_token, bound_at, ended_at) VALUES (?, ?, ?, ?, ?)
+        ON CONFLICT(task_id, run_id) DO UPDATE SET lease_token=excluded.lease_token, ended_at=excluded.ended_at`)
+        .run(input.taskId, input.runId, input.leaseToken || '', input.boundAt || timestamp(), input.endedAt || null);
+      return { taskId: input.taskId, runId: input.runId, leaseToken: input.leaseToken || '', boundAt: input.boundAt || timestamp(), endedAt: input.endedAt || null };
+    },
+    getTaskRunBinding(taskId, runId) {
+      const row = db.prepare('SELECT * FROM task_run_bindings WHERE task_id=? AND run_id=?').get(taskId, runId);
+      return row && ({ taskId: row.task_id, runId: row.run_id, leaseToken: row.lease_token || '', boundAt: row.bound_at, endedAt: row.ended_at });
     },
   };
 

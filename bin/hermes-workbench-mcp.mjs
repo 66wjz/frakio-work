@@ -66,6 +66,11 @@ const toolsBySet = {
       description: 'Read one Frakio Work thread by id.',
       inputSchema: { type: 'object', properties: { threadId: { type: 'string' } }, required: ['threadId'], additionalProperties: false },
     },
+    {
+      name: 'hermes_workbench_collaboration_suggest',
+      description: 'Suggest that the user turn the current request into a multi-Agent collaboration. This only creates a confirmation card and never creates a Workflow or Task.',
+      inputSchema: { type: 'object', properties: { threadId: { type: 'string' }, title: { type: 'string' }, reason: { type: 'string' }, sourceAgentId: { type: 'string' }, idempotencyKey: { type: 'string' } }, required: ['threadId', 'title', 'reason', 'idempotencyKey'], additionalProperties: false },
+    },
     { name: 'hermes_workbench_use_projects_list', description: 'List Frakio Work projects.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     { name: 'hermes_workbench_use_agents_list', description: 'List Frakio Work Agents and Hermes profile bindings.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
     { name: 'hermes_workbench_use_models_list', description: 'List configured Frakio Work models.', inputSchema: { type: 'object', properties: {}, additionalProperties: false } },
@@ -126,6 +131,7 @@ const toolsBySet = {
           planId: { type: 'string' },
           baseRevision: { type: 'integer', minimum: 0 },
           title: { type: 'string' },
+          displayTitle: { type: 'string', description: 'Compact collaboration card title when the active plan is collaborative.' },
           summary: { type: 'string' },
           steps: {
             type: 'array',
@@ -135,6 +141,7 @@ const toolsBySet = {
               properties: {
                 key: { type: 'string' },
                 title: { type: 'string' },
+                displayTitle: { type: 'string', description: 'Compact task-card label when the active plan is collaborative.' },
                 description: { type: 'string' },
                 files: { type: 'array', items: { type: 'string' } },
                 assigneeAgentId: { type: 'string' },
@@ -312,6 +319,10 @@ async function callTool(name, args = {}) {
   if (name === 'hermes_workbench_api_request') return requestJson(assertAllowedPath(args.path || ''));
   if (name === 'hermes_workbench_use_threads_list') return listThreads();
   if (name === 'hermes_workbench_use_thread_get') return requestJson(`/api/threads/${encodeURIComponent(String(args.threadId || ''))}`);
+  if (name === 'hermes_workbench_collaboration_suggest') {
+    const { threadId, ...body } = args;
+    return requestJson(`/api/threads/${encodeURIComponent(String(threadId || ''))}/collaboration/suggestions`, { method: 'POST', body });
+  }
   if (name === 'hermes_workbench_use_projects_list') return requestJson('/api/workspaces?includeArchived=true');
   if (name === 'hermes_workbench_use_agents_list') return requestJson('/api/agents');
   if (name === 'hermes_workbench_use_models_list') return requestJson('/api/models');

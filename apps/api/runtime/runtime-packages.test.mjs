@@ -374,7 +374,7 @@ test('schema v7 package inventory migrates without collapsing same-version Build
   };
   store.putRuntimePackage({ ...common, runtimeBuildId: 'pi-managed-084-a', artifactDigest: 'a' });
   store.putRuntimePackage({ ...common, runtimeBuildId: 'pi-managed-084-b', artifactDigest: 'b' });
-  assert.equal(store.schemaVersion, 15);
+  assert.equal(store.schemaVersion, 19);
   assert.equal(store.listRuntimePackages('pi').length, 2);
   assert.ok(store.migrationBackupPath);
 });

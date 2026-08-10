@@ -73,6 +73,14 @@ test('thread branches include the selected Agent reply and persist independent f
         { runId: 'run-1', turnId: 'turn-1', messageId: 'message-agent-1', agentId: 'iris', status: 'completed', groups: [], createdAt, updatedAt: createdAt },
         { runId: 'run-running', turnId: 'turn-running', messageId: 'message-agent-running', agentId: 'iris', status: 'running', groups: [], createdAt, updatedAt: createdAt },
       ],
+      collaboration: {
+        activeWorkflowId: 'workflow-root',
+        workflows: [{
+          id: 'workflow-root', name: '源会话协作', boardSlug: '', nativeOnly: true, status: 'active', coordinatorAgentId: 'iris', fallbackDecisionAgentId: 'iris',
+          rootTaskIds: [], currentRootTaskId: '', planRevision: 0, plan: null, executionBindings: {}, interventionQueue: [], createdAt, updatedAt: createdAt,
+        }],
+        events: [], eventCursor: 0, idempotency: {},
+      },
     }, {
       id: 'thread-legacy-intro',
       title: '旧开场消息',
@@ -119,6 +127,8 @@ test('thread branches include the selected Agent reply and persist independent f
   assert.equal(branch.thread.externalSessionId, null);
   assert.equal(branch.thread.agentSessionIds, undefined);
   assert.equal(branch.thread.activeRunId, undefined);
+  assert.equal(branch.thread.collaboration.activeWorkflowId, '');
+  assert.deepEqual(branch.thread.collaboration.workflows, []);
   assert.deepEqual(branch.thread.messages.map((message) => message.content), ['第一问', '第一答']);
   assert.ok(branch.thread.messages.every((message) => !['message-user-1', 'message-agent-1'].includes(message.id)));
   assert.equal(branch.thread.messages[1].parentMessageId, branch.thread.messages[0].id);
@@ -167,6 +177,13 @@ test('thread branches include the selected Agent reply and persist independent f
   });
   assert.equal(runningBranchResponse.status, 409);
 
+  const blockedDelete = await fetch(`${baseUrl}/api/threads/thread-root`, { method: 'DELETE', headers });
+  assert.equal(blockedDelete.status, 409);
+  assert.equal((await blockedDelete.json()).code, 'ACTIVE_WORKFLOW_EXISTS');
+  const cancelled = await fetch(`${baseUrl}/api/threads/thread-root/collaboration/workflows/workflow-root/cancel`, {
+    method: 'POST', headers, body: JSON.stringify({ idempotencyKey: 'cancel-before-delete' }),
+  });
+  assert.equal(cancelled.status, 200, await cancelled.text());
   const deleteSourceResponse = await fetch(`${baseUrl}/api/threads/thread-root`, { method: 'DELETE', headers });
   assert.equal(deleteSourceResponse.status, 200);
   const clonedContentResponse = await fetch(`${baseUrl}${clonedAttachment.contentUrl}`, { headers });

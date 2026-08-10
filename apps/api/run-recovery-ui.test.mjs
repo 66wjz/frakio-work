@@ -11,6 +11,10 @@ test('background run completion refreshes lists without opening its conversation
   assert.match(sendMessage, /loadThreads\(threadWorkspaceId, threadId, \{ openPreferred: false \}\)/);
   assert.match(startNewChat, /loadThreads\(thread\.workspaceId, thread\.id, \{ openPreferred: false \}\)/);
   assert.match(source, /if \(targetId && options\.openPreferred !== false\) await openThread\(targetId\)/);
+  assert.match(source, /function adoptThreadSnapshot[\s\S]*?syncThreadSummary\(threadId, normalizedThread\)/);
+  assert.match(source, /function syncThreadSummary[\s\S]*?setConversations[\s\S]*?setThreads/);
+  assert.match(source, /requestJson<\{ thread: Thread \}>\(`\/api\/threads\/\$\{threadId\}`\)\.then\(\(data\) => adoptThreadSnapshot\(threadId, data\.thread\)\)/);
+  assert.match(source, /window\.addEventListener\('frakio:thread-refresh-request', refresh\)/);
 });
 
 test('run recovery uses Host Run state and clears every composer lock on terminal state', () => {
@@ -108,6 +112,29 @@ test('Hermes terminal paths finalize the Host Run and carry stable identity', as
   assert.match(complete, /runtimeCursor/);
   assert.match(serverSource, /chunk\.done[\s\S]*?completeHermesRunFromOutput\([\s\S]*?nativeTerminal: true/);
   assert.match(serverSource, /function cancelHermesRun\([\s\S]*?runtimeHostController\.finish\(hostRun\.id, 'cancelled'/);
+});
+
+test('Hermes collaboration Tasks never occupy the main conversation Run projection', async () => {
+  const serverSource = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
+  const startHermes = serverSource.match(/async function startHermesRunRequest[\s\S]*?(?=\napp\.post\('\/api\/threads\/:id\/runs')/)?.[0] || '';
+  assert.match(startHermes, /if \(!taskDispatch\) \{\s*thread\.runStatus = 'running'/);
+  assert.match(startHermes, /if \(taskDispatch\) \{\s*currentThread\.agentSessionIds/);
+  assert.match(startHermes, /if \(!taskDispatch\) \{\s*retargetThreadChangeSet[\s\S]*?threadAfterStart\.activeRunId = started\.run_id/);
+  assert.match(startHermes, /if \(taskDispatch\) \{\s*threadAfterStart\.activeWorkRuns/);
+  assert.match(serverSource, /function finishTerminalThreadRunProjection[\s\S]*?run\.metadata\?\.taskDispatch[\s\S]*?clearHermesRunState/);
+});
+
+test('native collaboration dispatch binds every Runtime Run before the adapter starts', async () => {
+  const serverSource = await readFile(new URL('./server.mjs', import.meta.url), 'utf8');
+  const startPi = serverSource.match(/async function startPiRunRequest[\s\S]*?(?=\nasync function startExternalChannelRunRequest)/)?.[0] || '';
+  const startExternal = serverSource.match(/async function startExternalChannelRunRequest[\s\S]*?(?=\nasync function startRuntimeRunRequest)/)?.[0] || '';
+  const startHermes = serverSource.match(/async function startHermesRunRequest[\s\S]*?(?=\napp\.post\('\/api\/threads\/:id\/runs')/)?.[0] || '';
+
+  assert.match(startPi, /if \(taskDispatch \|\| thread\.executionMode === 'work'\)[\s\S]*?runtimeStore\.bindTaskRun/);
+  assert.match(startPi, /runtimeStore\.bindTaskRun[\s\S]*?runtimeHostController\.dispatch/);
+  assert.match(startPi, /kind: taskDispatch \? 'work-task'/);
+  assert.match(startExternal, /runtimeStore\.bindTaskRun[\s\S]*?runtimeHostController\.dispatch/);
+  assert.match(startHermes, /runtimeStore\.bindTaskRun[\s\S]*?runtimeHostController\.dispatch/);
 });
 
 test('removed threads cancel active Runtime Runs during deletion and startup recovery', async () => {

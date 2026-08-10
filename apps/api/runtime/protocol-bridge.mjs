@@ -10,7 +10,7 @@ function chatRole(role) {
   return role === 'developer' ? 'system' : role;
 }
 
-function responseInputMessages(input = []) {
+function responseInputMessages(input = [], route = {}) {
   if (typeof input === 'string') return [{ role: 'user', content: input }];
   const messages = [];
   for (const item of Array.isArray(input) ? input : []) {
@@ -19,13 +19,23 @@ function responseInputMessages(input = []) {
       continue;
     }
     if (item?.type === 'function_call') {
-      messages.push({ role: 'assistant', content: '', tool_calls: [{ id: item.call_id || item.id, type: 'function', function: { name: item.name, arguments: typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.arguments || {}) } }] });
+      const toolCall = { id: item.call_id || item.id, type: 'function', function: { name: item.name, arguments: typeof item.arguments === 'string' ? item.arguments : JSON.stringify(item.arguments || {}) } };
+      const previous = messages.at(-1);
+      if (previous?.role === 'assistant' && Array.isArray(previous.tool_calls)) previous.tool_calls.push(toolCall);
+      else messages.push({ role: 'assistant', content: '', tool_calls: [toolCall] });
       continue;
     }
     const content = Array.isArray(item?.content)
       ? item.content.map((part) => part?.type === 'input_text' || part?.type === 'output_text' ? { type: 'text', text: part.text || '' } : null).filter(Boolean)
       : text(item?.content);
     messages.push({ role: chatRole(item?.role || 'user'), content });
+  }
+  if (route.toolCallReasoningPlaceholder) {
+    for (const message of messages) {
+      if (message.role === 'assistant' && message.tool_calls?.length && !String(message.reasoning_content || '').trim()) {
+        message.reasoning_content = 'tool_call';
+      }
+    }
   }
   return messages;
 }
@@ -34,6 +44,7 @@ function validateChatToolHistory(messages = []) {
   const pending = new Set();
   for (const message of messages) {
     if (message.role === 'assistant') {
+      if (pending.size) throw Object.assign(new Error('assistant tool_calls 后必须先提供全部 tool results。'), { code: 'PROTOCOL_HISTORY_CORRUPT', status: 409 });
       for (const tool of message.tool_calls || []) if (tool.id) pending.add(tool.id);
       continue;
     }
@@ -46,6 +57,7 @@ function validateChatToolHistory(messages = []) {
     }
     if (pending.size) throw Object.assign(new Error('assistant tool_calls 后必须先提供全部 tool results。'), { code: 'PROTOCOL_HISTORY_CORRUPT', status: 409 });
   }
+  if (pending.size) throw Object.assign(new Error('assistant tool_calls 后缺少完整的 tool results。'), { code: 'PROTOCOL_HISTORY_CORRUPT', status: 409 });
 }
 
 function anthropicMessagesToChat(body = {}) {
@@ -68,6 +80,62 @@ function anthropicMessagesToChat(body = {}) {
   return messages;
 }
 
+function anthropicTextBlocks(content) {
+  if (typeof content === 'string') return content ? [{ type: 'text', text: content }] : [];
+  return (Array.isArray(content) ? content : []).flatMap((part) => {
+    if (part?.type === 'text' && part.text) return [{ type: 'text', text: part.text }];
+    return [];
+  });
+}
+
+function appendAnthropicMessage(messages, role, content) {
+  if (!content.length) return;
+  const previous = messages.at(-1);
+  if (previous?.role === role && Array.isArray(previous.content)) previous.content.push(...content);
+  else messages.push({ role, content });
+}
+
+function chatMessagesToAnthropic(messages = []) {
+  const result = [];
+  for (const message of messages) {
+    if (message.role === 'system') continue;
+    if (message.role === 'tool') {
+      appendAnthropicMessage(result, 'user', [{ type: 'tool_result', tool_use_id: message.tool_call_id, content: message.content }]);
+      continue;
+    }
+    const content = anthropicTextBlocks(message.content);
+    for (const tool of message.tool_calls || []) {
+      let input = {};
+      try { input = JSON.parse(tool.function?.arguments || '{}'); } catch { input = { raw: tool.function?.arguments || '' }; }
+      content.push({ type: 'tool_use', id: tool.id, name: tool.function?.name || '', input });
+    }
+    appendAnthropicMessage(result, message.role === 'assistant' ? 'assistant' : 'user', content);
+  }
+  return result;
+}
+
+function chatMessagesToResponsesInput(messages = []) {
+  const input = [];
+  for (const message of messages) {
+    if (message.role === 'system') continue;
+    if (message.role === 'tool') {
+      input.push({ type: 'function_call_output', call_id: message.tool_call_id, output: message.content });
+      continue;
+    }
+    const content = text(message.content);
+    if (content) input.push({ role: message.role, content });
+    for (const tool of message.tool_calls || []) {
+      input.push({
+        type: 'function_call',
+        call_id: tool.id,
+        name: tool.function?.name || '',
+        arguments: typeof tool.function?.arguments === 'string' ? tool.function.arguments : JSON.stringify(tool.function?.arguments || {}),
+      });
+    }
+  }
+  return input;
+}
+
 function chatTools(tools = []) {
   return tools.flatMap((tool) => {
     const name = tool?.function?.name || tool?.name;
@@ -87,14 +155,21 @@ function anthropicTools(tools = []) {
   return tools.map((tool) => tool.input_schema ? tool : { name: tool.function?.name || tool.name, description: tool.function?.description || tool.description || '', input_schema: tool.function?.parameters || tool.parameters || { type: 'object', properties: {} } });
 }
 
+function bridgeRequestOverrides(route = {}) {
+  const overrides = route.requestOverrides && typeof route.requestOverrides === 'object' ? { ...route.requestOverrides } : {};
+  for (const key of ['model', 'messages', 'input', 'instructions', 'tools', 'tool_choice', 'stream', 'max_tokens', 'max_output_tokens']) delete overrides[key];
+  return overrides;
+}
+
 export function transformBridgeRequest(body = {}, route = {}) {
   const harness = route.harnessApiMode || route.apiMode;
   const upstream = route.upstreamApiMode || route.apiMode;
+  const requestOverrides = bridgeRequestOverrides(route);
   const clean = { ...body, model: route.modelId };
+  if (harness === upstream || (harness === 'openai_responses' && upstream === 'codex_responses')) return { ...clean, ...requestOverrides };
   for (const key of ['thinking', 'cache_control', 'betas']) delete clean[key];
-  if (harness === upstream || (harness === 'openai_responses' && upstream === 'codex_responses')) return clean;
   if (harness === 'openai_responses' && upstream === 'chat_completions') {
-    const messages = responseInputMessages(body.input);
+    const messages = responseInputMessages(body.input, route);
     validateChatToolHistory(messages);
     return {
       model: route.modelId,
@@ -104,33 +179,41 @@ export function transformBridgeRequest(body = {}, route = {}) {
       stream: body.stream !== false,
       ...(body.temperature !== undefined ? { temperature: body.temperature } : {}),
       ...(body.max_output_tokens ? { max_tokens: body.max_output_tokens } : {}),
+      ...requestOverrides,
     };
   }
   if (harness === 'openai_responses' && upstream === 'anthropic_messages') {
-    const messages = responseInputMessages(body.input);
+    const messages = responseInputMessages(body.input, route);
+    validateChatToolHistory(messages);
     return {
       model: route.modelId,
       system: body.instructions || undefined,
-      messages: messages.filter((message) => message.role !== 'system').map((message) => ({ role: message.role === 'tool' ? 'user' : message.role, content: message.role === 'tool' ? [{ type: 'tool_result', tool_use_id: message.tool_call_id, content: message.content }] : message.content })),
+      messages: chatMessagesToAnthropic(messages),
       ...(body.tools ? { tools: anthropicTools(body.tools) } : {}),
       max_tokens: body.max_output_tokens || route.maxOutputTokens || 8192,
       stream: body.stream !== false,
+      ...requestOverrides,
     };
   }
   if (harness === 'anthropic_messages' && upstream === 'chat_completions') {
-    return { model: route.modelId, messages: anthropicMessagesToChat(body), ...(body.tools ? { tools: chatTools(body.tools) } : {}), stream: body.stream !== false, max_tokens: body.max_tokens };
+    const messages = anthropicMessagesToChat(body);
+    if (route.toolCallReasoningPlaceholder) {
+      for (const message of messages) if (message.role === 'assistant' && message.tool_calls?.length && !String(message.reasoning_content || '').trim()) message.reasoning_content = 'tool_call';
+    }
+    validateChatToolHistory(messages);
+    return { model: route.modelId, messages, ...(body.tools ? { tools: chatTools(body.tools) } : {}), stream: body.stream !== false, max_tokens: body.max_tokens, ...requestOverrides };
   }
   if (harness === 'anthropic_messages' && ['openai_responses', 'codex_responses'].includes(upstream)) {
     const messages = anthropicMessagesToChat(body);
+    validateChatToolHistory(messages);
     return {
       model: route.modelId,
       instructions: messages.filter((message) => message.role === 'system').map((message) => text(message.content)).join('\n') || undefined,
-      input: messages.filter((message) => message.role !== 'system').map((message) => message.role === 'tool'
-        ? { type: 'function_call_output', call_id: message.tool_call_id, output: message.content }
-        : { role: message.role, content: text(message.content) }),
+      input: chatMessagesToResponsesInput(messages),
       ...(body.tools ? { tools: body.tools.map((tool) => ({ type: 'function', name: tool.name, description: tool.description || '', parameters: tool.input_schema })) } : {}),
       stream: body.stream !== false,
       max_output_tokens: body.max_tokens,
+      ...requestOverrides,
     };
   }
   throw Object.assign(new Error(`不支持的协议桥：${harness} → ${upstream}`), { code: 'RUNTIME_PROTOCOL_BRIDGE_UNSUPPORTED', status: 409 });

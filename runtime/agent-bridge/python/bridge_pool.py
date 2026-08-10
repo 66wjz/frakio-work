@@ -55,7 +55,7 @@ _PROTECTED_RUN_OVERRIDE_KEYS = {
     "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
 }
 
-_PLAN_READ_TOOLS = {
+_PLAN_INVESTIGATION_TOOLS = {
     "read_file",
     "search_files",
     "file_search",
@@ -72,6 +72,7 @@ _PLAN_READ_TOOLS = {
     "browser_back",
     "browser_get_images",
     "browser_vision",
+    "browser_console",
     "view_image",
     "image_view",
     "hermes_workbench_protocol_get",
@@ -89,6 +90,18 @@ _PLAN_READ_TOOLS = {
     "hermes_workbench_plan_submit",
     "hermes_workbench_api_catalog_get",
 }
+
+_PLAN_BROWSER_INTERACTION_TOOLS = {
+    "browser_click",
+    "browser_type",
+    "browser_press",
+}
+_PLAN_BROWSER_PERSISTENT_EFFECT_PATTERN = re.compile(
+    r"(?:password|passcode|otp|login|log[ _-]?in|sign[ _-]?in|auth|oauth|upload|download|"
+    r"publish|deploy|release|delete|remove|purchase|checkout|payment|pay|send|submit|"
+    r"密码|验证码|登录|授权|上传|下载|发布|部署|删除|移除|购买|结账|支付|发送|提交)",
+    re.IGNORECASE,
+)
 
 _VERIFIED_WORKBENCH_MCP_SERVERS = {
     "hermes_workbench_use",
@@ -120,6 +133,13 @@ def _safe_plan_terminal_command(raw_command: Any) -> bool:
         return False
     if parts == ["pwd"]:
         return True
+    if parts[0] in {"cat", "head", "tail", "wc", "file", "stat", "ls", "rg", "grep"}:
+        return all(not str(arg).startswith("--output") for arg in parts[1:])
+    if parts[0] == "find":
+        mutating_find_options = {"-delete", "-exec", "-execdir", "-ok", "-okdir", "-fprint", "-fprint0", "-fprintf", "-fls"}
+        return not any(str(arg).split("=", 1)[0] in mutating_find_options for arg in parts[1:])
+    if parts[0] == "node" and len(parts) == 3 and parts[1] == "--check":
+        return not parts[2].startswith("-")
     if len(parts) < 2 or parts[0] != "git":
         return False
     subcommand = parts[1]
@@ -144,10 +164,22 @@ def _safe_plan_terminal_command(raw_command: Any) -> bool:
     return True
 
 
+def _safe_plan_browser_interaction(tool_name: str, args: Any) -> bool:
+    payload = args if isinstance(args, dict) else {}
+    if str(payload.get("effect") or "").strip() == "persistent_mutation":
+        return False
+    research_content_keys = {"text", "value", "content", "query"} if tool_name == "browser_type" else set()
+    target_payload = {key: value for key, value in payload.items() if key not in research_content_keys}
+    searchable = json.dumps(target_payload, ensure_ascii=False, sort_keys=True)
+    return _PLAN_BROWSER_PERSISTENT_EFFECT_PATTERN.search(searchable) is None
+
+
 def _plan_tool_allowed(tool_name: Any, args: Any) -> bool:
     name = _canonical_plan_tool_name(tool_name)
-    if name in _PLAN_READ_TOOLS:
+    if name in _PLAN_INVESTIGATION_TOOLS:
         return True
+    if name in _PLAN_BROWSER_INTERACTION_TOOLS:
+        return _safe_plan_browser_interaction(name, args)
     if name == "hermes_workbench_api_request":
         payload = args if isinstance(args, dict) else {}
         method = str(payload.get("method") or "GET").strip().upper()

@@ -1,4 +1,4 @@
-.app.settings-mode {
+:is(.app.settings-mode, .app.workspace-surface-mode) {
   --settings-rail-width: 212px;
   --settings-content-max: 1060px;
   --settings-page-gutter: clamp(24px, 3.2vw, 38px);
@@ -53,6 +53,143 @@
   background: var(--space-shell-bg, transparent);
 }
 
+.app.workspace-surface-mode > .sidebar {
+  grid-column: 1;
+  min-height: 0;
+}
+
+:is(.app.settings-mode > .settings-rail-sidebar, .app.workspace-surface-mode > .sidebar) {
+  border: 0;
+  border-radius: 0;
+  background: transparent;
+  box-shadow: none;
+  backdrop-filter: none;
+  -webkit-backdrop-filter: none;
+}
+
+.workspace-surface-content {
+  --scroll-boundary-fade-size: var(--scroll-boundary-fade-content);
+  height: 100%;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  padding:
+    calc(var(--scroll-boundary-fade-size) + 18px)
+    var(--settings-page-gutter)
+    64px;
+  color: var(--settings-title);
+  mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--scroll-boundary-fade-size),
+    #000 calc(100% - var(--scroll-boundary-fade-size)),
+    transparent 100%
+  );
+  -webkit-mask-image: linear-gradient(
+    to bottom,
+    transparent 0,
+    #000 var(--scroll-boundary-fade-size),
+    #000 calc(100% - var(--scroll-boundary-fade-size)),
+    transparent 100%
+  );
+}
+
+.mac-desktop-shell.workspace-surface-mode .workspace-surface-content {
+  padding-top: calc(var(--scroll-boundary-fade-size) + 50px);
+}
+
+.workspace-surface-content > :first-child {
+  width: min(var(--settings-content-max), 100%);
+  margin-right: auto;
+  margin-left: auto;
+}
+
+.app.workspace-surface-mode .inbox-page {
+  width: min(860px, 100%);
+  margin: 0 auto;
+  padding: 0 0 24px;
+}
+
+.app.workspace-surface-mode .collaboration-center-page {
+  width: min(var(--settings-content-max), 100%);
+  min-height: 0;
+  margin: 0 auto;
+  padding: 0 0 24px;
+  overflow: visible;
+}
+
+.app.workspace-surface-mode .inbox-page > header {
+  margin-bottom: 26px;
+}
+
+.app.workspace-surface-mode .inbox-page > header button,
+.app.workspace-surface-mode .collaboration-center-hero .icon-btn {
+  color: var(--settings-title);
+  border-color: var(--settings-control-border);
+  background: var(--settings-field-bg);
+  box-shadow: none;
+}
+
+.app.workspace-surface-mode .inbox-item,
+.app.workspace-surface-mode .collaboration-center-stats,
+.app.workspace-surface-mode .collaboration-center-grid > button,
+.app.workspace-surface-mode .inbox-empty {
+  border-color: var(--settings-border-weak);
+  background: var(--settings-surface-base);
+  box-shadow: none;
+}
+
+.app.workspace-surface-mode .inbox-item.unread {
+  background: color-mix(in srgb, var(--space-accent) 13%, var(--settings-surface-base));
+}
+
+.app.workspace-surface-mode .inbox-item.action-required {
+  border-color: var(--settings-danger-border);
+}
+
+.app.workspace-surface-mode .inbox-item-copy small,
+.app.workspace-surface-mode .inbox-item-copy p,
+.app.workspace-surface-mode .inbox-item-state,
+.app.workspace-surface-mode .collaboration-center-hero small,
+.app.workspace-surface-mode .collaboration-center-hero p,
+.app.workspace-surface-mode .collaboration-center-stats small,
+.app.workspace-surface-mode .collaboration-center-grid header small,
+.app.workspace-surface-mode .collaboration-center-grid footer {
+  color: var(--settings-copy);
+}
+
+.app.workspace-surface-mode .inbox-item-copy strong,
+.app.workspace-surface-mode .collaboration-center-hero h2,
+.app.workspace-surface-mode .collaboration-center-stats strong,
+.app.workspace-surface-mode .collaboration-center-grid header strong {
+  color: var(--settings-title);
+}
+
+@media (max-width: 760px) {
+  .app.workspace-surface-mode {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0;
+    padding: 0;
+  }
+
+  .app.workspace-surface-mode > .sidebar,
+  .app.workspace-surface-mode > .resize-handle.left {
+    display: none;
+  }
+
+  .app.workspace-surface-mode > .main {
+    grid-column: 1;
+    height: 100dvh;
+    border-radius: 0;
+    box-shadow: none;
+  }
+
+  .workspace-surface-content {
+    padding-right: 18px;
+    padding-left: 18px;
+  }
+}
+
 .app.settings-mode.settings-mode,
 .app.sidebar-collapsed.settings-mode.settings-mode,
 .app.settings-mode.settings-mode.management-mode,
@@ -64,13 +201,16 @@
   grid-column: 1;
 }
 
-.app.settings-mode > .resize-handle {
+.app.settings-mode > .resize-handle,
+.app.workspace-surface-mode > .resize-handle {
   display: none;
 }
 
-.app.settings-mode > .main {
+.app.settings-mode > .main,
+.app.workspace-surface-mode > .main {
   grid-column: 3;
   height: calc(100dvh - 24px);
+  min-height: 0;
   border: 0;
   border-radius: 12px;
   color: var(--mac-text);
@@ -78,6 +218,18 @@
   box-shadow: var(--settings-main-shadow);
   backdrop-filter: blur(28px) saturate(1.06);
   -webkit-backdrop-filter: blur(28px) saturate(1.06);
+}
+
+@media (prefers-reduced-motion: no-preference) and (min-width: 761px) {
+  .mac-desktop-shell.shell-surface-transitioning {
+    transition:
+      grid-template-columns .36s cubic-bezier(.2, .8, .2, 1),
+      padding-top .36s cubic-bezier(.2, .8, .2, 1);
+  }
+
+  .mac-desktop-shell.shell-surface-transitioning > .main {
+    transition: height .36s cubic-bezier(.2, .8, .2, 1);
+  }
 }
 
 .app.settings-mode > .main::before,
@@ -139,14 +291,8 @@
   min-width: 0;
   overflow: visible;
   flex-direction: column;
-  border: 0;
-  border-radius: 0;
   padding: 42px 6px 10px;
   color: var(--space-rail-text, var(--mac-text));
-  background: transparent;
-  box-shadow: none;
-  backdrop-filter: none;
-  -webkit-backdrop-filter: none;
 }
 
 .settings-rail-head {
@@ -2359,6 +2505,14 @@
 
 .app[data-appearance='dark'].settings-mode {
   --settings-surface-base: rgb(255 255 255 / 3.5%);
+  --settings-text-primary: #f1f1f1;
+  --settings-text-secondary: #a4a4a8;
+  --settings-text-tertiary: #74747a;
+}
+
+.app[data-appearance='dark'].settings-mode,
+.app[data-appearance='dark'].workspace-surface-mode {
+  --settings-surface-base: rgb(255 255 255 / 3.5%);
   --settings-surface-raised: rgb(255 255 255 / 5.5%);
   --settings-surface-inset: rgb(255 255 255 / 2.5%);
   --settings-field-bg: rgb(255 255 255 / 6.5%);
@@ -2397,14 +2551,17 @@
     var(--space-shell-bg, #121212);
 }
 
-.mac-desktop-shell[data-appearance='dark'].settings-mode {
+.mac-desktop-shell[data-appearance='dark'].settings-mode,
+.mac-desktop-shell[data-appearance='dark'].workspace-surface-mode {
   --settings-selected-bg: rgb(255 255 255 / 8%);
   --settings-switch-off: #44464a;
   --settings-main-bg: var(--mac-surface, rgb(24 24 24 / 94%));
 }
 
 .app[data-appearance='dark'].settings-mode > .main,
-.mac-desktop-shell[data-appearance='dark'].settings-mode > .main {
+.app[data-appearance='dark'].workspace-surface-mode > .main,
+.mac-desktop-shell[data-appearance='dark'].settings-mode > .main,
+.mac-desktop-shell[data-appearance='dark'].workspace-surface-mode > .main {
   color: var(--mac-text);
   background: var(--settings-main-bg);
 }
@@ -2472,7 +2629,8 @@
 }
 
 @media (max-width: 900px) {
-  .app.settings-mode {
+  .app.settings-mode,
+  .app.workspace-surface-mode {
     --settings-page-gutter: 22px;
     --settings-content-max: 100%;
   }

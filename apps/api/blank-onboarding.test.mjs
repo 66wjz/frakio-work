@@ -206,6 +206,19 @@ test('assigning the first configured model materializes its provider in the Herm
   assert.match(config, /default: deepseek-v4-flash/);
   assert.match(env, /^DEEPSEEK_API_KEY=/m);
   assert.match(env, /^DEEPSEEK_BASE_URL=https:\/\/api\.deepseek\.com/m);
+
+  const defaultsResponse = await fetch(`${ctx.baseUrl}/api/agents/mark`, {
+    method: 'PATCH',
+    headers: jsonHeaders,
+    body: JSON.stringify({ defaultReasoningEffort: 'high', defaultSpeedMode: 'priority' }),
+  });
+  assert.equal(defaultsResponse.status, 200);
+  const defaults = (await defaultsResponse.json()).agent;
+  assert.equal(defaults.defaultReasoningEffort, 'high');
+  assert.equal(defaults.defaultSpeedMode, '');
+  const persistedAgent = (await fetch(`${ctx.baseUrl}/api/agents`).then((response) => response.json())).agents.find((item) => item.id === 'mark');
+  assert.equal(persistedAgent.defaultReasoningEffort, 'high');
+  assert.equal(persistedAgent.defaultSpeedMode, '');
 });
 
 test('legacy cleanup removes only untouched built-in content and creates an idempotent backup marker', async (t) => {

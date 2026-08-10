@@ -37,6 +37,30 @@ test('runtime store keeps separate native sessions for one Agent across runtimes
   store.close();
 });
 
+test('runtime store bounds oversized events and caps accumulated presentation content', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-runtime-limits-'));
+  const store = createRuntimeStore(path.join(root, 'frakio.db'));
+  const session = store.upsertSession({ runtimeId: 'pi', threadId: 'thread-limits', agentId: 'ares', workspaceId: 'workspace-limits' });
+  const oversizedRun = store.createRun({ sessionId: session.id, runtimeId: 'pi', threadId: 'thread-limits', agentId: 'ares', turnId: 'turn-oversized', status: 'running' });
+  const oversized = store.appendEvent({
+    runId: oversizedRun.id,
+    type: 'tool.completed',
+    payload: { output: 'x'.repeat(400_000) },
+  });
+  assert.equal(oversized.payload.truncated, true);
+  assert.ok(oversized.payload.originalBytes > 256 * 1024);
+  assert.ok(Buffer.byteLength(JSON.stringify(oversized.payload)) <= 256 * 1024);
+
+  const presentationRun = store.createRun({ sessionId: session.id, runtimeId: 'pi', threadId: 'thread-limits', agentId: 'ares', turnId: 'turn-presentation', status: 'running' });
+  for (let index = 0; index < 6; index += 1) {
+    store.appendEvent({ runId: presentationRun.id, type: 'message.delta', payload: { delta: String(index).repeat(200_000) } });
+  }
+  const presentation = store.getRunPresentation(presentationRun.id);
+  assert.ok(presentation.content.length < 1_000_200);
+  assert.match(presentation.content, /输出已达到 Frakio 单次展示上限/);
+  store.close();
+});
+
 test('Memory Ledger deduplicates candidates and only injects accepted valid facts', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-memory-ledger-'));
   const store = createRuntimeStore(path.join(root, 'frakio.db'));
@@ -113,7 +137,7 @@ test('Work scheduler promotes dependencies, enforces per-Agent concurrency, and 
     workflowId,
     title: 'Second',
     assigneeAgentId: 'ares',
-    runtimeId: 'pi',
+    runtimeId: 'hermes',
     dependencies: [],
     status: 'ready',
     idempotencyKey: 'second',
@@ -124,22 +148,90 @@ test('Work scheduler promotes dependencies, enforces per-Agent concurrency, and 
     assigneeAgentId: 'iris',
     runtimeId: 'hermes',
     dependencies: [first.id],
-    status: 'blocked',
+    status: 'waiting_dependency',
     idempotencyKey: 'dependent',
   });
   const scheduler = createWorkScheduler({ store, defaultConcurrency: 4, leaseMs: 30000 });
   assert.deepEqual(scheduler.runnable(workflowId).map((task) => task.id), [first.id]);
+  assert.deepEqual(scheduler.runnable(workflowId, { occupiedAgentIds: ['ares'] }).map((task) => task.id), []);
   const claimed = scheduler.claim(first.id);
   assert.equal(claimed.status, 'running');
   assert.equal(claimed.attempt, 1);
   assert.equal(scheduler.runnable(workflowId).some((task) => task.id === second.id), false);
-  store.upsertWorkTask({ ...claimed, status: 'completed', leaseExpiresAt: null, idempotencyKey: claimed.idempotencyKey });
+  const waiting = store.upsertWorkTask({ ...claimed, status: 'waiting_input', idempotencyKey: claimed.idempotencyKey });
+  assert.equal(scheduler.runnable(workflowId).some((task) => task.id === second.id), false);
+  store.upsertWorkTask({ ...waiting, status: 'completed', leaseExpiresAt: null, leaseToken: '', idempotencyKey: waiting.idempotencyKey });
   scheduler.reconcile(workflowId);
   assert.equal(store.getWorkTask(dependent.id).status, 'ready');
   const expired = scheduler.claim(second.id);
   store.upsertWorkTask({ ...expired, leaseExpiresAt: new Date(Date.now() - 1000).toISOString(), idempotencyKey: expired.idempotencyKey });
   assert.deepEqual(scheduler.reconcile(workflowId).recovered.map((task) => task.id), [second.id]);
   assert.equal(store.getWorkTask(second.id).status, 'ready');
+  store.close();
+});
+
+test('Work task claims are lease-bound, dependency-safe, and reject cycles', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-work-claim-safety-'));
+  const store = createRuntimeStore(path.join(root, 'frakio.db'));
+  const parent = store.upsertWorkTask({ workflowId: 'workflow-safe', title: 'Parent', assigneeAgentId: 'ares', status: 'ready', idempotencyKey: 'parent' });
+  const child = store.upsertWorkTask({ workflowId: 'workflow-safe', title: 'Child', assigneeAgentId: 'iris', dependencies: [parent.id], status: 'ready', idempotencyKey: 'child' });
+  assert.equal(store.claimWorkTask(child.id), null);
+  const claimed = store.claimWorkTask(parent.id);
+  assert.ok(claimed?.leaseToken);
+  assert.equal(store.claimWorkTask(parent.id), null);
+  assert.equal(store.heartbeatWorkTask(parent.id, { leaseToken: 'wrong' }), null);
+  assert.ok(store.heartbeatWorkTask(parent.id, { leaseToken: claimed.leaseToken }));
+  store.upsertWorkTask({ ...claimed, status: 'completed', acceptanceState: 'accepted', leaseToken: '', leaseExpiresAt: null, idempotencyKey: claimed.idempotencyKey });
+  assert.equal(store.claimWorkTask(child.id)?.status, 'running');
+  assert.throws(() => store.upsertWorkTask({ ...child, id: child.id, dependencies: [child.id], idempotencyKey: child.idempotencyKey }), /循环/);
+  store.close();
+});
+
+test('Work scheduler drains 50 Tasks without duplicate claims or active Agent lanes', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-work-pressure-'));
+  const store = createRuntimeStore(path.join(root, 'frakio.db'));
+  const workflowId = 'workflow-pressure';
+  for (let index = 0; index < 50; index += 1) {
+    store.upsertWorkTask({ workflowId, title: `Task ${index + 1}`, assigneeAgentId: `agent-${index % 10}`, runtimeId: 'hermes', status: 'ready', idempotencyKey: `task-${index + 1}` });
+  }
+  const scheduler = createWorkScheduler({ store, defaultConcurrency: 16, leaseMs: 30000 });
+  const claimedIds = new Set();
+  while (claimedIds.size < 50) {
+    const runnable = scheduler.runnable(workflowId, { concurrency: 16 });
+    assert.ok(runnable.length > 0);
+    assert.equal(new Set(runnable.map(task => task.assigneeAgentId)).size, runnable.length);
+    for (const task of runnable) {
+      const claimed = scheduler.claim(task.id);
+      assert.ok(claimed);
+      assert.equal(claimedIds.has(claimed.id), false);
+      claimedIds.add(claimed.id);
+      assert.equal(scheduler.claim(task.id), null);
+      store.upsertWorkTask({ ...claimed, status: 'completed', acceptanceState: 'accepted', leaseToken: '', leaseExpiresAt: null, idempotencyKey: claimed.idempotencyKey });
+    }
+  }
+  assert.equal(store.listWorkTasks(workflowId, ['completed']).length, 50);
+  store.close();
+});
+
+test('collaboration domain records revisions, interventions, events, and task Run bindings', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-collaboration-domain-'));
+  const store = createRuntimeStore(path.join(root, 'frakio.db'));
+  const workflow = store.upsertCollaborationWorkflow({ id: 'workflow-domain', conversationId: 'thread-domain', coordinatorAgentId: 'max', status: 'pending_confirmation' });
+  assert.equal(workflow.status, 'pending_confirmation');
+  const first = store.upsertWorkTask({ id: 'task-domain-a', workflowId: workflow.id, title: 'A', status: 'ready', idempotencyKey: 'task-a' });
+  const second = store.upsertWorkTask({ id: 'task-domain-b', workflowId: workflow.id, title: 'B', status: 'waiting_dependency', dependencies: [first.id], idempotencyKey: 'task-b' });
+  store.putCollaborationDependency({ parentTaskId: first.id, childTaskId: second.id, createdByTaskId: second.id, reason: '资料依赖' });
+  assert.equal(store.listCollaborationDependencies(second.id)[0].parentTaskId, first.id);
+  const plan = store.putPlanRevision({ workflowId: workflow.id, revision: 1, content: { tasks: [first.id, second.id] }, status: 'pending_confirmation' });
+  assert.equal(store.confirmPlanRevision(workflow.id, plan.revision, 'user').status, 'active');
+  const intervention = store.putCollaborationIntervention({ workflowId: workflow.id, taskId: second.id, status: 'queued', message: '补充资料', idempotencyKey: 'guide-1' });
+  assert.equal(store.putCollaborationIntervention({ workflowId: workflow.id, taskId: second.id, status: 'queued', message: '重复', idempotencyKey: 'guide-1' }).id, intervention.id);
+  assert.deepEqual(store.listCollaborationInterventions({ workflowId: workflow.id, taskId: second.id, statuses: ['queued'] }).map((item) => item.id), [intervention.id]);
+  assert.equal(store.updateCollaborationIntervention(intervention.id, 'delivered').status, 'delivered');
+  store.bindTaskRun({ taskId: first.id, runId: 'run-domain', leaseToken: 'lease-domain' });
+  const event = store.appendCollaborationEvent({ id: 'event-domain', type: 'task.started', workflowId: workflow.id, taskId: first.id, runId: 'run-domain' });
+  assert.equal(store.appendCollaborationEvent({ id: 'event-domain', type: 'task.started', workflowId: workflow.id }).cursor, event.cursor);
+  assert.deepEqual(store.collaborationEventsAfter(workflow.id, 0).map((item) => item.id), ['event-domain']);
   store.close();
 });
 

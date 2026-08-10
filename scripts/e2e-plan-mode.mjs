@@ -51,12 +51,12 @@ try {
   const indicator = page.locator('.plan-mode-indicator');
   await indicator.waitFor({ state: 'visible' });
   assert.match(await indicator.textContent(), /计划/);
-  assert.equal(await page.getByRole('button', { name: '运行模式：Chat' }).isDisabled(), true);
+  assert.equal(await page.locator('.composer-collaboration-toggle').isDisabled(), true);
 
   await page.getByRole('button', { name: '关闭计划模式' }).focus();
   await page.keyboard.press('Enter');
   await indicator.waitFor({ state: 'detached' });
-  assert.equal(await page.getByRole('button', { name: '运行模式：Chat' }).isDisabled(), false);
+  assert.equal(await page.locator('.composer-collaboration-toggle').isDisabled(), false);
 
   await page.getByRole('button', { name: '添加内容' }).focus();
   await page.keyboard.press('Enter');
@@ -82,3 +82,5 @@ try {
 } finally {
   await browser.close();
 }
+
+process.exit(0);

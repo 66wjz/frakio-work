@@ -13,11 +13,18 @@ async function listen(server) {
 
 test('capability verification discovers an exact custom Responses route', async (t) => {
   const requests = [];
+  let transientFailuresRemaining = 0;
   const providerServer = createServer(async (req, res) => {
     let body = '';
     for await (const chunk of req) body += chunk;
     const parsed = JSON.parse(body || '{}');
     requests.push({ url: req.url, body: parsed });
+    if (transientFailuresRemaining > 0) {
+      transientFailuresRemaining -= 1;
+      res.writeHead(429, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: { message: 'temporary rate limit' } }));
+      return;
+    }
     const effort = parsed.reasoning?.effort;
     const accepted = parsed.model !== 'gpt-fail' && (!effort || ['low', 'medium', 'high'].includes(effort) || parsed.service_tier === 'priority');
     res.writeHead(accepted ? 200 : 400, { 'content-type': 'application/json' });
@@ -141,4 +148,23 @@ test('capability verification discovers an exact custom Responses route', async 
   });
   assert.equal(changedOrigin.status, 400);
   assert.match((await changedOrigin.json()).error, /重新输入 API Key/);
+
+  const requestsBeforeRetry = requests.length;
+  transientFailuresRemaining = 2;
+  const retryResponse = await fetch(`${baseUrl}/api/models/model-relay/capabilities/probe`, {
+    method: 'POST',
+    headers: { cookie, 'content-type': 'application/json', 'x-frakio-request': '1' },
+    body: JSON.stringify({ modelId: 'gpt-test' }),
+  });
+  assert.equal(retryResponse.status, 202);
+  assert.equal((await retryResponse.json()).queued, 1);
+  let retryProbe = null;
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const snapshot = await fetch(`${baseUrl}/api/model-capabilities`).then((response) => response.json());
+    retryProbe = snapshot.probes['model-relay'];
+    if (!retryProbe.active) break;
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  assert.equal(retryProbe?.models?.find((item) => item.modelId === 'gpt-test')?.status, 'completed');
+  assert.equal(requests.length - requestsBeforeRetry, 12);
 });

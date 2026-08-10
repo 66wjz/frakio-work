@@ -5,6 +5,7 @@ import {
   cancelPlanQuestionBatch,
   createPlanQuestionBatch,
   createPlanSession,
+  normalizePlanSession,
   normalizePlanQuestion,
   normalizeThreadPlans,
   resolvePlanQuestionBatch,
@@ -17,6 +18,19 @@ test('legacy threads normalize to default collaboration mode without a migration
     activePlanId: '',
     planSessions: [],
   });
+});
+
+test('legacy Plan handoff metadata remains readable without changing its purpose', () => {
+  const plan = normalizePlanSession({
+    id: 'legacy-plan',
+    purpose: 'plan',
+    targetExecutionMode: 'chat',
+    postApprovalIntent: 'collaboration',
+    status: 'waiting_approval',
+  });
+  assert.equal(plan.purpose, 'plan');
+  assert.equal(plan.targetExecutionMode, 'chat');
+  assert.equal(plan.postApprovalIntent, 'collaboration');
 });
 
 test('Plan sessions preserve bounded revisions and idempotent submissions', () => {
@@ -58,6 +72,23 @@ test('Work Plan validation rejects missing assignees and dependency cycles', () 
       { key: 'two', title: 'Two', description: 'Two', assigneeAgentId: 'coord', expectedResult: 'Two', dependsOnKeys: ['one'] },
     ],
   }, { agentIds: ['coord'] }), /cycle/);
+});
+
+test('collaboration proposals retain their purpose, handoff, and Workflow revision target', () => {
+  const thread = { executionMode: 'chat', planSessions: [] };
+  const proposal = createPlanSession(thread, { authorAgentId: 'iris', purpose: 'collaboration', targetExecutionMode: 'collaboration', workflowId: 'workflow-1' });
+  assert.equal(proposal.purpose, 'collaboration');
+  assert.equal(proposal.targetExecutionMode, 'collaboration');
+  assert.equal(proposal.workflowId, 'workflow-1');
+  assert.equal(thread.collaborationMode, 'collaboration');
+  assert.equal(normalizeThreadPlans(thread).collaborationMode, 'collaboration');
+  assert.throws(() => submitPlanDraft(proposal, {
+    baseRevision: 0,
+    title: 'Collaboration',
+    summary: 'Assign work.',
+    idempotencyKey: 'collaboration-missing-assignee',
+    steps: [{ key: 'one', title: 'One', description: 'One', expectedResult: 'One', dependsOnKeys: [] }],
+  }, { agentIds: ['iris'] }), /assigneeAgentId/);
 });
 
 test('structured Plan questions resolve answers by question id', () => {

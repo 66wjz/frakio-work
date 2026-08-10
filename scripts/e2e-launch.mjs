@@ -168,6 +168,7 @@ try {
     await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
     const installPanel = page.locator('[data-launch-panel="installing"]');
     await installPanel.waitFor({ state: 'visible', timeout: 5000 });
+    await installPanel.locator('.launch-install-step').nth(3).waitFor({ state: 'visible', timeout: 5000 });
     assert.equal(await page.locator('.launch-install-step').count(), 4, `${terminalStatus}: install panel did not show four real phases`);
     assert.equal(installStarts, 1, `${terminalStatus}: missing Hermes started more than one install`);
     if (terminalStatus === 'ready') {
@@ -312,16 +313,16 @@ try {
         await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ userProfile: { avatarUrl: '', nickname: '测试用户', completedAt: '2026-07-28T00:00:00.000Z' } }) });
         return;
       }
-      if (pathname === `/api/threads/${firstThread.id}`) {
+      if (pathname === `/api/threads/${firstThread.id}/runs/active`) {
         signalFirstThreadRequest();
         await firstThreadGate;
-        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ thread: firstThread }) });
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ thread: firstThread, run: null }) });
         return;
       }
-      if (pathname === `/api/threads/${secondThread.id}`) {
+      if (pathname === `/api/threads/${secondThread.id}/runs/active`) {
         signalSecondThreadRequest();
         await secondThreadGate;
-        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ thread: secondThread }) });
+        await route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ thread: secondThread, run: null }) });
         return;
       }
       await route.fulfill({ status: 200, contentType: 'application/json', body: '{}' });
@@ -336,8 +337,8 @@ try {
     assert.ok(launchMainBox, 'desktop launch did not render the main card');
 
     await page.getByRole('button', { name: /首次会话，参与 Agent/ }).click();
-    await firstThreadRequest;
-    await page.getByRole('heading', { name: '我们接下来做点什么？' }).waitFor({ state: 'visible' });
+    await Promise.race([firstThreadRequest, new Promise((_, reject) => setTimeout(() => reject(new Error('首次会话未请求活动运行快照。')), 5000))]);
+    await page.locator('.thread-opening-skeleton').waitFor({ state: 'visible', timeout: 5000 });
     assert.equal(await shell.evaluate((element) => element.classList.contains('mac-conversation-shell')), true, 'macOS conversation shell disappeared while the first thread was loading');
     const pendingFirstBox = await main.boundingBox();
     assert.ok(pendingFirstBox, 'main card disappeared while the first thread was loading');
@@ -351,7 +352,7 @@ try {
     assert.ok(Math.abs(loadedFirstBox.height - launchMainBox.height) <= 1, `main card changed height after the first thread loaded: ${launchMainBox.height} -> ${loadedFirstBox.height}`);
 
     await page.getByRole('button', { name: /第二个会话，参与 Agent/ }).click();
-    await secondThreadRequest;
+    await Promise.race([secondThreadRequest, new Promise((_, reject) => setTimeout(() => reject(new Error('第二个会话未请求活动运行快照。')), 5000))]);
     await page.getByRole('heading', { name: '首次会话' }).waitFor({ state: 'visible' });
     assert.equal(await shell.evaluate((element) => element.classList.contains('mac-conversation-shell')), true, 'macOS conversation shell disappeared while the second thread was loading');
     const pendingSecondBox = await main.boundingBox();

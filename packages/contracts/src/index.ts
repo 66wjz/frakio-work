@@ -81,6 +81,11 @@ export type AgentRuntimePolicy = {
   defaultHarnessId?: HarnessId;
 };
 
+export type AgentDefaultRunSettings = {
+  reasoningEffort?: string;
+  speedMode?: string;
+};
+
 export type ThreadAgentHarnessBinding = {
   agentId: string;
   harnessId: HarnessId;
@@ -238,6 +243,7 @@ export type RuntimeModelCatalogEntry = {
   defaultModelId: string;
   models: string[];
   compatibility: RuntimeModelCompatibility;
+  modelCompatibilities: Record<string, RuntimeModelCompatibility>;
 };
 
 export type RuntimeModelCatalog = {
@@ -256,6 +262,7 @@ export type RuntimeFeatureFlags = {
   runtimeRouterV1: boolean;
   piRuntime: boolean;
   runtimeNeutralWork: boolean;
+  collaborationV2?: boolean;
   memoryLedger: boolean;
   externalCliChannels: boolean;
   runtimePackageManager?: boolean;
@@ -509,6 +516,7 @@ export type RuntimeEventType =
   | 'approval.requested'
   | 'approval.resolved'
   | 'artifact.published'
+  | 'artifact.conflict'
   | 'run.interrupting'
   | 'run.completed'
   | 'run.failed'
@@ -604,6 +612,7 @@ export type ToolIntent = {
   category: 'read' | 'write' | 'command' | 'network' | 'publish' | 'delete' | 'payment' | 'authorization' | 'other';
   target: string;
   workspaceRoot: string;
+  effect: 'observe' | 'research_interaction' | 'persistent_mutation';
   mutating: boolean;
   networked: boolean;
   externalPublish: boolean;
@@ -615,6 +624,7 @@ export type PermissionDecision = {
   decision: 'allow' | 'ask' | 'deny';
   reason: string;
   source: 'hard_boundary' | 'plan_mode' | 'workspace_policy' | 'agent_policy' | 'user_grant' | 'smart_review' | 'default';
+  effect: 'observe' | 'research_interaction' | 'persistent_mutation';
   scope: 'once' | 'run' | 'agent_workspace';
   coverage: PermissionCoverage;
   expiresAt: string | null;
@@ -809,7 +819,7 @@ export type ConversationOverview = {
   lastChangeSet: RunChangeSet | null;
 };
 
-export type CollaborationMode = 'default' | 'plan';
+export type CollaborationMode = 'default' | 'plan' | 'collaboration';
 
 export type PlanSessionStatus =
   | 'drafting'
@@ -852,6 +862,7 @@ export type PlanQuestionBatch = {
 export type PlanStep = {
   key: string;
   title: string;
+  displayTitle: string;
   description: string;
   files: string[];
   assigneeAgentId?: string;
@@ -862,6 +873,7 @@ export type PlanStep = {
 export type PlanDraft = {
   revision: number;
   title: string;
+  displayTitle: string;
   summary: string;
   steps: PlanStep[];
   tests: string[];
@@ -873,7 +885,10 @@ export type PlanDraft = {
 export type PlanSession = {
   id: string;
   readOnly?: boolean;
-  targetExecutionMode: 'chat' | 'work';
+  purpose?: 'plan' | 'collaboration';
+  targetExecutionMode: 'chat' | 'work' | 'collaboration';
+  postApprovalIntent?: 'collaboration';
+  workflowId?: string;
   authorAgentId: string;
   status: PlanSessionStatus;
   currentRevision: number;
@@ -885,6 +900,8 @@ export type PlanSession = {
   createdAt: string;
   updatedAt: string;
 };
+
+export type ComposerMessageIntent = 'chat' | 'collaboration';
 
 export type RunActivityKind = 'read' | 'search' | 'edit' | 'write' | 'command' | 'web' | 'skill' | 'collaboration' | 'other';
 export type RunActivityStatus = 'running' | 'completed' | 'failed' | 'cancelled';
@@ -1154,7 +1171,30 @@ export type HermesNetworkStatus = {
   verificationState?: 'verified';
 };
 
-export type CollaborationWorkflowStatus = 'active' | 'paused' | 'completed' | 'cancelled' | 'archived';
+export type CollaborationWorkflowStatus = 'draft' | 'pending_confirmation' | 'active' | 'paused' | 'completed' | 'failed' | 'cancelled' | 'archived';
+export type CollaborationTaskStatus = 'pending_confirmation' | 'ready' | 'waiting_dependency' | 'running' | 'waiting_input' | 'review' | 'completed' | 'failed' | 'paused' | 'cancelled';
+export type CollaborationTaskActivityPhase = 'queued' | 'waiting_dependency' | 'running' | 'waiting_input' | 'completed' | 'failed' | 'paused' | 'cancelled';
+export type CollaborationRunStatus = 'queued' | 'starting' | 'running' | 'parked' | 'ended' | 'failed' | 'aborted';
+export type CollaborationInterventionStatus = 'queued' | 'delivered' | 'injected' | 'deferred_to_next_run' | 'consumed' | 'cancelled';
+export type WorkflowProposalStatus = 'draft' | 'pending_confirmation' | 'confirmed' | 'cancelled' | 'failed';
+
+export type WorkflowProposal = {
+  id: string;
+  conversationId: string;
+  workflowId?: string | null;
+  sourcePlanId?: string | null;
+  proposalMessageId?: string | null;
+  revision: number;
+  purpose: 'collaboration';
+  status: WorkflowProposalStatus;
+  title: string;
+  summary: string;
+  content: PlanDraft | Record<string, unknown>;
+  confirmedBy?: string | null;
+  confirmedAt?: string | null;
+  createdAt: string;
+  updatedAt: string;
+};
 
 export type CollaborationWorkflowControl = {
   operationId: string;
@@ -1163,6 +1203,8 @@ export type CollaborationWorkflowControl = {
   state: 'idle' | 'pausing' | 'paused' | 'resuming' | 'cancelling' | 'cancelled' | 'pause_failed';
   affectedTaskIds: string[];
   stoppedRuns: number;
+  pendingRunIds: string[];
+  deferredRunIds: string[];
   blockedTasks: number;
   preservedWaitingTasks: number;
   failedTaskIds: string[];
@@ -1177,8 +1219,10 @@ export type CollaborationEventType =
   | 'task.started'
   | 'task.waiting'
   | 'task.resumed'
+  | 'task.review'
   | 'task.completed'
   | 'task.failed'
+  | 'task.cancelled'
   | 'dependency.created'
   | 'dependency.satisfied'
   | 'artifact.published'
@@ -1188,6 +1232,11 @@ export type CollaborationEventType =
   | 'intervention.sent'
   | 'workflow.created'
   | 'workflow.completed'
+  | 'workflow.failed'
+  | 'workflow.finalization_requested'
+  | 'workflow.finalization_started'
+  | 'workflow.delivery_ready'
+  | 'workflow.finalization_failed'
   | 'workflow.pause_started'
   | 'workflow.paused'
   | 'workflow.pause_failed'
@@ -1204,11 +1253,14 @@ export type CollaborationWorkflow = {
   id: string;
   name: string;
   boardSlug: string;
+  nativeOnly?: boolean;
   status: CollaborationWorkflowStatus;
   coordinatorAgentId: string;
   fallbackDecisionAgentId: string;
   rootTaskIds: string[];
   currentRootTaskId?: string;
+  approvedPlanId?: string;
+  approvedPlanRevision?: number;
   planRevision?: number;
   plan?: {
     revision: number;
@@ -1218,12 +1270,67 @@ export type CollaborationWorkflow = {
     publishedAt?: string;
   } | null;
   control?: CollaborationWorkflowControl;
+  finalization?: {
+    state: 'idle' | 'requested' | 'running' | 'delivered' | 'failed';
+    requestedAt?: string | null;
+    startedAt?: string | null;
+    deliveredAt?: string | null;
+    failedAt?: string | null;
+    deliveryMessageId?: string;
+    runId?: string;
+    error?: string;
+  };
+  finalDelivery?: {
+    status: 'pending' | 'ready' | 'failed';
+    summary: string;
+    content: string;
+    coordinatorAgentId: string;
+    sourceTaskIds: string[];
+    runId: string;
+    messageId?: string;
+    createdAt?: string | null;
+    error?: string;
+  };
   createdAt: string;
   updatedAt: string;
   completedAt?: string | null;
   pausedAt?: string | null;
   cancelledAt?: string | null;
   archivedAt?: string | null;
+  conversationId?: string;
+  activePlanRevisionId?: string | null;
+};
+
+export type CollaborationTask = {
+  id: string;
+  workflowId: string;
+  assigneeAgentId?: string | null;
+  status: CollaborationTaskStatus;
+  activity?: {
+    phase: CollaborationTaskActivityPhase;
+    revision: number;
+    kind?: RunActivityKind;
+    displayName?: string;
+    target?: string;
+    upstreamAgentNames?: string[];
+    changedAt: string;
+    waitingSince?: string;
+    sourceEventId?: string;
+    runId?: string;
+  };
+  acceptanceState?: 'pending' | 'accepted' | 'rejected';
+  leaseToken?: string;
+  leaseExpiresAt?: string | null;
+};
+
+export type CollaborationIntervention = {
+  id: string;
+  workflowId: string;
+  taskId?: string;
+  targetAgentId?: string;
+  status: CollaborationInterventionStatus;
+  message: string;
+  idempotencyKey?: string;
 };
 
 export type CollaborationEvent = {

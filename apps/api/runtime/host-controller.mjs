@@ -51,14 +51,20 @@ export function createRuntimeHostController({ platform, store }) {
     if (!current) return null;
     if (['completed', 'failed', 'cancelled'].includes(current.status)) return current;
     const run = store.requestRunInterrupt(runId);
+    const session = store.getSession(run.sessionId);
+    const cancellationCapability = session?.capabilitySnapshot?.capabilities?.cancellation;
+    const cancellationUnsupported = cancellationCapability === false || cancellationCapability === 'unsupported';
     platform.events.append({
       runId,
       type: 'run.interrupting',
-      payload: { requestedAt: run.stopRequestedAt, phase: run.phase },
+      payload: { requestedAt: run.stopRequestedAt, phase: run.phase, deferred: cancellationUnsupported, capability: cancellationUnsupported ? 'unsupported' : 'supported_or_unknown' },
       nativeEventKey: `host-interrupt:${runId}`,
       hostVisible: true,
     });
-    const session = store.getSession(run.sessionId);
+    if (cancellationUnsupported) {
+      store.updateRun(runId, { metadata: { cancellationDeferred: true, cancellationCapability: 'unsupported' } });
+      return store.getRun(runId);
+    }
     const adapter = platform.adapters.get(run.runtimeId);
     void Promise.resolve(adapter?.cancel?.(session?.id || run.sessionId, { runId })).catch(() => {});
     if (!cancellationTimers.has(runId)) {

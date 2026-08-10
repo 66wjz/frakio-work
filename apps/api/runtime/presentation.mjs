@@ -1,5 +1,7 @@
 import { normalizeRunActivityItem, summarizeActivityItems } from '../lib/run-activity.mjs';
 
+const MAX_PRESENTATION_CONTENT_CHARS = 1_000_000;
+
 function nextActivityGroups(groups, payload, status) {
   const item = normalizeRunActivityItem(payload || {}, status);
   const current = Array.isArray(groups) ? groups.map((group) => ({ ...group, items: [...(group.items || [])] })) : [];
@@ -58,7 +60,12 @@ export function reduceRunPresentation(previous, event, run) {
   const next = { ...current, revision: current.revision + 1, lastCursor: event.cursor, status: run.status, phase: run.phase, updatedAt: event.createdAt };
   if (event.type === 'run.started' || event.type === 'approval.resolved') next.status = 'running';
   if (event.type === 'run.interrupting') next.status = 'interrupting';
-  if (event.type === 'message.delta') next.content = `${current.content}${String(payload.delta || '')}`;
+  if (event.type === 'message.delta') {
+    const combined = `${current.content}${String(payload.delta || '')}`;
+    next.content = combined.length <= MAX_PRESENTATION_CONTENT_CHARS
+      ? combined
+      : `${combined.slice(0, MAX_PRESENTATION_CONTENT_CHARS)}\n\n[输出已达到 Frakio 单次展示上限，完整产物请查看任务文件。]`;
+  }
   if (event.type === 'tool.started' || event.type === 'tool.updated') {
     next.activityGroups = nextActivityGroups(current.activityGroups, payload, 'running');
     next.phase = 'tool';

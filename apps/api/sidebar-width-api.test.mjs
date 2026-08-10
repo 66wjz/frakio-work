@@ -70,6 +70,7 @@ test('state API persists the one-time macOS sidebar width migration', async (t) 
     piOAuthProviders: true,
     piGeminiCodeAssistAdapter: false,
     runtimeNeutralWork: true,
+    collaborationV2: true,
     memoryLedger: true,
     memoryRouterV1: true,
     libraryV1: true,

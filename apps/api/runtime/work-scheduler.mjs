@@ -1,5 +1,5 @@
 function taskKey(task) {
-  return `${task.assigneeAgentId || 'unassigned'}:${task.runtimeId || 'unassigned'}`;
+  return task.assigneeAgentId || 'unassigned';
 }
 
 export function createWorkScheduler({ store, defaultConcurrency = 2, leaseMs = 120000 }) {
@@ -7,9 +7,9 @@ export function createWorkScheduler({ store, defaultConcurrency = 2, leaseMs = 1
     reconcile(workflowId) {
       const recovered = store.recoverExpiredWorkTasks(workflowId);
       const promoted = [];
-      for (const task of store.listWorkTasks(workflowId, ['blocked', 'planned'])) {
+      for (const task of store.listWorkTasks(workflowId, ['waiting_dependency'])) {
         const dependencies = task.dependencies || [];
-        if (!dependencies.length || dependencies.every((dependencyId) => store.getWorkTask(dependencyId)?.status === 'completed')) {
+        if (!dependencies.length || dependencies.every((dependencyId) => ['completed', 'done'].includes(store.getWorkTask(dependencyId)?.status))) {
           const next = store.upsertWorkTask({
             ...task,
             status: 'ready',
@@ -21,18 +21,21 @@ export function createWorkScheduler({ store, defaultConcurrency = 2, leaseMs = 1
       }
       return { recovered, promoted };
     },
-    runnable(workflowId, { concurrency = defaultConcurrency, runtimeLimits = {} } = {}) {
+    runnable(workflowId, { concurrency = defaultConcurrency, runtimeLimits = {}, occupiedAgentIds = [] } = {}) {
       const maximum = Math.max(1, Math.min(16, Number(concurrency) || defaultConcurrency));
-      const running = store.listWorkTasks(workflowId, ['running']);
-      const occupiedAgents = new Set(running.map(taskKey));
-      const runtimeCounts = running.reduce((counts, task) => {
+      const active = store.listWorkTasks(workflowId, ['running', 'waiting_input']);
+      const occupiedAgents = new Set([
+        ...active.map(taskKey),
+        ...(occupiedAgentIds || []).map((agentId) => String(agentId || '')).filter(Boolean),
+      ]);
+      const runtimeCounts = active.reduce((counts, task) => {
         const runtimeId = task.runtimeId || 'unassigned';
         counts[runtimeId] = (counts[runtimeId] || 0) + 1;
         return counts;
       }, {});
       const selected = [];
       for (const task of store.listWorkTasks(workflowId, ['ready'])) {
-        if (running.length + selected.length >= maximum) break;
+        if (active.length + selected.length >= maximum) break;
         const key = taskKey(task);
         if (occupiedAgents.has(key)) continue;
         const runtimeId = task.runtimeId || 'unassigned';
@@ -47,8 +50,8 @@ export function createWorkScheduler({ store, defaultConcurrency = 2, leaseMs = 1
     claim(taskId, input = {}) {
       return store.claimWorkTask(taskId, { leaseMs, ...input });
     },
-    heartbeat(taskId) {
-      return store.heartbeatWorkTask(taskId, { leaseMs });
+    heartbeat(taskId, leaseToken = '') {
+      return store.heartbeatWorkTask(taskId, { leaseMs, leaseToken });
     },
   };
 }

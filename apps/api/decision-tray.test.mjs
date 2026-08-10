@@ -40,7 +40,7 @@ test('decision tray consumes the composer material and stays compact', () => {
 });
 
 test('Plan question close has a batch-only cancel endpoint', () => {
-  assert.match(mainSource, /plans\/\$\{activePlan\.id\}\/questions\/\$\{batch\.id\}\/cancel/);
+  assert.match(mainSource, /plans\/\$\{activeProposal\.id\}\/questions\/\$\{batch\.id\}\/cancel/);
   assert.match(serverSource, /plans\/:planId\/questions\/:requestId\/cancel/);
   assert.match(serverSource, /cancelPlanQuestionBatch\(plan, req\.params\.requestId/);
 });

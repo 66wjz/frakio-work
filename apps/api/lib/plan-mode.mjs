@@ -22,6 +22,14 @@ function text(value, limit) {
   return String(value || '').trim().slice(0, limit);
 }
 
+function compactTitle(value, fallback) {
+  const source = String(value || '').replace(/\s+/g, ' ').trim();
+  if (!source) return fallback;
+  if (source.length <= 28) return source;
+  const segment = source.split(/[：:→|｜]/)[0].trim();
+  return text(segment || source, 28) || fallback;
+}
+
 export function normalizePlanOption(option = {}, index = 0) {
   return {
     label: text(option.label, 80) || `选项 ${index + 1}`,
@@ -71,6 +79,7 @@ export function normalizePlanStep(step = {}, index = 0) {
   return {
     key: text(step.key, 80) || `step_${index + 1}`,
     title: text(step.title, 160),
+    displayTitle: text(step.displayTitle, 36) || compactTitle(step.title, `任务 ${index + 1}`),
     description: text(step.description, 2000),
     files: [...new Set((Array.isArray(step.files) ? step.files : []).map((item) => text(item, 500)).filter(Boolean))].slice(0, 80),
     ...(text(step.assigneeAgentId, 100) ? { assigneeAgentId: text(step.assigneeAgentId, 100) } : {}),
@@ -83,6 +92,7 @@ export function normalizePlanDraft(draft = {}, fallbackNow = new Date().toISOStr
   return {
     revision: Math.max(1, Number(draft.revision) || 1),
     title: text(draft.title, 160),
+    displayTitle: text(draft.displayTitle, 36) || compactTitle(draft.title, '协作方案'),
     summary: text(draft.summary, 4000),
     steps: (Array.isArray(draft.steps) ? draft.steps : []).slice(0, 100).map(normalizePlanStep),
     tests: (Array.isArray(draft.tests) ? draft.tests : []).map((item) => text(item, 1000)).filter(Boolean).slice(0, 100),
@@ -98,7 +108,12 @@ export function normalizePlanSession(session = {}, fallbackNow = new Date().toIS
   return {
     id: text(session.id, 120) || `plan_${randomUUID()}`,
     ...(session.readOnly === true ? { readOnly: true } : {}),
-    targetExecutionMode: session.targetExecutionMode === 'work' ? 'work' : 'chat',
+    purpose: session.purpose === 'collaboration' ? 'collaboration' : 'plan',
+    targetExecutionMode: session.targetExecutionMode === 'work'
+      ? 'work'
+      : session.targetExecutionMode === 'collaboration' ? 'collaboration' : 'chat',
+    ...(session.postApprovalIntent === 'collaboration' ? { postApprovalIntent: 'collaboration' } : {}),
+    ...(text(session.workflowId, 120) ? { workflowId: text(session.workflowId, 120) } : {}),
     authorAgentId: text(session.authorAgentId, 100),
     status: planStatuses.has(session.status) ? session.status : 'drafting',
     currentRevision,
@@ -120,7 +135,9 @@ export function normalizeThreadPlans(thread = {}, fallbackNow = new Date().toISO
   const requestedActiveId = text(thread.activePlanId, 120);
   const active = sessions.find((session) => session.id === requestedActiveId && !terminalPlanStatuses.has(session.status));
   return {
-    collaborationMode: thread.collaborationMode === 'plan' && active ? 'plan' : 'default',
+    collaborationMode: active
+      ? active.purpose === 'collaboration' ? 'collaboration' : 'plan'
+      : 'default',
     activePlanId: active?.id || '',
     planSessions: sessions,
   };
@@ -130,12 +147,22 @@ export function activePlanSession(thread = {}) {
   return (thread.planSessions || []).find((session) => session.id === thread.activePlanId) || null;
 }
 
-export function createPlanSession(thread, { authorAgentId = '', targetExecutionMode, at = new Date().toISOString() } = {}) {
+export function hasActivePlanningSession(thread = {}) {
+  const session = activePlanSession(thread);
+  return Boolean(session && !terminalPlanStatuses.has(session.status));
+}
+
+export function createPlanSession(thread, { authorAgentId = '', purpose = 'plan', targetExecutionMode, postApprovalIntent = '', workflowId = '', at = new Date().toISOString() } = {}) {
   const current = activePlanSession(thread);
   if (current && !terminalPlanStatuses.has(current.status)) return current;
   const session = normalizePlanSession({
     id: `plan_${randomUUID()}`,
-    targetExecutionMode: targetExecutionMode === 'work' ? 'work' : 'chat',
+    purpose: purpose === 'collaboration' ? 'collaboration' : 'plan',
+    targetExecutionMode: targetExecutionMode === 'work'
+      ? 'work'
+      : targetExecutionMode === 'collaboration' ? 'collaboration' : 'chat',
+    postApprovalIntent,
+    workflowId,
     authorAgentId,
     status: 'drafting',
     currentRevision: 0,
@@ -146,7 +173,7 @@ export function createPlanSession(thread, { authorAgentId = '', targetExecutionM
   }, at);
   thread.planSessions = [...(thread.planSessions || []), session].slice(-20);
   thread.activePlanId = session.id;
-  thread.collaborationMode = 'plan';
+  thread.collaborationMode = session.purpose === 'collaboration' ? 'collaboration' : 'plan';
   thread.updatedAt = at;
   return session;
 }
@@ -258,13 +285,14 @@ export function validatePlanDraftInput(input = {}, { targetExecutionMode = 'chat
   for (const step of steps) {
     if (step.dependsOnKeys.includes(step.key) || step.dependsOnKeys.some((key) => !keys.has(key))) throw Object.assign(new Error(`Plan step ${step.key} has an invalid dependency.`), { status: 400, code: 'PLAN_DEPENDENCY_INVALID' });
   }
-  if (targetExecutionMode === 'work') {
+  if (targetExecutionMode === 'work' || targetExecutionMode === 'collaboration') {
     const allowedAgents = new Set(agentIds);
     if (steps.some((step) => !step.assigneeAgentId || !allowedAgents.has(step.assigneeAgentId))) throw Object.assign(new Error('Every Work plan step requires a valid assigneeAgentId.'), { status: 400, code: 'PLAN_ASSIGNEE_INVALID' });
   }
   assertAcyclic(steps);
   return {
     title,
+    displayTitle: text(input.displayTitle, 36) || compactTitle(title, '协作方案'),
     summary,
     steps,
     tests: (Array.isArray(input.tests) ? input.tests : []).map((item) => text(item, 1000)).filter(Boolean).slice(0, 100),

@@ -1,5 +1,12 @@
-const workflowStatuses = new Set(['active', 'paused', 'completed', 'cancelled', 'archived']);
+const workflowStatuses = new Set(['active', 'paused', 'completed', 'failed', 'cancelled', 'archived']);
 const workflowControlStates = new Set(['idle', 'pausing', 'paused', 'resuming', 'cancelling', 'cancelled', 'pause_failed']);
+export const MAX_COLLABORATION_TASKS = 64;
+export const MAX_COLLABORATION_DEPENDENCY_DEPTH = 16;
+export const MAX_COLLABORATION_EVENT_BYTES = 64 * 1024;
+
+export function collaborationSchedulerKind(state = {}) {
+  return state?.features?.collaborationV2 === false ? 'legacy' : 'frakio';
+}
 
 export const collaborationEventTypes = new Set([
   'task.created',
@@ -7,16 +14,24 @@ export const collaborationEventTypes = new Set([
   'task.waiting',
   'task.resumed',
   'task.completed',
+  'task.review',
   'task.failed',
+  'task.cancelled',
   'dependency.created',
   'dependency.satisfied',
   'artifact.published',
+  'artifact.conflict',
   'escalation.started',
   'escalation.resolved',
   'human.required',
   'intervention.sent',
   'workflow.created',
   'workflow.completed',
+  'workflow.failed',
+  'workflow.finalization_requested',
+  'workflow.finalization_started',
+  'workflow.delivery_ready',
+  'workflow.finalization_failed',
   'workflow.pause_started',
   'workflow.paused',
   'workflow.pause_failed',
@@ -30,6 +45,49 @@ export const collaborationEventTypes = new Set([
   'capability.blocked',
 ]);
 
+function boundedEventPayload(value) {
+  const payload = value && typeof value === 'object' ? value : {};
+  const encoded = JSON.stringify(payload);
+  if (Buffer.byteLength(encoded) <= MAX_COLLABORATION_EVENT_BYTES) return payload;
+  const compact = {};
+  for (const [key, entry] of Object.entries(payload).slice(0, 80)) {
+    if (typeof entry === 'string') compact[key] = entry.slice(0, 4000);
+    else if (typeof entry === 'number' || typeof entry === 'boolean' || entry == null) compact[key] = entry;
+    else if (Array.isArray(entry)) compact[key] = entry.slice(0, 40).map((item) => typeof item === 'string' ? item.slice(0, 1000) : item);
+  }
+  compact.truncated = true;
+  compact.originalBytes = Buffer.byteLength(encoded);
+  const compactEncoded = JSON.stringify(compact);
+  return Buffer.byteLength(compactEncoded) <= MAX_COLLABORATION_EVENT_BYTES
+    ? compact
+    : { truncated: true, originalBytes: Buffer.byteLength(encoded), preview: compactEncoded.slice(0, 48000) };
+}
+
+export function assertCollaborationGraphLimits(tasks = [], { reserve = 0 } = {}) {
+  if (tasks.length + reserve > MAX_COLLABORATION_TASKS) {
+    throw Object.assign(new Error(`Workflow task limit exceeded: ${MAX_COLLABORATION_TASKS}`), { status: 409, code: 'WORKFLOW_TASK_LIMIT' });
+  }
+  const byId = new Map(tasks.map((task) => [String(task.id || task.key || ''), task]));
+  const visiting = new Set();
+  const depths = new Map();
+  const depth = (id) => {
+    if (depths.has(id)) return depths.get(id);
+    if (visiting.has(id)) throw Object.assign(new Error(`Dependency cycle detected at ${id}`), { status: 409, code: 'PLAN_DEPENDENCY_CYCLE' });
+    visiting.add(id);
+    const task = byId.get(id);
+    const dependencies = task?.dependencies || task?.dependsOnKeys || [];
+    const value = dependencies.length ? 1 + Math.max(...dependencies.map((dependencyId) => depth(String(dependencyId)))) : 1;
+    visiting.delete(id);
+    depths.set(id, value);
+    return value;
+  };
+  const maximumDepth = Math.max(0, ...byId.keys().map(depth));
+  if (maximumDepth > MAX_COLLABORATION_DEPENDENCY_DEPTH) {
+    throw Object.assign(new Error(`Workflow dependency depth limit exceeded: ${MAX_COLLABORATION_DEPENDENCY_DEPTH}`), { status: 409, code: 'WORKFLOW_DEPENDENCY_DEPTH_LIMIT' });
+  }
+  return { taskCount: tasks.length + reserve, maximumDepth };
+}
+
 export function normalizeWorkflow(workflow = {}, fallback = {}) {
   const status = workflowStatuses.has(workflow.status) ? workflow.status : 'active';
   const rawControl = workflow.control && typeof workflow.control === 'object' ? workflow.control : {};
@@ -37,12 +95,15 @@ export function normalizeWorkflow(workflow = {}, fallback = {}) {
   return {
     id: String(workflow.id || fallback.id || ''),
     name: String(workflow.name || fallback.name || '协作工作流').slice(0, 120),
-    boardSlug: String(workflow.boardSlug || fallback.boardSlug || 'default'),
+    boardSlug: workflow.nativeOnly === true ? '' : String(workflow.boardSlug || fallback.boardSlug || 'default'),
+    nativeOnly: workflow.nativeOnly === true,
     status,
     coordinatorAgentId: String(workflow.coordinatorAgentId || fallback.coordinatorAgentId || ''),
     fallbackDecisionAgentId: String(workflow.fallbackDecisionAgentId || fallback.fallbackDecisionAgentId || ''),
     rootTaskIds: [...new Set((Array.isArray(workflow.rootTaskIds) ? workflow.rootTaskIds : []).map(String).filter(Boolean))],
     currentRootTaskId: String(workflow.currentRootTaskId || ''),
+    approvedPlanId: String(workflow.approvedPlanId || workflow.plan?.approvedPlanId || ''),
+    approvedPlanRevision: Math.max(0, Math.floor(Number(workflow.approvedPlanRevision || workflow.plan?.approvedPlanRevision || 0))),
     planRevision: Math.max(0, Math.floor(Number(workflow.planRevision || 0))),
     plan: workflow.plan && typeof workflow.plan === 'object' ? workflow.plan : null,
     executionBindings: workflow.executionBindings && typeof workflow.executionBindings === 'object' ? workflow.executionBindings : {},
@@ -54,6 +115,8 @@ export function normalizeWorkflow(workflow = {}, fallback = {}) {
       state: controlState,
       affectedTaskIds: [...new Set((Array.isArray(rawControl.affectedTaskIds) ? rawControl.affectedTaskIds : []).map(String).filter(Boolean))],
       stoppedRuns: Math.max(0, Number(rawControl.stoppedRuns || 0)),
+      pendingRunIds: [...new Set((Array.isArray(rawControl.pendingRunIds) ? rawControl.pendingRunIds : []).map(String).filter(Boolean))],
+      deferredRunIds: [...new Set((Array.isArray(rawControl.deferredRunIds) ? rawControl.deferredRunIds : []).map(String).filter(Boolean))],
       blockedTasks: Math.max(0, Number(rawControl.blockedTasks || 0)),
       preservedWaitingTasks: Math.max(0, Number(rawControl.preservedWaitingTasks || 0)),
       failedTaskIds: [...new Set((Array.isArray(rawControl.failedTaskIds) ? rawControl.failedTaskIds : []).map(String).filter(Boolean))],
@@ -70,10 +133,26 @@ export function normalizeWorkflow(workflow = {}, fallback = {}) {
     cancelledAt: workflow.cancelledAt || null,
     archivedAt: workflow.archivedAt || null,
     finalization: {
-      state: ['idle', 'requested', 'delivered'].includes(workflow.finalization?.state) ? workflow.finalization.state : 'idle',
+      state: ['idle', 'requested', 'running', 'delivered', 'failed'].includes(workflow.finalization?.state) ? workflow.finalization.state : 'idle',
       requestedAt: workflow.finalization?.requestedAt || null,
+      startedAt: workflow.finalization?.startedAt || null,
+      deliveredAt: workflow.finalization?.deliveredAt || null,
+      failedAt: workflow.finalization?.failedAt || null,
       deliveryMessageId: String(workflow.finalization?.deliveryMessageId || ''),
+      runId: String(workflow.finalization?.runId || ''),
+      error: String(workflow.finalization?.error || ''),
     },
+    finalDelivery: workflow.finalDelivery && typeof workflow.finalDelivery === 'object' ? {
+      status: ['pending', 'ready', 'failed'].includes(workflow.finalDelivery.status) ? workflow.finalDelivery.status : 'pending',
+      summary: String(workflow.finalDelivery.summary || ''),
+      content: String(workflow.finalDelivery.content || ''),
+      coordinatorAgentId: String(workflow.finalDelivery.coordinatorAgentId || workflow.coordinatorAgentId || fallback.coordinatorAgentId || ''),
+      sourceTaskIds: [...new Set((Array.isArray(workflow.finalDelivery.sourceTaskIds) ? workflow.finalDelivery.sourceTaskIds : []).map(String).filter(Boolean))],
+      runId: String(workflow.finalDelivery.runId || ''),
+      messageId: String(workflow.finalDelivery.messageId || ''),
+      createdAt: workflow.finalDelivery.createdAt || null,
+      error: String(workflow.finalDelivery.error || ''),
+    } : { status: 'pending', summary: '', content: '', coordinatorAgentId: String(workflow.coordinatorAgentId || fallback.coordinatorAgentId || ''), sourceTaskIds: [], runId: '', messageId: '', createdAt: null, error: '' },
     taskStatusProjection: workflow.taskStatusProjection && typeof workflow.taskStatusProjection === 'object' ? workflow.taskStatusProjection : {},
   };
 }
@@ -138,6 +217,7 @@ export function validateCollaborationPlan(input = {}, { agentIds = [], currentRe
     visited.add(key);
   };
   for (const task of tasks) visit(task.key);
+  assertCollaborationGraphLimits(tasks, { reserve: rootTaskId ? 1 : 0 });
   return {
     rootTaskId: String(input.rootTaskId || rootTaskId || ''),
     baseRevision,
@@ -183,7 +263,7 @@ export function normalizeThreadCollaboration(collaboration = {}, fallback = {}) 
       actorAgentId: String(event.actorAgentId || ''),
       title: String(event.title || '').slice(0, 240),
       detail: String(event.detail || '').slice(0, 2000),
-      payload: event.payload && typeof event.payload === 'object' ? event.payload : {},
+      payload: boundedEventPayload(event.payload),
       createdAt: String(event.createdAt || new Date().toISOString()),
     }));
   const maxCursor = events.reduce((max, event) => Math.max(max, Number(event.cursor || 0)), 0);
@@ -216,7 +296,7 @@ export function appendCollaborationEvent(collaboration, event, createId = () => 
     actorAgentId: String(event.actorAgentId || ''),
     title: String(event.title || '').slice(0, 240),
     detail: String(event.detail || '').slice(0, 2000),
-    payload: event.payload && typeof event.payload === 'object' ? event.payload : {},
+    payload: boundedEventPayload(event.payload),
     createdAt: String(event.createdAt || new Date().toISOString()),
   };
   collaboration.eventCursor = cursor;
@@ -228,13 +308,40 @@ export function collaborationEventsAfter(collaboration, cursor = 0, workflowId =
   return (collaboration.events || []).filter((event) => Number(event.cursor || 0) > Number(cursor || 0) && (!workflowId || event.workflowId === workflowId));
 }
 
+export function runtimeTaskTerminalWriteAllowed(run, task, binding) {
+  if (!run || !task || !['running', 'waiting_input'].includes(task.status) || !binding) return false;
+  const runLease = String(run.metadata?.leaseToken || binding.leaseToken || '');
+  const taskLease = String(task.leaseToken || '');
+  return Boolean(runLease && taskLease && runLease === taskLease && binding.leaseToken === taskLease && binding.runId === run.id && binding.taskId === task.id);
+}
+
+export function collaborationRunStatus(status) {
+  return ({
+    queued: 'queued',
+    starting: 'starting',
+    running: 'running',
+    waiting_approval: 'running',
+    interrupting: 'running',
+    parked: 'parked',
+    completed: 'ended',
+    cancelled: 'aborted',
+    aborted: 'aborted',
+    failed: 'failed',
+  })[String(status || '')] || 'failed';
+}
+
 export function taskStatusEvent(previous, next) {
   if (!next || previous?.status === next.status) return null;
   const eventByStatus = {
     running: 'task.started',
     blocked: 'task.waiting',
-    ready: previous?.status === 'blocked' || previous?.status === 'todo' ? 'task.resumed' : null,
+    waiting_dependency: 'task.waiting',
+    waiting_input: 'task.waiting',
+    ready: ['blocked', 'todo', 'waiting_dependency', 'waiting_input', 'paused'].includes(previous?.status) ? 'task.resumed' : null,
     done: 'task.completed',
+    completed: 'task.completed',
+    review: 'task.review',
+    failed: 'task.failed',
   };
   const type = eventByStatus[next.status] || null;
   if (!type) return null;
@@ -244,5 +351,5 @@ export function taskStatusEvent(previous, next) {
 export function boardLifecycle(tasks = []) {
   const visible = tasks.filter((task) => task.status !== 'archived');
   if (!visible.length) return 'active';
-  return visible.every((task) => task.status === 'done') ? 'completed' : 'active';
+  return visible.every((task) => ['done', 'completed'].includes(task.status)) ? 'completed' : 'active';
 }

@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
-import { classifyProbeResult, probeResponsesCapabilities } from './capability-probe.mjs';
+import { classifyProbeResult, probeAnthropicCapabilities, probeChatCapabilities, probeResponsesCapabilities } from './capability-probe.mjs';
 
 test('probe classifier separates unsupported, authentication and transient failures', () => {
   assert.equal(classifyProbeResult({ ok: false, status: 400, body: { error: { message: 'bad effort' } } }).status, 'unsupported');
@@ -47,4 +47,40 @@ test('Responses discovery stops when the baseline request fails', async () => {
     },
   }), /invalid key/);
   assert.equal(requests, 1);
+});
+
+test('Chat discovery identifies a provider thinking format and service tier', async () => {
+  const requests = [];
+  const result = await probeChatCapabilities({
+    model: { providerKey: 'deepseek', baseUrl: 'https://api.deepseek.com', model: 'deepseek-v4' },
+    modelId: 'deepseek-v4',
+    request: async (overrides) => {
+      requests.push(overrides);
+      if (overrides.service_tier === 'priority') return { ok: true, status: 200 };
+      if (overrides.thinking?.type === 'disabled') return { ok: true, status: 200 };
+      if (overrides.thinking?.type === 'enabled') return { ok: true, status: 200 };
+      return { ok: false, status: 400, body: { error: { message: 'unsupported' } } };
+    },
+  });
+  assert.equal(result.capability.thinkingFormat, 'deepseek');
+  assert.deepEqual(result.capability.reasoningMap, { off: 'none', high: 'high' });
+  assert.equal(result.capability.serviceTiers[0].id, 'priority');
+  assert.equal(requests.length, 3);
+});
+
+test('Anthropic discovery records adaptive effort support and Fast Mode separately', async () => {
+  const requests = [];
+  const result = await probeAnthropicCapabilities({
+    modelId: 'claude-test',
+    request: async (overrides) => {
+      requests.push(overrides);
+      if (overrides.speed === 'fast') return { ok: true, status: 200 };
+      return overrides.output_config?.effort === 'low' || overrides.output_config?.effort === 'medium'
+        ? { ok: true, status: 200 }
+        : { ok: false, status: 400, body: { error: { message: 'unsupported' } } };
+    },
+  });
+  assert.deepEqual(result.capability.reasoningEfforts, ['low', 'medium', 'off']);
+  assert.equal(result.capability.serviceTiers[0].id, 'fast');
+  assert.equal(requests.length, 5);
 });

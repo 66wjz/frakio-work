@@ -41,7 +41,7 @@ await page.route('**/api/hermes-runtime/releases', async (route) => {
 });
 
 try {
-  await page.goto(baseUrl, { waitUntil: 'networkidle' });
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
   await page.waitForTimeout(3000);
   const closeGuide = page.getByRole('button', { name: /(稍后处理|进入工作台)/ });
   await closeGuide.waitFor({ state: 'visible', timeout: 45000 }).catch(() => null);

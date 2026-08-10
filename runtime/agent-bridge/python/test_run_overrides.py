@@ -114,7 +114,7 @@ class RunOverrideTests(unittest.TestCase):
         self.assertFalse(_plan_tool_allowed(prefixed_name, {"method": "POST", "path": "/api/state"}))
         self.assertFalse(_plan_tool_allowed(prefixed_name, {"method": "PATCH", "path": "/api/state"}))
 
-    def test_plan_guard_allows_read_only_browser_tools(self) -> None:
+    def test_plan_guard_allows_browser_research_interactions(self) -> None:
         for tool_name in (
             "browser_navigate",
             "browser_snapshot",
@@ -129,18 +129,28 @@ class RunOverrideTests(unittest.TestCase):
             "browser_type",
             "browser_press",
             "browser_console",
-            "browser_cdp",
         ):
-            self.assertFalse(_plan_tool_allowed(tool_name, {}), tool_name)
+            self.assertTrue(_plan_tool_allowed(tool_name, {"selector": "[aria-label='Search']"}), tool_name)
+        self.assertFalse(_plan_tool_allowed("browser_click", {"selector": "button", "text": "发布"}))
+        self.assertFalse(_plan_tool_allowed("browser_type", {"selector": "input[type=password]", "text": "secret"}))
+        self.assertTrue(_plan_tool_allowed("browser_type", {"selector": "input[type=search]", "text": "how to publish safely"}))
+        self.assertFalse(_plan_tool_allowed("browser_press", {"effect": "persistent_mutation", "key": "Enter"}))
+        self.assertFalse(_plan_tool_allowed("browser_cdp", {}))
 
     def test_plan_terminal_allowlist_rejects_shell_composition_and_git_mutation(self) -> None:
         self.assertTrue(_safe_plan_terminal_command("pwd"))
+        self.assertTrue(_safe_plan_terminal_command("rg -n planMode apps/api/server.mjs"))
+        self.assertTrue(_safe_plan_terminal_command("node --check apps/api/server.mjs"))
+        self.assertTrue(_safe_plan_terminal_command("find apps -name '*.mjs'"))
         self.assertTrue(_safe_plan_terminal_command("git status --short"))
         self.assertTrue(_safe_plan_terminal_command("git diff -- apps/api/server.mjs"))
         self.assertTrue(_safe_plan_terminal_command("git branch --show-current"))
         self.assertFalse(_safe_plan_terminal_command("git status | tee status.txt"))
         self.assertFalse(_safe_plan_terminal_command("git diff --output=changes.patch"))
         self.assertFalse(_safe_plan_terminal_command("git checkout -- apps/api/server.mjs"))
+        self.assertFalse(_safe_plan_terminal_command("find apps -name '*.tmp' -delete"))
+        self.assertFalse(_safe_plan_terminal_command("find apps -exec touch marker {} ;"))
+        self.assertFalse(_safe_plan_terminal_command("node --check --require ./hook.mjs apps/api/server.mjs"))
         self.assertFalse(_safe_plan_terminal_command("python -c 'print(1)'"))
 
 

@@ -157,7 +157,7 @@ test('Responses v2 bridge rejects orphaned tool results', async () => {
   assert.throws(() => transformBridgeRequest({ input: [{ type: 'function_call_output', call_id: 'missing', output: 'x' }] }, { harnessApiMode: 'openai_responses', upstreamApiMode: 'chat_completions', bridgeId: 'responses-chat-v2', modelId: 'test' }), /工具结果缺少相邻/);
 });
 
-test('Responses v2 bridge preserves a complete multi-tool round trip and disables unsupported thinking', async () => {
+test('Responses v2 bridge preserves a complete multi-tool round trip in one assistant message', async () => {
   const { transformBridgeRequest } = await import('./protocol-bridge.mjs');
   const transformed = transformBridgeRequest({
     reasoning: { effort: 'high' },
@@ -169,14 +169,84 @@ test('Responses v2 bridge preserves a complete multi-tool round trip and disable
       { type: 'function_call_output', call_id: 'call-b', output: 'B' },
       { role: 'user', content: [{ type: 'input_text', text: 'Summarize.' }] },
     ],
-  }, { harnessApiMode: 'openai_responses', upstreamApiMode: 'chat_completions', bridgeId: 'responses-chat-v2', modelId: 'test' });
+  }, { harnessApiMode: 'openai_responses', upstreamApiMode: 'chat_completions', bridgeId: 'responses-chat-v2', modelId: 'deepseek-test', toolCallReasoningPlaceholder: true });
 
-  assert.deepEqual(transformed.messages.map((message) => message.role), ['user', 'assistant', 'assistant', 'tool', 'tool', 'user']);
+  assert.deepEqual(transformed.messages.map((message) => message.role), ['user', 'assistant', 'tool', 'tool', 'user']);
   assert.equal(transformed.messages[1].tool_calls[0].id, 'call-a');
-  assert.equal(transformed.messages[2].tool_calls[0].id, 'call-b');
-  assert.equal(transformed.messages[3].tool_call_id, 'call-a');
-  assert.equal(transformed.messages[4].tool_call_id, 'call-b');
+  assert.equal(transformed.messages[1].tool_calls[1].id, 'call-b');
+  assert.equal(transformed.messages[1].reasoning_content, 'tool_call');
+  assert.equal(transformed.messages[2].tool_call_id, 'call-a');
+  assert.equal(transformed.messages[3].tool_call_id, 'call-b');
   assert.equal('reasoning_effort' in transformed, false);
+});
+
+test('Responses to Anthropic bridge preserves multi-tool history', async () => {
+  const { transformBridgeRequest } = await import('./protocol-bridge.mjs');
+  const transformed = transformBridgeRequest({
+    instructions: 'Use tools carefully.',
+    input: [
+      { role: 'user', content: [{ type: 'input_text', text: 'Inspect both files.' }] },
+      { type: 'function_call', call_id: 'call-a', name: 'read_file', arguments: '{"path":"a.txt"}' },
+      { type: 'function_call', call_id: 'call-b', name: 'read_file', arguments: '{"path":"b.txt"}' },
+      { type: 'function_call_output', call_id: 'call-a', output: 'A' },
+      { type: 'function_call_output', call_id: 'call-b', output: 'B' },
+      { role: 'user', content: [{ type: 'input_text', text: 'Summarize.' }] },
+    ],
+  }, { harnessApiMode: 'openai_responses', upstreamApiMode: 'anthropic_messages', modelId: 'claude-test' });
+
+  assert.equal(transformed.system, 'Use tools carefully.');
+  assert.deepEqual(transformed.messages.map((message) => message.role), ['user', 'assistant', 'user']);
+  assert.deepEqual(transformed.messages[1].content.map((block) => block.type), ['tool_use', 'tool_use']);
+  assert.deepEqual(transformed.messages[2].content.map((block) => block.type), ['tool_result', 'tool_result', 'text']);
+  assert.equal(transformed.messages[2].content[0].tool_use_id, 'call-a');
+  assert.equal(transformed.messages[2].content[1].tool_use_id, 'call-b');
+});
+
+test('Anthropic to Responses bridge preserves multi-tool history', async () => {
+  const { transformBridgeRequest } = await import('./protocol-bridge.mjs');
+  const transformed = transformBridgeRequest({
+    system: 'Use tools carefully.',
+    messages: [
+      { role: 'user', content: 'Inspect both files.' },
+      { role: 'assistant', content: [
+        { type: 'tool_use', id: 'call-a', name: 'read_file', input: { path: 'a.txt' } },
+        { type: 'tool_use', id: 'call-b', name: 'read_file', input: { path: 'b.txt' } },
+      ] },
+      { role: 'user', content: [
+        { type: 'tool_result', tool_use_id: 'call-a', content: 'A' },
+        { type: 'tool_result', tool_use_id: 'call-b', content: 'B' },
+        { type: 'text', text: 'Summarize.' },
+      ] },
+    ],
+  }, { harnessApiMode: 'anthropic_messages', upstreamApiMode: 'openai_responses', modelId: 'gpt-test' });
+
+  assert.equal(transformed.instructions, 'Use tools carefully.');
+  assert.deepEqual(transformed.input.map((item) => item.type || item.role), ['user', 'function_call', 'function_call', 'function_call_output', 'function_call_output', 'user']);
+  assert.equal(transformed.input[1].call_id, 'call-a');
+  assert.equal(transformed.input[2].call_id, 'call-b');
+  assert.equal(transformed.input[3].call_id, 'call-a');
+  assert.equal(transformed.input[4].call_id, 'call-b');
+});
+
+test('protocol bridges reject tool-call history without every result', async () => {
+  const { transformBridgeRequest } = await import('./protocol-bridge.mjs');
+  assert.throws(() => transformBridgeRequest({
+    messages: [
+      { role: 'assistant', content: [{ type: 'tool_use', id: 'call-a', name: 'read_file', input: {} }] },
+    ],
+  }, { harnessApiMode: 'anthropic_messages', upstreamApiMode: 'openai_responses', modelId: 'gpt-test' }), /缺少完整/);
+});
+
+test('direct Anthropic routes preserve native thinking configuration', async () => {
+  const { transformBridgeRequest } = await import('./protocol-bridge.mjs');
+  const transformed = transformBridgeRequest({
+    model: 'override',
+    thinking: { type: 'enabled', budget_tokens: 2048 },
+    messages: [{ role: 'user', content: 'Hello' }],
+  }, { harnessApiMode: 'anthropic_messages', upstreamApiMode: 'anthropic_messages', modelId: 'claude-test', requestOverrides: { output_config: { effort: 'high' } } });
+  assert.deepEqual(transformed.thinking, { type: 'enabled', budget_tokens: 2048 });
+  assert.equal(transformed.model, 'claude-test');
+  assert.deepEqual(transformed.output_config, { effort: 'high' });
 });
 
 test('Runtime Model Gateway bridges Claude Messages requests and Responses streams with tools', async (t) => {

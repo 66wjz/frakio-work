@@ -105,6 +105,38 @@ test('Host interruption is durable before a native Run ID exists and terminal st
   assert.equal(store.eventsAfter(hosted.run.id).filter((event) => ['run.completed', 'run.failed', 'run.cancelled'].includes(event.type)).length, 1);
 });
 
+test('Host interruption waits for the real terminal event when cancellation is unsupported', async (t) => {
+  const { store } = await storeFixture('frakio-host-interrupt-unsupported-');
+  t.after(() => store.close());
+  let cancelled = 0;
+  const adapter = { cancel: async () => { cancelled += 1; } };
+  const registry = {
+    get: () => ({ id: 'example', capabilities: { cancellation: false } }),
+    detect: async () => ({ status: 'ready', installed: true, version: '1.0.0', checkedAt: new Date().toISOString() }),
+  };
+  const platform = createRuntimePlatform({
+    store, registry, adapters: new Map([['example', adapter]]),
+    contextFactory: async () => ({ memory: [], handoff: { recentConversation: [] } }), skillResolver: async () => ({}),
+  });
+  const controller = createRuntimeHostController({ platform, store });
+  const hosted = await controller.begin({
+    state: { features: {} }, threadId: 'thread-stop-unsupported', thread: { id: 'thread-stop-unsupported' },
+    agent: { id: 'agent-stop', runtimePolicy: {} }, runtimeId: 'example', workspace: null,
+    profileSnapshot: { revision: 'profile-stop' }, message: 'hello', permissionMode: 'smart',
+    modelRoute: { routeRevision: 'route-stop', providerCredentialRevision: 'credential-stop', modelId: 'model-stop' },
+  }, { turnId: 'turn-stop', modelId: 'model-stop' });
+  const interrupted = await controller.interrupt(hosted.run.id, { timeoutMs: 25 });
+  assert.equal(interrupted.status, 'interrupting');
+  assert.equal(interrupted.metadata.cancellationDeferred, true);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(store.getRun(hosted.run.id).status, 'interrupting');
+  assert.equal(cancelled, 0);
+  const event = store.eventsAfter(hosted.run.id).find((item) => item.type === 'run.interrupting');
+  assert.equal(event.payload.deferred, true);
+  controller.finish(hosted.run.id, 'completed', { nativeTerminal: true });
+  assert.equal(store.getRun(hosted.run.id).status, 'completed');
+});
+
 test('Execution Realm changes when Provider credentials or Runtime Build changes', () => {
   const input = { runtimeId: 'codex', runtimeBinding: { runtimeBuildId: 'build-a' }, modelRoute: { providerId: 'provider-a', credentialRevision: 'credential-a' }, agentId: 'agent-a', skillSetRevision: 'skills-a', runtimeConfigRevision: 'config-a' };
   const first = createRuntimeExecutionRealm(input);
@@ -124,6 +156,49 @@ test('Execution Realm changes when protocol bridge or capability path changes', 
   const capabilityChanged = createRuntimeExecutionRealm({ ...input, modelRoute: { ...input.modelRoute, capabilities: { tools: 'unsupported' } } });
   assert.notEqual(first.revision, bridgeChanged.revision);
   assert.notEqual(first.revision, capabilityChanged.revision);
+});
+
+test('a model route change opens a fresh native session in the same Harness', async (t) => {
+  const { store } = await storeFixture('frakio-runtime-model-route-change-');
+  t.after(() => store.close());
+  const skillSetRevision = resolveSkillSet().revision;
+  const oldRoute = { providerId: 'provider-a', credentialRevision: 'credential-a', routeRevision: 'route-old', harnessApiMode: 'openai_responses', upstreamApiMode: 'chat_completions' };
+  const oldRealm = createRuntimeExecutionRealm({ runtimeId: 'codex', modelRoute: oldRoute, agentId: 'iris', skillSetRevision });
+  store.upsertSession({
+    runtimeId: 'codex', threadId: 'thread-model-change', agentId: 'iris', workspaceId: 'workspace-1', laneType: 'chat', laneId: 'thread-model-change',
+    nativeSessionId: 'old-native', profileRevision: 'profile-1', executionRealmRevision: oldRealm.revision, modelRouteRevision: oldRoute.routeRevision,
+    metadata: { executionRealm: oldRealm, modelRoute: oldRoute },
+  });
+  let disposed = false;
+  const adapter = { async disposeSession() { disposed = true; } };
+  const registry = {
+    get() { return { id: 'codex', capabilities: { tools: true, approvals: true } }; },
+    async detect() { return { installed: true, status: 'ready', checkedAt: new Date().toISOString() }; },
+  };
+  const platform = createRuntimePlatform({
+    store, registry, adapters: new Map([['codex', adapter]]),
+    contextFactory: async () => ({ memory: [], handoff: { recentConversation: [] } }),
+    skillResolver: async () => ({}),
+  });
+  const prepared = await platform.prepare({
+    runtimeId: 'codex', threadId: 'thread-model-change', agent: { id: 'iris', runtimePolicy: {} }, workspace: { id: 'workspace-1' },
+    profileSnapshot: { revision: 'profile-1' }, permissionMode: 'smart',
+    modelRoute: { ...oldRoute, routeRevision: 'route-new' },
+  });
+  assert.equal(disposed, true);
+  assert.equal(prepared.session.nativeSessionId, '');
+  assert.equal(prepared.session.checkpoint.reason, 'execution_realm_changed');
+  assert.notEqual(prepared.executionRealm.revision, oldRealm.revision);
+});
+
+test('switching Harness creates an independent session lane for the same Agent', async (t) => {
+  const { store } = await storeFixture('frakio-runtime-harness-switch-');
+  t.after(() => store.close());
+  const codex = store.upsertSession({ runtimeId: 'codex', threadId: 'thread-switch', agentId: 'iris', workspaceId: 'workspace-1', laneType: 'chat', laneId: 'thread-switch', nativeSessionId: 'codex-native' });
+  const claude = store.upsertSession({ runtimeId: 'claude', threadId: 'thread-switch', agentId: 'iris', workspaceId: 'workspace-1', laneType: 'chat', laneId: 'thread-switch', nativeSessionId: 'claude-native' });
+  assert.notEqual(codex.id, claude.id);
+  assert.equal(store.findSession({ runtimeId: 'codex', threadId: 'thread-switch', agentId: 'iris', workspaceId: 'workspace-1', laneType: 'chat', laneId: 'thread-switch' }).nativeSessionId, 'codex-native');
+  assert.equal(store.findSession({ runtimeId: 'claude', threadId: 'thread-switch', agentId: 'iris', workspaceId: 'workspace-1', laneType: 'chat', laneId: 'thread-switch' }).nativeSessionId, 'claude-native');
 });
 
 test('Context Delta only projects sources added after the applied watermark', () => {
@@ -206,6 +281,11 @@ test('Permission Broker preserves product semantics and hard boundaries', () => 
   assert.equal(decideToolIntent(command, permissionPolicySnapshot({ mode: 'off' })).decision, 'allow');
   assert.equal(decideToolIntent({ category: 'payment', action: 'pay' }, permissionPolicySnapshot({ mode: 'off' })).decision, 'ask');
   assert.equal(decideToolIntent(command, permissionPolicySnapshot({ mode: 'off', planMode: true })).decision, 'deny');
+  const webRead = { category: 'network', action: 'web_search', networked: true, effect: 'observe' };
+  const browserInput = { category: 'network', action: 'browser_type', networked: true, effect: 'research_interaction' };
+  assert.equal(decideToolIntent(webRead, permissionPolicySnapshot({ mode: 'manual', planMode: true })).decision, 'allow');
+  assert.equal(decideToolIntent(browserInput, permissionPolicySnapshot({ mode: 'manual', planMode: true })).decision, 'allow');
+  assert.equal(decideToolIntent({ category: 'publish', action: 'send', effect: 'persistent_mutation' }, permissionPolicySnapshot({ mode: 'off', planMode: true })).decision, 'deny');
 });
 
 test('Event Journal storage deduplicates retried native events', async (t) => {
@@ -398,7 +478,7 @@ test('schema v4 sessions migrate idempotently into chat lanes', async () => {
   legacy.close();
 
   const migrated = createRuntimeStore(file);
-  assert.equal(migrated.schemaVersion, 15);
+  assert.equal(migrated.schemaVersion, 19);
   assert.ok(migrated.migrationBackupPath);
   await access(migrated.migrationBackupPath);
   assert.equal(migrated.getSession('legacy-session').laneType, 'chat');
@@ -408,5 +488,33 @@ test('schema v4 sessions migrate idempotently into chat lanes', async () => {
 
   const reopened = createRuntimeStore(file);
   assert.equal(reopened.listSessions().length, 1);
+  reopened.close();
+});
+
+test('schema v17 Work Task states migrate to the collaboration contract', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'frakio-work-task-status-migration-'));
+  const file = path.join(root, 'frakio.db');
+  const initial = createRuntimeStore(file);
+  const planned = initial.upsertWorkTask({ workflowId: 'workflow-legacy', title: 'Planned', status: 'pending_confirmation', idempotencyKey: 'planned' });
+  const blocked = initial.upsertWorkTask({ workflowId: 'workflow-legacy', title: 'Blocked', status: 'waiting_dependency', idempotencyKey: 'blocked' });
+  initial.close();
+
+  const legacy = new DatabaseSync(file);
+  legacy.prepare("UPDATE schema_meta SET value='17' WHERE key='schema_version'").run();
+  legacy.prepare("UPDATE work_tasks SET status='planned' WHERE id=?").run(planned.id);
+  legacy.prepare("UPDATE work_tasks SET status='blocked' WHERE id=?").run(blocked.id);
+  legacy.close();
+
+  const migrated = createRuntimeStore(file);
+  assert.equal(migrated.schemaVersion, 19);
+  assert.equal(migrated.getWorkTask(planned.id).status, 'pending_confirmation');
+  assert.equal(migrated.getWorkTask(blocked.id).status, 'waiting_dependency');
+  assert.ok(migrated.migrationBackupPath);
+  await access(migrated.migrationBackupPath);
+  assert.throws(() => migrated.upsertWorkTask({ workflowId: 'workflow-legacy', title: 'Invalid', status: 'unknown', idempotencyKey: 'invalid' }), { code: 'WORK_TASK_STATUS_INVALID' });
+  migrated.close();
+
+  const reopened = createRuntimeStore(file);
+  assert.equal(reopened.getWorkTask(blocked.id).status, 'waiting_dependency');
   reopened.close();
 });
