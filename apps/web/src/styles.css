@@ -18284,3 +18284,282 @@ body.resizing-columns .desktop-shell .resize-handle.right {
 .message-agent-config-picker {
   display: block;
 }
+
+/* ==========================================================================
+   wjz修改开始，修改原因：补充规范化通用基础组件样式与设计 Token，修改时间：2026-08-18。
+   ========================================================================== */
+
+/* Button Primitives */
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 8px;
+  font-weight: 500;
+  border-radius: 8px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  transition: all 0.15s ease;
+  user-select: none;
+  font-family: inherit;
+  line-height: 1.4;
+  white-space: nowrap;
+}
+.btn:focus-visible {
+  outline: 2px solid var(--mac-accent, #2f7d67);
+  outline-offset: 2px;
+}
+.btn:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.btn-sm { height: 28px; padding: 0 10px; font-size: 12px; }
+.btn-md { height: 36px; padding: 0 14px; font-size: 13px; }
+.btn-lg { height: 42px; padding: 0 18px; font-size: 14px; }
+
+.btn-primary {
+  background: var(--mac-accent, #2f7d67);
+  color: #fff;
+  border-color: transparent;
+}
+.btn-primary:hover:not(:disabled) {
+  opacity: 0.92;
+}
+.btn-secondary {
+  background: var(--mac-surface, #fff);
+  color: var(--mac-text, #20201f);
+  border-color: var(--mac-border, #e5e5e5);
+}
+.btn-secondary:hover:not(:disabled) {
+  background: var(--mac-control-hover, rgba(0, 0, 0, 0.04));
+}
+.btn-outline {
+  background: transparent;
+  color: var(--mac-text, #20201f);
+  border-color: var(--mac-border, #d1d5db);
+}
+.btn-outline:hover:not(:disabled) {
+  background: var(--mac-control-hover, rgba(0, 0, 0, 0.04));
+}
+.btn-ghost {
+  background: transparent;
+  color: var(--mac-text, #20201f);
+  border-color: transparent;
+}
+.btn-ghost:hover:not(:disabled) {
+  background: var(--mac-control-hover, rgba(0, 0, 0, 0.04));
+}
+.btn-danger {
+  background: #ef4444;
+  color: #fff;
+  border-color: transparent;
+}
+.btn-danger:hover:not(:disabled) {
+  background: #dc2626;
+}
+
+/* Form Fields & Inputs */
+.form-field-group {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 100%;
+}
+.form-field-label {
+  font-size: 12px;
+  font-weight: 500;
+  color: var(--mac-text-secondary, #6b7280);
+}
+.form-field-error {
+  font-size: 11px;
+  color: #ef4444;
+  margin: 0;
+}
+.form-field-helper {
+  font-size: 11px;
+  color: var(--mac-text-muted, #9ca3af);
+  margin: 0;
+}
+.input-wrapper, .select-wrapper {
+  position: relative;
+  display: flex;
+  align-items: center;
+  width: 100%;
+}
+.input-control, .select-control {
+  width: 100%;
+  height: 36px;
+  padding: 0 12px;
+  font-size: 13px;
+  font-family: inherit;
+  border: 1px solid var(--mac-border, #e5e5e5);
+  border-radius: 8px;
+  background: var(--mac-input-bg, #fff);
+  color: var(--mac-text, #20201f);
+  transition: border-color 0.15s ease, box-shadow 0.15s ease;
+  outline: none;
+}
+.input-control:focus, .select-control:focus {
+  border-color: var(--mac-accent, #2f7d67);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--mac-accent, #2f7d67) 20%, transparent);
+}
+.input-wrapper.has-left-icon .input-control { padding-left: 36px; }
+.input-wrapper.has-right-icon .input-control { padding-right: 36px; }
+.input-icon {
+  position: absolute;
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  align-items: center;
+  color: var(--mac-text-muted, #9ca3af);
+  pointer-events: none;
+}
+.input-icon-left { left: 10px; }
+.input-icon-right { right: 10px; }
+.select-wrapper .select-control {
+  appearance: none;
+  padding-right: 32px;
+  cursor: pointer;
+}
+.select-chevron {
+  position: absolute;
+  right: 10px;
+  top: 50%;
+  transform: translateY(-50%);
+  pointer-events: none;
+  color: var(--mac-text-muted, #9ca3af);
+}
+
+/* Badge Primitives */
+.badge {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-weight: 500;
+  border-radius: 9999px;
+  white-space: nowrap;
+}
+.badge-sm { height: 18px; padding: 0 6px; font-size: 11px; }
+.badge-md { height: 22px; padding: 0 8px; font-size: 12px; }
+.badge-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+}
+.badge-neutral { background: var(--mac-control-hover, #f3f4f6); color: var(--mac-text, #4b5563); }
+.badge-primary { background: color-mix(in srgb, var(--mac-accent, #2f7d67) 12%, transparent); color: var(--mac-accent, #2f7d67); }
+.badge-success { background: #dcfce7; color: #15803d; }
+.badge-warning { background: #fef3c7; color: #b45309; }
+.badge-error { background: #fee2e2; color: #b91c1c; }
+.badge-info { background: #e0f2fe; color: #0369a1; }
+
+/* Card Primitives */
+.card-container {
+  border-radius: 12px;
+  background: var(--mac-surface, #fff);
+  border: 1px solid var(--mac-border, #e5e5e5);
+  padding: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.card-elevated {
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.05), 0 2px 4px -2px rgba(0, 0, 0, 0.05);
+}
+.card-muted {
+  background: var(--mac-bg-subtle, #f9fafb);
+}
+.card-title {
+  font-size: 15px;
+  font-weight: 600;
+  margin: 0;
+  color: var(--mac-text, #111827);
+}
+.card-description {
+  font-size: 12px;
+  color: var(--mac-text-secondary, #6b7280);
+  margin: 0;
+}
+
+/* Modal Dialog */
+.modal-dialog-content {
+  background: var(--mac-surface, #fff);
+  border: 1px solid var(--mac-border, #e5e5e5);
+  border-radius: 16px;
+  box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1), 0 8px 10px -6px rgba(0, 0, 0, 0.1);
+  padding: 20px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  max-height: 85vh;
+  overflow-y: auto;
+}
+.modal-sm { width: min(400px, 90vw); }
+.modal-md { width: min(540px, 90vw); }
+.modal-lg { width: min(720px, 90vw); }
+.modal-xl { width: min(960px, 90vw); }
+.modal-dialog-header {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+.modal-dialog-title {
+  font-size: 16px;
+  font-weight: 600;
+  margin: 0;
+}
+.modal-dialog-description {
+  font-size: 13px;
+  color: var(--mac-text-secondary, #6b7280);
+  margin: 0;
+}
+.modal-dialog-close-btn {
+  position: absolute;
+  right: 0;
+  top: 0;
+  padding: 4px;
+  border-radius: 6px;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  color: var(--mac-text-muted, #9ca3af);
+}
+.modal-dialog-close-btn:hover {
+  background: var(--mac-control-hover, rgba(0, 0, 0, 0.05));
+  color: var(--mac-text, #111827);
+}
+.modal-dialog-footer {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  padding-top: 12px;
+  border-top: 1px solid var(--mac-border, #e5e5e5);
+}
+
+/* Tooltip */
+.tooltip-container {
+  position: relative;
+  display: inline-flex;
+}
+.tooltip-bubble {
+  position: absolute;
+  z-index: 9999;
+  padding: 4px 8px;
+  background: #1f2937;
+  color: #fff;
+  font-size: 11px;
+  border-radius: 4px;
+  white-space: nowrap;
+  pointer-events: none;
+  box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.1);
+}
+.tooltip-top { bottom: 100%; left: 50%; transform: translateX(-50%) translateY(-4px); }
+.tooltip-bottom { top: 100%; left: 50%; transform: translateX(-50%) translateY(4px); }
+.tooltip-left { right: 100%; top: 50%; transform: translateY(-50%) translateX(-4px); }
+.tooltip-right { left: 100%; top: 50%; transform: translateY(-50%) translateX(4px); }
+
+/* wjz修改结束。 */
+

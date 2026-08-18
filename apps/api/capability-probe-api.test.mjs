@@ -36,7 +36,7 @@ test('capability verification discovers an exact custom Responses route', async 
   const parent = await mkdtemp(path.join(os.tmpdir(), 'frakio-capability-api-'));
   const home = path.join(parent, '.frakio-work');
   await mkdir(path.join(home, 'data'), { recursive: true });
-  t.after(() => rm(parent, { recursive: true, force: true }));
+  t.after(() => rm(parent, { recursive: true, force: true }).catch(() => {}));
   await writeFile(path.join(home, 'data', 'workbench-state.json'), `${JSON.stringify({
     models: [{
       id: 'model-relay', name: 'Relay', provider: 'Custom', providerKey: 'custom:relay', kind: 'relay',

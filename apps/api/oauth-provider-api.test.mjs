@@ -52,7 +52,7 @@ test('OAuth presets hide models before auth and Codex loads its account catalog 
   const hermesHome = path.join(parent, '.hermes');
   await mkdir(path.join(home, 'data'), { recursive: true });
   await mkdir(hermesHome, { recursive: true });
-  t.after(() => rm(parent, { recursive: true, force: true }));
+  t.after(() => rm(parent, { recursive: true, force: true }).catch(() => {}));
   await writeFile(path.join(home, 'data', 'workbench-state.json'), `${JSON.stringify({
     models: [{
       id: 'model-codex', name: 'OpenAI Codex', provider: 'OpenAI Codex', providerKey: 'openai-codex', kind: 'official',

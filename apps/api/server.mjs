@@ -99,6 +99,14 @@ import { createMemoryLedger } from './memory/ledger.mjs';
 import { createMemoryService } from './memory/service.mjs';
 import { classifyMemoryCandidate, memorySourceHash, routeMemoryCandidate } from './memory/router.mjs';
 import { memoryReviewPrompt, parseMemoryReviewOutput, reviewCandidateDecision, stripUntrustedMemoryText } from './memory/reviewer.mjs';
+import { createAuthAndSystemRouter } from './routes/auth-and-system.mjs';
+import { createFilesystemAndAttachmentsRouter } from './routes/filesystem-and-attachments.mjs';
+import { createUserAndProfilesRouter } from './routes/user-and-profiles.mjs';
+import { createModelsAndProvidersRouter } from './routes/models-and-providers.mjs';
+import { createWorkspacesAndVaultsRouter } from './routes/workspaces-and-vaults.mjs';
+import { createThreadsAndChatRouter } from './routes/threads-and-chat.mjs';
+import { createAgentsRouter } from './routes/agents.mjs';
+import { createCollaborationAndKanbanRouter } from './routes/collaboration-and-kanban.mjs';
 
 const app = express();
 const port = Number(process.env.PORT || 8787);
@@ -457,6 +465,9 @@ const providerEnvMap = {
   gemini: { apiKey: 'GEMINI_API_KEY', baseUrl: 'GEMINI_BASE_URL' },
   moonshot: { apiKey: 'MOONSHOT_API_KEY', baseUrl: 'MOONSHOT_BASE_URL' },
   siliconflow: { apiKey: 'SILICONFLOW_API_KEY', baseUrl: 'SILICONFLOW_BASE_URL' },
+  'kimi-coding': { apiKey: 'KIMI_API_KEY', baseUrl: 'KIMI_BASE_URL' },
+  zai: { apiKey: 'ZAI_API_KEY', baseUrl: 'ZAI_BASE_URL' },
+  glm: { apiKey: 'GLM_API_KEY', baseUrl: 'GLM_BASE_URL' },
   'openai-codex': { apiKey: 'OPENAI_API_KEY', baseUrl: 'OPENAI_BASE_URL' },
 };
 const hermesPlatformEnvMap = {
@@ -641,84 +652,31 @@ const managedWebAuth = createManagedWebAuth({
 });
 app.use(cors(localSecurity.corsOptions));
 app.use(express.json({ limit: '10mb' }));
-// Runtime Harnesses authenticate with their short-lived Realm token. They do
-// not have access to the renderer's HttpOnly desktop session cookie.
-app.post('/api/runtime-model-gateway/:token/v1/:operation', (req, res) => runtimeModelGateway.handle(req, res));
-app.get('/api/auth/status', managedWebAuth.statusRoute);
-app.post('/api/auth/login', managedWebAuth.loginRoute);
-app.post('/api/auth/desktop-session', managedWebAuth.desktopSessionRoute);
-app.use('/api', managedWebAuth.protect);
-app.get('/api/session', localSecurity.sessionRoute);
-app.use('/api', localSecurity.protect);
-app.post('/api/auth/logout', managedWebAuth.logoutRoute);
-app.put('/api/auth/password', (req, res) => void managedWebAuth.passwordRoute(req, res));
+// wjz修改开始，修改原因：将认证、安全会话与附件/文件系统路由抽离至独立 Express Router，修改时间：2026-08-18。
+app.use(
+  '/api',
+  createAuthAndSystemRouter({
+    managedWebAuth,
+    localSecurity,
+    runtimeModelGateway,
+    readFrakioPackageVersion,
+    port,
+    isManagedWebMode,
+    isDesktopMode,
+  }),
+);
 
-app.post('/api/attachments', express.raw({ type: () => true, limit: MAX_ATTACHMENT_BYTES }), async (req, res) => {
-  try {
-    const attachment = await attachmentStore.save({
-      name: String(req.query.name || ''),
-      mimeType: String(req.headers['content-type'] || ''),
-      data: req.body,
-    });
-    res.status(201).json({ attachment });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: String(error?.message || error), code: error.code || '' });
-  }
-});
-
-app.get('/api/attachments/:id/content', async (req, res) => {
-  try {
-    const { metadata, filePath, inline } = await attachmentStore.content(req.params.id);
-    res.type(metadata.mimeType || 'application/octet-stream');
-    res.setHeader('Content-Length', String(metadata.size));
-    res.setHeader('Content-Disposition', `${inline ? 'inline' : 'attachment'}; filename*=UTF-8''${encodeURIComponent(metadata.name)}`);
-    await pipeline(createReadStream(filePath), res);
-  } catch (error) {
-    if (res.headersSent) {
-      res.destroy(error);
-      return;
-    }
-    res.status(error.status || 500).json({ error: String(error?.message || error), code: error.code || '' });
-  }
-});
-
-app.delete('/api/attachments/:id', async (req, res) => {
-  try {
-    await attachmentStore.removeDraft(req.params.id);
-    res.json({ ok: true, deletedAttachmentId: req.params.id });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: String(error?.message || error), code: error.code || '' });
-  }
-});
-
-app.get('/api/filesystem/directories', async (req, res) => {
-  try {
-    const requested = String(req.query.path || serverDirectoryRoot).trim() || serverDirectoryRoot;
-    const current = resolveInsideRoot(serverDirectoryRoot, requested);
-    const info = await stat(current);
-    if (!info.isDirectory()) return res.status(400).json({ error: '目标路径不是文件夹。' });
-    const entries = (await readdir(current, { withFileTypes: true }))
-      .filter((entry) => entry.isDirectory() && !entry.name.startsWith('.'))
-      .map((entry) => ({ name: entry.name, path: path.join(current, entry.name) }))
-      .sort((a, b) => a.name.localeCompare(b.name, 'zh-CN'));
-    const parentCandidate = path.dirname(current);
-    res.json({
-      root: serverDirectoryRoot,
-      current,
-      parent: current === serverDirectoryRoot ? '' : resolveInsideRoot(serverDirectoryRoot, parentCandidate),
-      entries,
-    });
-  } catch (error) {
-    res.status(error.status || 400).json({ error: error.message || '无法读取文件夹。' });
-  }
-});
-
-app.use('/api/attachments', (error, _req, res, next) => {
-  if (error?.status === 413 || error?.type === 'entity.too.large') {
-    return res.status(413).json({ error: '单个附件不能超过 32 MiB。', code: 'attachment_too_large' });
-  }
-  return next(error);
-});
+app.use(
+  '/api',
+  createFilesystemAndAttachmentsRouter({
+    attachmentStore,
+    serverDirectoryRoot,
+    readState,
+    attachmentRoot,
+    frakioWorkHome,
+  }),
+);
+// wjz修改结束。
 
 const legacyDemoAgents = [
   { id: 'iris', name: 'Iris', role: '书记官 / 默认入口', model: 'Hermes default', color: '#2563eb', soul: '冷静、细致，负责把混乱需求变成可执行 brief。', scope: '理解意图、整理 brief、记录结论、维护上下文。', source: 'demo' },
@@ -10051,252 +10009,8 @@ async function updateHermesProfileSkillState(profileName, skillName, enabled) {
   return { profileName, skillName: cleanName, enabled };
 }
 
-app.get('/api/hermes-profiles/:profileName/avatar', async (req, res) => {
-  const dir = await profileDirForName(req.params.profileName);
-  if (!dir) return res.status(404).send('Profile not found');
-  const assetsDir = path.join(dir, 'assets');
-  try {
-    const entries = await readdir(assetsDir, { withFileTypes: true });
-    const avatar = entries.find((entry) => entry.isFile() && /^avatar\.(png|jpe?g|webp|gif)$/i.test(entry.name));
-    if (!avatar) return res.status(404).send('Avatar not found');
-    const avatarPath = path.join(assetsDir, avatar.name);
-    const ext = path.extname(avatar.name).toLowerCase();
-    const contentType = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : ext === '.gif' ? 'image/gif' : 'image/jpeg';
-    res.type(contentType).send(await readFile(avatarPath));
-  } catch {
-    res.status(404).send('Avatar not found');
-  }
-});
+// user-profile, hermes-profiles, hermes-modules 等路由已解耦至 routes/user-and-profiles.mjs
 
-app.get('/api/user-profile/avatar', async (_req, res) => {
-  try {
-    const assetsDir = path.join(hermesWorkbenchRuntimeHome, 'assets');
-    const entries = await readdir(assetsDir, { withFileTypes: true }).catch(() => []);
-    const avatar = entries.find((entry) => entry.isFile() && /^user-avatar\.(png|jpe?g|webp|gif)$/i.test(entry.name));
-    if (!avatar) return res.status(404).send('Avatar not found');
-    const avatarPath = path.join(assetsDir, avatar.name);
-    const ext = path.extname(avatar.name).toLowerCase();
-    const contentType = ext === '.png' ? 'image/png' : ext === '.webp' ? 'image/webp' : ext === '.gif' ? 'image/gif' : 'image/jpeg';
-    res.type(contentType).send(await readFile(avatarPath));
-  } catch {
-    res.status(404).send('Avatar not found');
-  }
-});
-
-app.get('/api/user-profile', async (_req, res) => {
-  const state = await readState();
-  res.json({ userProfile: state.userProfile || normalizeUserProfile() });
-});
-
-app.post('/api/user-profile/avatar', async (req, res) => {
-  try {
-    const mime = String(req.body?.mimeType || '');
-    const data = String(req.body?.data || '');
-    const match = data.match(/^data:([^;]+);base64,(.+)$/);
-    const rawBase64 = match ? match[2] : data;
-    const detectedMime = match ? match[1] : mime;
-    const supported = /image\/(png|webp|gif|jpeg|jpg)/i.test(detectedMime);
-    if (!supported) return res.status(400).json({ error: '仅支持 png、jpg、webp、gif 头像。' });
-    const buffer = Buffer.from(rawBase64, 'base64');
-    if (!buffer.length || buffer.length > 3 * 1024 * 1024) return res.status(400).json({ error: '头像大小需小于 3MB。' });
-    const assetsDir = path.join(hermesWorkbenchRuntimeHome, 'assets');
-    await mkdir(assetsDir, { recursive: true });
-    const existing = await readdir(assetsDir, { withFileTypes: true }).catch(() => []);
-    await Promise.all(existing.filter((entry) => entry.isFile() && /^user-avatar\.(png|jpe?g|webp|gif)$/i.test(entry.name)).map((entry) => unlink(path.join(assetsDir, entry.name)).catch(() => null)));
-    const avatarPath = path.join(assetsDir, 'user-avatar.png');
-    if (!isInside(assetsDir, avatarPath)) return res.status(403).json({ error: '头像路径不合法。' });
-    await writeFile(avatarPath, buffer);
-    const fileStat = await stat(avatarPath);
-    res.json({ avatarUrl: `/api/user-profile/avatar?v=${Math.round(fileStat.mtimeMs)}` });
-  } catch (error) {
-    res.status(500).json({ error: error.message || '头像保存失败。' });
-  }
-});
-
-app.put('/api/user-profile', async (req, res) => {
-  try {
-    const state = await readState();
-    const previous = state.userProfile || {};
-    const next = normalizeUserProfile({ ...previous, ...(req.body?.userProfile || req.body || {}), updatedAt: now() });
-    if (next.avatarUrl && next.nickname) next.completedAt = next.completedAt || now();
-    state.userProfile = next;
-    await writeState(state);
-    await syncUserProfileToHermesProfiles(state, next);
-    for (const agent of state.agents || []) staleAgentRuntimeSessions(agent.id, 'user_profile_changed');
-    const refreshed = await readState();
-    res.json({ userProfile: refreshed.userProfile, agents: refreshed.agents });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message || '用户资料保存失败。' });
-  }
-});
-
-app.post('/api/hermes-profiles/:profileName/avatar', async (req, res) => {
-  try {
-    const dir = await profileDirForName(req.params.profileName);
-    if (!dir) return res.status(404).json({ error: '未找到可编辑的 Hermes Profile。' });
-    const mimeType = String(req.body?.mimeType || '').toLowerCase();
-    if (!/image\/(png|webp|gif|jpeg|jpg)/i.test(mimeType)) return res.status(400).json({ error: '只支持 PNG、JPG、WEBP、GIF 头像。' });
-    const rawData = String(req.body?.data || '').replace(/^data:image\/[a-zA-Z0-9.+-]+;base64,/, '');
-    const buffer = Buffer.from(rawData, 'base64');
-    if (!buffer.length || buffer.length > 5 * 1024 * 1024) return res.status(400).json({ error: '头像文件为空或超过 5MB。' });
-    const assetsDir = path.join(dir, 'assets');
-    await mkdir(assetsDir, { recursive: true });
-    const entries = await readdir(assetsDir, { withFileTypes: true }).catch(() => []);
-    await Promise.all(entries
-      .filter((entry) => entry.isFile() && /^avatar\.(png|jpe?g|webp|gif)$/i.test(entry.name))
-      .map((entry) => rm(path.join(assetsDir, entry.name), { force: true })));
-    const avatarPath = path.join(assetsDir, 'avatar.png');
-    if (!isInside(dir, avatarPath)) return res.status(403).json({ error: '头像路径超出 Hermes Profile。' });
-    await writeFile(avatarPath, buffer);
-    const synced = await syncProfileAgent(req.params.profileName);
-    res.json({ avatarUrl: await findProfileAvatar(dir, req.params.profileName), agent: synced.agent, profile: synced.profile });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message || '头像保存失败。' });
-  }
-});
-
-app.get('/api/hermes-profiles/:profileName/file', async (req, res) => {
-  try {
-    const { target } = await resolveProfileTextFile(req.params.profileName, req.query.kind, req.query.name);
-    const content = await readFile(target, 'utf8').catch(() => '');
-    res.json({ content, file: target });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message || '读取 Profile 文件失败。' });
-  }
-});
-
-app.put('/api/hermes-profiles/:profileName/file', async (req, res) => {
-  try {
-    const moduleKind = String(req.body?.kind || '').trim();
-    if (['notes', 'user', 'soul'].includes(moduleKind)) {
-      return res.status(409).json({ error: '这是 Frakio 生成的 Hermes 兼容投影。请在 Agent 中心或记忆中心修改正式数据。', code: 'FRAKIO_PROJECTION_READ_ONLY', importRequired: true });
-    }
-    const { target } = await resolveProfileTextFile(req.params.profileName, moduleKind, req.body?.name);
-    const content = String(req.body?.content || '').slice(0, 250000);
-    await mkdir(path.dirname(target), { recursive: true });
-    await writeFile(target, content.endsWith('\n') ? content : `${content}\n`, 'utf8');
-    const synced = await syncProfileAgent(req.params.profileName);
-    if (moduleKind === 'skill' || moduleKind === 'plugin') {
-      captureTelemetry('feature_used', { feature: moduleKind === 'skill' ? 'skill_synced' : 'plugin_synced', outcome: 'completed' });
-      captureMeaningfulActivity('feature_used');
-    }
-    res.json({ ok: true, file: target, agent: synced.agent, profile: synced.profile });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message || '保存 Profile 文件失败。' });
-  }
-});
-
-app.put('/api/hermes-profiles/:profileName/skill-state', async (req, res) => {
-  try {
-    const result = await updateHermesProfileSkillState(req.params.profileName, req.body?.name, Boolean(req.body?.enabled));
-    const synced = await syncProfileAgent(req.params.profileName);
-    captureTelemetry('feature_used', { feature: 'skill_synced', outcome: 'completed' });
-    captureMeaningfulActivity('feature_used');
-    res.json({ ok: true, ...result, agent: synced.agent, profile: synced.profile });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message || '技能状态保存失败。' });
-  }
-});
-
-app.get('/api/hermes-modules', async (req, res) => {
-  try {
-    res.json(await readManagedHermesModules(req.query.kind));
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message || '模块读取失败。', ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) });
-  }
-});
-
-app.get('/api/hermes-modules/file', async (req, res) => {
-  try {
-    const moduleEntry = await resolveManagedModuleFile(req.query.kind, req.query.scope, req.query.name, req.query.profileName);
-    res.json({
-      content: await readFile(moduleEntry.manifestPath, 'utf8').catch(() => ''),
-      file: moduleEntry.file,
-      name: moduleEntry.name,
-    });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message || '模块文件读取失败。', ...(error.code ? { code: error.code } : {}) });
-  }
-});
-
-app.put('/api/hermes-modules/file', async (req, res) => {
-  try {
-    const result = await runHermesModuleMutation(async () => {
-      const cleanKind = managedModuleKind(req.body?.kind);
-      const moduleEntry = await resolveManagedModuleFile(cleanKind, req.body?.scope, req.body?.name, req.body?.profileName);
-      const content = String(req.body?.content || '').slice(0, 250000);
-      await writeFile(moduleEntry.manifestPath, content.endsWith('\n') ? content : `${content}\n`, 'utf8');
-      const reloads = cleanKind === 'skill'
-        ? await reloadManagedSkills(req.body?.scope === 'global'
-          ? (await managedModuleOwnerRows()).map((owner) => owner.name)
-          : [slug(req.body?.profileName || '')])
-        : [];
-      const restartRequiredProfiles = cleanKind === 'plugin'
-        ? await runningManagedProfiles(req.body?.scope === 'global'
-          ? await managedModuleOwnerRows()
-          : (await managedModuleOwnerRows()).filter((owner) => owner.name === slug(req.body?.profileName || '')))
-        : [];
-      return { modules: await readManagedHermesModules(cleanKind), reloads, restartRequiredProfiles };
-    });
-    res.json({ ok: true, ...result });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message || '模块文件保存失败。', ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) });
-  }
-});
-
-app.put('/api/hermes-modules/state', async (req, res) => {
-  try {
-    const result = await runHermesModuleMutation(() => updateManagedModuleState(req.body?.kind, req.body?.name, req.body?.profileName, Boolean(req.body?.enabled)));
-    res.json({ ok: true, ...result });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message || '模块状态保存失败。', ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) });
-  }
-});
-
-app.post('/api/hermes-modules/scope', async (req, res) => {
-  try {
-    const action = String(req.body?.action || '').trim();
-    if (!['promote', 'demote'].includes(action)) return res.status(400).json({ error: '范围操作必须是 promote 或 demote。' });
-    const result = await runHermesModuleMutation(() => action === 'promote'
-      ? promoteManagedModule(req.body?.kind, req.body?.name, req.body?.profileName)
-      : demoteManagedModule(req.body?.kind, req.body?.name, req.body?.targetProfileName));
-    res.json({ ok: true, ...result });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message || '模块范围保存失败。', ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) });
-  }
-});
-
-app.delete('/api/hermes-modules', async (req, res) => {
-  try {
-    const result = await runHermesModuleMutation(() => deleteManagedModule(req.body?.kind, req.body?.name, req.body?.scope, req.body?.profileName));
-    res.json({ ok: true, ...result });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message || '模块删除失败。', ...(error.code ? { code: error.code } : {}), ...(error.details ? { details: error.details } : {}) });
-  }
-});
-
-app.get('/api/health', (_req, res) => {
-  res.json({
-    ok: true,
-    service: 'frakio-work-api',
-    port,
-    deploymentMode: isManagedWebMode ? 'managed-web' : isDesktopMode ? 'desktop' : 'source',
-    apiProtocol: FRAKIO_SERVICE_PROTOCOL,
-  });
-});
-
-app.get('/api/hermes-local/status', async (_req, res) => {
-  const discovery = await discoverHermesStudio();
-  const state = await readState();
-  state.integrations.hermesStudio = {
-    ...state.integrations.hermesStudio,
-    detectedUrl: discovery.studio.url || state.integrations.hermesStudio.detectedUrl || '',
-    lastCheckedAt: discovery.checkedAt,
-    authMode: discovery.studio.authMode,
-  };
-  await writeState(state);
-  res.json(discovery);
-});
 
 async function networkCapabilityStatus(profile, { refresh = false } = {}) {
   const profileDir = await profileDirForName(profile);
@@ -10359,8 +10073,39 @@ async function respondNetworkCapabilityStatus(req, res, refresh = false) {
   }
 }
 
-app.get('/api/hermes/network-status', (req, res) => void respondNetworkCapabilityStatus(req, res));
-app.post('/api/hermes/network-status/refresh', (req, res) => void respondNetworkCapabilityStatus(req, res, true));
+// wjz修改开始，修改原因：挂载 user-and-profiles 模块化路由，修改时间：2026-08-18。
+app.use(
+  '/api',
+  createUserAndProfilesRouter({
+    readState,
+    writeState,
+    hermesWorkbenchRuntimeHome,
+    profileDirForName,
+    normalizeUserProfile,
+    syncUserProfileToHermesProfiles,
+    staleAgentRuntimeSessions,
+    syncProfileAgent,
+    resolveProfileTextFile,
+    updateHermesProfileSkillState,
+    findProfileAvatar,
+    readManagedHermesModules,
+    resolveManagedModuleFile,
+    runHermesModuleMutation,
+    managedModuleKind,
+    reloadManagedSkills,
+    managedModuleOwnerRows,
+    runningManagedProfiles,
+    updateManagedModuleState,
+    promoteManagedModule,
+    demoteManagedModule,
+    deleteManagedModule,
+    discoverHermesStudio,
+    respondNetworkCapabilityStatus,
+    captureTelemetry,
+    captureMeaningfulActivity,
+  }),
+);
+// wjz修改结束。
 
 app.post('/api/hermes-local/import', async (req, res) => {
   const discovery = await discoverHermesStudio();
@@ -15557,93 +15302,40 @@ app.get('/api/workspaces/:id/knowledge/search', async (req, res) => {
   }
 });
 
-app.get('/api/models', async (_req, res) => {
-  const state = await readState();
-  res.json({ models: state.models.map(publicModel) });
-});
-
-app.get('/api/oauth-accounts', async (_req, res) => {
-  const state = await readState();
-  const accounts = await listOAuthAccounts();
-  res.json({ accounts: accounts.map((account) => ({
-    ...account,
-    models: state.models.filter((model) => model.providerKey === account.providerKey && model.oauthAccountId === account.id)
-      .map((model) => ({ id: model.id, name: model.name })),
-  })) });
-});
-
-app.patch('/api/oauth-accounts/:accountId', async (req, res) => {
-  const providerKey = String(req.body?.providerKey || '').trim();
-  const accountId = String(req.params.accountId || '').trim();
-  const label = String(req.body?.label || '').trim().slice(0, 80);
-  if (!oauthProviderKeys.has(providerKey) || !accountId || !label) return res.status(400).json({ error: '授权账户参数无效。' });
-  const credential = await getOAuthCredential(providerKey, accountId);
-  if (!credential) return res.status(404).json({ error: '授权账户不存在。' });
-  const stored = await setOAuthCredential(providerKey, { ...credential, label }, accountId);
-  res.json({ account: oauthAccountSummary(providerKey, stored) });
-});
-
-app.delete('/api/oauth-accounts/:accountId', async (req, res) => {
-  const providerKey = String(req.query?.providerKey || '').trim();
-  const accountId = String(req.params.accountId || '').trim();
-  if (!oauthProviderKeys.has(providerKey) || !accountId) return res.status(400).json({ error: '授权账户参数无效。' });
-  const state = await readState();
-  const linkedModels = state.models.filter((model) => model.providerKey === providerKey && model.oauthAccountId === accountId)
-    .map((model) => ({ id: model.id, name: model.name }));
-  if (linkedModels.length) return res.status(409).json({ error: '请先将关联模型迁移到其他账户，或删除这些模型配置。', code: 'OAUTH_ACCOUNT_IN_USE', models: linkedModels });
-  await deleteOAuthCredential(providerKey, accountId);
-  res.json({ deletedAccountId: accountId });
-});
-
-app.get('/api/model-capabilities', async (_req, res) => {
-  const state = await readState();
-  const providerCatalog = flattenProviderCatalog(modelCatalogCache);
-  const runtime = findFrakioHermesRuntimeSync();
-  res.json({
-    runtimeVersion: runtime?.version || '',
-    capabilities: capabilitiesForModels(state.models, { providerCatalog }),
-    providers: Object.fromEntries(state.models.map((model) => [model.id, catalogStatus(modelCatalogCache, model)])),
-    probes: Object.fromEntries(state.models.map((model) => [model.id, capabilityProbeStatus(model)])),
-  });
-});
-
-app.post('/api/models/:id/capabilities/probe', async (req, res) => {
-  const state = await readState();
-  const model = state.models.find((item) => item.id === req.params.id);
-  if (!model) return res.status(404).json({ error: '模型 Provider 不存在。' });
-  const requested = Array.from(new Set([
-    ...(Array.isArray(req.body?.modelIds) ? req.body.modelIds : []),
-    req.body?.modelId,
-  ].map((item) => String(item || '').trim()).filter(Boolean)));
-  const available = new Set(runtimeModelNames(model));
-  const invalid = requested.find((modelId) => !available.has(modelId));
-  if (invalid) return res.status(400).json({ error: `Provider 中不存在模型 ${invalid}。` });
-  const result = await scheduleProviderCapabilityProbes(model, state.models, {
-    force: true,
-    allowLocal: true,
-    modelIds: requested,
-  });
-  if (result.reason === 'unavailable') return res.status(409).json({ error: '当前 Provider 不支持主动能力探测。' });
-  if (result.reason === 'credential_missing') return res.status(400).json({ error: '当前 Provider 缺少可用的 API Key。' });
-  res.status(202).json({ queued: result.queued, probe: capabilityProbeStatus(model) });
-});
-
-app.get('/api/model-providers/presets', async (req, res) => {
-  const profile = await requestedModelProfile(req);
-  const selectablePresets = loadProviderPresets().filter((preset) => preset.selectable);
-  const codexPreset = selectablePresets.find((preset) => preset.value === 'openai-codex');
-  if (codexPreset && oauthProviderAuthenticated(profile, codexPreset.value) && catalogStatus(modelCatalogCache, oauthCatalogModel(codexPreset.value)).stale) {
-    const accessToken = oauthProviderAccessToken(profile, codexPreset.value);
-    if (accessToken) await refreshCodexOAuthModels(accessToken).catch(() => {});
-  }
-  const providers = selectablePresets.map((preset) => {
-    const { selectable: _selectable, ...publicPreset } = preset;
-    if (!preset.authType) return { ...publicPreset, authenticated: false };
-    const state = oauthProviderState(profile, preset.value);
-    return { ...publicPreset, models: state.models, authenticated: state.authenticated, catalog: state.catalog };
-  });
-  res.json({ profile, providers });
-});
+// wjz修改开始，修改原因：挂载 models-and-providers 模块化路由，修改时间：2026-08-18。
+app.use(
+  '/api',
+  createModelsAndProvidersRouter({
+    readGlobalAuxiliaryModelsHandler,
+    updateGlobalAuxiliaryModelsHandler,
+    readState,
+    writeState,
+    updateState,
+    publicModel,
+    listOAuthAccounts,
+    oauthProviderKeys,
+    getOAuthCredential,
+    setOAuthCredential,
+    deleteOAuthCredential,
+    oauthAccountSummary,
+    modelCatalogCache,
+    flattenProviderCatalog,
+    findFrakioHermesRuntimeSync,
+    capabilitiesForModels,
+    catalogStatus,
+    capabilityProbeStatus,
+    runtimeModelNames,
+    scheduleProviderCapabilityProbes,
+    requestedModelProfile,
+    loadProviderPresets,
+    oauthProviderAuthenticated,
+    oauthCatalogModel,
+    oauthProviderAccessToken,
+    refreshCodexOAuthModels,
+    oauthProviderState,
+  }),
+);
+// wjz修改结束。
 
 async function fetchProviderModelsForRequest(body) {
   const apiKey = String(body?.apiKey || body?.api_key || '').trim();
@@ -17028,88 +16720,97 @@ async function renameAgentHermesProfile(agentId, nextDisplayName) {
   }
 }
 
-app.delete('/api/agents/:id', async (req, res) => {
-  const agentId = req.params.id;
-  let deletion = agentDeletionPromises.get(agentId);
-  if (!deletion) {
-    deletion = deleteAgentLifecycle(agentId);
-    agentDeletionPromises.set(agentId, deletion);
-    void deletion.finally(() => agentDeletionPromises.delete(agentId)).catch(() => {});
-  }
-  try {
-    res.json(await deletion);
-  } catch (error) {
-    res.status(error.status || 500).json({ error: error.message || 'Agent 删除失败。', ...(error.code ? { code: error.code } : {}) });
-  }
-});
-
-app.patch('/api/agents/:id', async (req, res) => {
-  const state = await readState();
-  const agent = state.agents.find((item) => item.id === req.params.id);
-  if (!agent) return res.status(404).json({ error: 'Agent 不存在。' });
-  if ('name' in req.body) {
-    const nextName = String(req.body.name || agent.name).trim().slice(0, 32);
-    if (!nextName) return res.status(400).json({ error: 'Agent 名称不能为空。' });
-    if (agent.profileName && nextName !== agent.name) {
-      try {
-        const result = await renameAgentHermesProfile(agent.id, nextName);
-        return res.json({ agent: result.agent, agents: (await readState()).agents, ...(result.gatewayWarning ? { gatewayWarning: result.gatewayWarning } : {}) });
-      } catch (error) {
-        return res.status(error.status || 500).json({ error: error.message || 'Hermes Profile 重命名失败。' });
+// wjz修改开始，修改原因：挂载 agents 模块化路由，修改时间：2026-08-18。
+app.use(
+  '/api',
+  createAgentsRouter({
+    readState,
+    writeState,
+    updateState,
+    deleteAgentHandler: async (req, res) => {
+      const agentId = req.params.id;
+      let deletion = agentDeletionPromises.get(agentId);
+      if (!deletion) {
+        deletion = deleteAgentLifecycle(agentId);
+        agentDeletionPromises.set(agentId, deletion);
+        void deletion.finally(() => agentDeletionPromises.delete(agentId)).catch(() => {});
       }
-    }
-    agent.name = nextName;
-  }
-  if ('role' in req.body) agent.role = String(req.body.role || agent.role).trim().slice(0, 60);
-  if ('model' in req.body) {
-    const requestedModel = String(req.body.model || '').trim();
-    const { selectedModel, selectedName, selectionValue } = resolveModelSelection(requestedModel, state.models);
-    if (!selectedModel) return res.status(400).json({ error: 'Agent 默认模型不在 Frakio Model Center 中。' });
-    if (agent.profileName) {
-      await updateHermesProfileDefaultModel(agent.profileName, selectionValue, state.models);
-    }
-    agent.model = String(selectionValue || modelSelectionValue(selectedModel, selectedName)).trim().slice(0, 240);
-  }
-  if ('defaultReasoningEffort' in req.body || 'defaultSpeedMode' in req.body) {
-    const defaults = normalizeAgentDefaultRunSettings({
-      defaultReasoningEffort: 'defaultReasoningEffort' in req.body ? req.body.defaultReasoningEffort : agent.defaultReasoningEffort,
-      defaultSpeedMode: 'defaultSpeedMode' in req.body ? req.body.defaultSpeedMode : agent.defaultSpeedMode,
-    });
-    const selected = resolveModelSelection(agent.model, state.models);
-    const capability = selected.selectedModel
-      ? resolveModelCapability(selected.selectedModel, selected.selectedName, { providerCatalog: flattenProviderCatalog(modelCatalogCache) })
-      : null;
-    const reasoningKnown = !capability || capability.reasoningStatus === 'unknown' || capability.reasoningStatus === 'verification_failed';
-    const speedKnown = !capability || capability.serviceTierStatus === 'unknown' || capability.serviceTierStatus === 'verification_failed';
-    agent.defaultReasoningEffort = defaults.defaultReasoningEffort && (reasoningKnown || capability.reasoningMap?.[defaults.defaultReasoningEffort]) ? defaults.defaultReasoningEffort : '';
-    agent.defaultSpeedMode = defaults.defaultSpeedMode && (speedKnown || defaults.defaultSpeedMode === 'standard' || capability.serviceTiers?.some((tier) => tier.id === defaults.defaultSpeedMode || (defaults.defaultSpeedMode === 'fast' && tier.id === 'fast'))) ? defaults.defaultSpeedMode : '';
-  }
-  if ('color' in req.body) agent.color = String(req.body.color || agent.color).trim().slice(0, 20);
-  if ('soul' in req.body) {
-    if (req.body.confirmSoul !== true) return res.status(409).json({ error: 'Soul 修改需要用户明确确认。', code: 'SOUL_CONFIRMATION_REQUIRED' });
-    agent.soul = String(req.body.soul || agent.soul || agent.scope || '').trim().slice(0, 12000);
-  }
-  if ('scope' in req.body) agent.scope = String(req.body.scope || agent.scope).trim().slice(0, 300);
-  if ('notes' in req.body || 'memory' in req.body) agent.notes = String(req.body.notes ?? req.body.memory ?? agent.notes ?? '').trim().slice(0, 250000);
-  if ('communicationStyle' in req.body) agent.communicationStyle = String(req.body.communicationStyle || '').trim().slice(0, 2000);
-  if ('memoryPolicy' in req.body && isPlainRecord(req.body.memoryPolicy)) agent.memoryPolicy = { ...(agent.memoryPolicy || {}), ...req.body.memoryPolicy };
-  if ('runtimePolicy' in req.body) {
-    const nextPolicy = normalizeRuntimePolicy(req.body.runtimePolicy, { hasHermesProfile: Boolean(agent.profileName) });
-    if (nextPolicy.allowedRuntimeIds.includes('hermes') && !agent.profileName) {
-      const profileName = await uniqueProfileName(agent.name || agent.id, state.agents.map((item) => item.profileName).filter(Boolean));
-      await createHermesProfileFiles(profileName, agent, state.auxiliaryModels);
-      await ensureManagedGlobalModulesForProfile(profileName);
-      agent.profileName = profileName;
-    }
-    agent.runtimePolicy = nextPolicy;
-  }
-  agent.profileRevision = agentProfileRevision(agent);
-  await writeState(state);
-  let projection = null;
-  if (agent.profileName) projection = await hermesProjectionService.publish({ agent, userProfile: state.userProfile, force: true });
-  if (['soul', 'role', 'scope', 'communicationStyle'].some((field) => field in req.body)) staleAgentRuntimeSessions(agent.id, 'agent_identity_changed');
-  res.json({ agent: { ...agent, projection }, agents: state.agents });
-});
+      try {
+        res.json(await deletion);
+      } catch (error) {
+        res.status(error.status || 500).json({ error: error.message || 'Agent 删除失败。', ...(error.code ? { code: error.code } : {}) });
+      }
+    },
+    patchAgentHandler: async (req, res) => {
+      const state = await readState();
+      const agent = state.agents.find((item) => item.id === req.params.id);
+      if (!agent) return res.status(404).json({ error: 'Agent 不存在。' });
+      if ('name' in req.body) {
+        const nextName = String(req.body.name || agent.name).trim().slice(0, 32);
+        if (!nextName) return res.status(400).json({ error: 'Agent 名称不能为空。' });
+        if (agent.profileName && nextName !== agent.name) {
+          try {
+            const result = await renameAgentHermesProfile(agent.id, nextName);
+            return res.json({ agent: result.agent, agents: (await readState()).agents, ...(result.gatewayWarning ? { gatewayWarning: result.gatewayWarning } : {}) });
+          } catch (error) {
+            return res.status(error.status || 500).json({ error: error.message || 'Hermes Profile 重命名失败。' });
+          }
+        }
+        agent.name = nextName;
+      }
+      if ('role' in req.body) agent.role = String(req.body.role || agent.role).trim().slice(0, 60);
+      if ('model' in req.body) {
+        const requestedModel = String(req.body.model || '').trim();
+        const { selectedModel, selectedName, selectionValue } = resolveModelSelection(requestedModel, state.models);
+        if (!selectedModel) return res.status(400).json({ error: 'Agent 默认模型不在 Frakio Model Center 中。' });
+        if (agent.profileName) {
+          await updateHermesProfileDefaultModel(agent.profileName, selectionValue, state.models);
+        }
+        agent.model = String(selectionValue || modelSelectionValue(selectedModel, selectedName)).trim().slice(0, 240);
+      }
+      if ('defaultReasoningEffort' in req.body || 'defaultSpeedMode' in req.body) {
+        const defaults = normalizeAgentDefaultRunSettings({
+          defaultReasoningEffort: 'defaultReasoningEffort' in req.body ? req.body.defaultReasoningEffort : agent.defaultReasoningEffort,
+          defaultSpeedMode: 'defaultSpeedMode' in req.body ? req.body.defaultSpeedMode : agent.defaultSpeedMode,
+        });
+        const selected = resolveModelSelection(agent.model, state.models);
+        const capability = selected.selectedModel
+          ? resolveModelCapability(selected.selectedModel, selected.selectedName, { providerCatalog: flattenProviderCatalog(modelCatalogCache) })
+          : null;
+        const reasoningKnown = !capability || capability.reasoningStatus === 'unknown' || capability.reasoningStatus === 'verification_failed';
+        const speedKnown = !capability || capability.serviceTierStatus === 'unknown' || capability.serviceTierStatus === 'verification_failed';
+        agent.defaultReasoningEffort = defaults.defaultReasoningEffort && (reasoningKnown || capability.reasoningMap?.[defaults.defaultReasoningEffort]) ? defaults.defaultReasoningEffort : '';
+        agent.defaultSpeedMode = defaults.defaultSpeedMode && (speedKnown || defaults.defaultSpeedMode === 'standard' || capability.serviceTiers?.some((tier) => tier.id === defaults.defaultSpeedMode || (defaults.defaultSpeedMode === 'fast' && tier.id === 'fast'))) ? defaults.defaultSpeedMode : '';
+      }
+      if ('color' in req.body) agent.color = String(req.body.color || agent.color).trim().slice(0, 20);
+      if ('soul' in req.body) {
+        if (req.body.confirmSoul !== true) return res.status(409).json({ error: 'Soul 修改需要用户明确确认。', code: 'SOUL_CONFIRMATION_REQUIRED' });
+        agent.soul = String(req.body.soul || agent.soul || agent.scope || '').trim().slice(0, 12000);
+      }
+      if ('scope' in req.body) agent.scope = String(req.body.scope || agent.scope).trim().slice(0, 300);
+      if ('notes' in req.body || 'memory' in req.body) agent.notes = String(req.body.notes ?? req.body.memory ?? agent.notes ?? '').trim().slice(0, 250000);
+      if ('communicationStyle' in req.body) agent.communicationStyle = String(req.body.communicationStyle || '').trim().slice(0, 2000);
+      if ('memoryPolicy' in req.body && isPlainRecord(req.body.memoryPolicy)) agent.memoryPolicy = { ...(agent.memoryPolicy || {}), ...req.body.memoryPolicy };
+      if ('runtimePolicy' in req.body) {
+        const nextPolicy = normalizeRuntimePolicy(req.body.runtimePolicy, { hasHermesProfile: Boolean(agent.profileName) });
+        if (nextPolicy.allowedRuntimeIds.includes('hermes') && !agent.profileName) {
+          const profileName = await uniqueProfileName(agent.name || agent.id, state.agents.map((item) => item.profileName).filter(Boolean));
+          await createHermesProfileFiles(profileName, agent, state.auxiliaryModels);
+          await ensureManagedGlobalModulesForProfile(profileName);
+          agent.profileName = profileName;
+        }
+        agent.runtimePolicy = nextPolicy;
+      }
+      agent.profileRevision = agentProfileRevision(agent);
+      await writeState(state);
+      let projection = null;
+      if (agent.profileName) projection = await hermesProjectionService.publish({ agent, userProfile: state.userProfile, force: true });
+      if (['soul', 'role', 'scope', 'communicationStyle'].some((field) => field in req.body)) staleAgentRuntimeSessions(agent.id, 'agent_identity_changed');
+      res.json({ agent: { ...agent, projection }, agents: state.agents });
+    },
+  }),
+);
+// wjz修改结束。
 
 app.get('/api/state', async (_req, res) => {
   const state = await readState();
@@ -17152,71 +16853,26 @@ app.post('/api/telemetry/onboarding-completed', async (req, res) => {
   res.json({ ok: true });
 });
 
-app.get('/api/user-profile/summary', async (_req, res) => {
-  try {
-    const state = await readState();
-    const hermesUsage = await readHermesAgentUsageRows();
-    const hermesUsageRows = hermesUsage.rows;
-    const workbenchUsageRows = (state.observability?.modelUsage || [])
-      .filter((row) => row.dataSource !== 'Hermes Agent' && row.provider !== 'Hermes Agent')
-      .map((row) => ({ ...row, dataSource: row.dataSource || 'Frakio Work local usage' }));
-    const usageRows = [...hermesUsageRows, ...workbenchUsageRows];
-    const usage = aggregateModelUsage(usageRows, state.models || []);
-    const peakDay = (usage.byDay || []).reduce((peak, row) => Number(row.realTotalTokens || row.totalTokens || 0) > Number(peak.realTotalTokens || peak.totalTokens || 0) ? row : peak, { day: '', totalTokens: 0, realTotalTokens: 0 });
-    const agents = collectAgentUsage(state);
-    const skills = collectModuleUsage(state, 'skills');
-    const plugins = collectModuleUsage(state, 'plugins');
-    res.json({
-      checkedAt: now(),
-      userProfile: state.userProfile,
-      stats: {
-        totalTokens: Number(usage.realTotalTokens || usage.totalTokens || 0),
-        peakDayTokens: Number(peakDay.realTotalTokens || peakDay.totalTokens || 0),
-        peakDay: peakDay.day || '',
-        requests: Number(usage.totalRequests || 0),
-        conversations: (state.threads || []).length,
-        activeAgents: agents.filter((agent) => agent.conversationCount > 0 || agent.messageCount > 0).length,
-      },
-      usage: {
-        byDay: usage.byDay || [],
-        entries: usage.entries || [],
-      },
-      hermesAgent: hermesUsage.meta,
-      agents,
-      modules: { skills, plugins },
-    });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: String(error?.message || error) });
-  }
-});
-
-app.get('/api/monitoring/summary', async (_req, res) => {
-  try {
-    const state = await readState();
-    const logs = await readMonitoringLogs(160);
-    const hermesDb = await readHermesDbSummary();
-    const hermesUsage = await readHermesAgentUsageRows();
-    const hermesUsageRows = hermesUsage.rows;
-    const workbenchUsageRows = (state.observability?.modelUsage || [])
-      .filter((row) => row.dataSource !== 'Hermes Agent' && row.provider !== 'Hermes Agent')
-      .map((row) => ({ ...row, dataSource: row.dataSource || 'Frakio Work local usage' }));
-    const usageRows = [...hermesUsageRows, ...workbenchUsageRows];
-    res.json({
-      checkedAt: now(),
-      logs,
-      modelRuns: (state.observability?.modelRuns || []).slice(-200).reverse(),
-      usage: aggregateModelUsage(usageRows, state.models || []),
-      hermesStudio: { databaseExists: hermesDb.exists, roomCount: hermesDb.rooms.length, sessionCount: hermesDb.sessions.length, usageRowCount: hermesUsageRows.length, usageSource: 'legacy hermes-web-ui db' },
-      hermesAgent: hermesUsage.meta,
-      modules: {
-        skills: collectModuleUsage(state, 'skills'),
-        plugins: collectModuleUsage(state, 'plugins'),
-      },
-    });
-  } catch (error) {
-    res.status(error.status || 500).json({ error: String(error?.message || error) });
-  }
-});
+// wjz修改开始，修改原因：挂载 workspaces-and-vaults 模块化路由，修改时间：2026-08-18。
+app.use(
+  '/api',
+  createWorkspacesAndVaultsRouter({
+    readState,
+    writeState,
+    updateState,
+    normalizeUiState: (ui) => ui,
+    readMonitoringLogs,
+    readHermesDbSummary,
+    readHermesAgentUsageRows,
+    aggregateModelUsage,
+    collectModuleUsage,
+    collectAgentUsage,
+    captureTelemetry,
+    captureMeaningfulActivity,
+    now,
+  }),
+);
+// wjz修改结束。
 
 async function ensureKnowledgeVaultWatcher(vault) {
   if (!vault?.id || knowledgeVaultWatchers.has(vault.id)) return knowledgeVaultWatchers.get(vault.id) || null;
@@ -18374,6 +18030,8 @@ async function reconcileOrphanRuntimeRuns(state) {
     .map((run) => run.threadId)));
   return cancelRuntimeRunsForRemovedThreads(orphanThreadIds, 'THREAD_REMOVED_ON_RECOVERY');
 }
+
+// plan 路由已解耦至 routes/collaboration-and-kanban.mjs
 
 app.get('/api/threads/:id/runs/active', async (req, res) => {
   const state = await readState();
@@ -23624,171 +23282,41 @@ function streamHermesTurnEvents(req, res, { turnId, runId = '', agents = [] }) {
   });
 }
 
-app.get('/api/threads/:id/turns/:turnId/events', async (req, res) => {
-  const state = await readState();
-  const thread = state.threads.find((item) => item.id === req.params.id);
-  if (!thread) return res.status(404).json({ error: '会话不存在。' });
-  const storedTurnExists = runtimeStore.listRuns({ threadId: req.params.id, limit: 1000 })
-    .some((run) => run.turnId === req.params.turnId);
-  if (thread.activeRunGroup?.turnId !== req.params.turnId
-    && !hermesTurnRuntime.has(`${req.params.id}:${req.params.turnId}`)
-    && !storedTurnExists) {
-    return res.status(404).json({ error: '运行轮次不存在。' });
-  }
-  return streamHermesTurnEvents(req, res, { turnId: req.params.turnId, agents: state.agents });
-});
+// wjz修改开始，修改原因：挂载 threads-and-chat 与 collaboration-and-kanban 模块化路由，修改时间：2026-08-18。
+app.use(
+  '/api',
+  createThreadsAndChatRouter({
+    readState,
+    writeState,
+    runtimeStore,
+    hermesTurnRuntime,
+    streamHermesTurnEvents,
+    requestHermesBridge,
+    mergeHermesWorkflowEvent,
+    runtimeHostController,
+    publicThreadRunState,
+    clearHermesRunState,
+    latestThreadRun,
+    telemetryDurationBucket,
+    detectTaskType,
+    taskStepsForMessage,
+    runAgentRoomChat,
+    captureTelemetry,
+    now,
+  }),
+);
 
-app.get('/api/threads/:id/runs/:runId/events', async (req, res) => {
-  const state = await readState();
-  const thread = state.threads.find((item) => item.id === req.params.id);
-  if (!thread) return res.status(404).json({ error: '会话不存在。' });
-  const turnId = thread.activeRunGroup?.turnId || thread.activeRunTurnId || req.params.runId;
-  return streamHermesTurnEvents(req, res, { turnId, runId: req.params.runId, agents: state.agents });
-});
-
-app.post('/api/threads/:id/runs/:runId/approval', async (req, res) => {
-  try {
-    const approvalId = String(req.body?.approvalId || req.body?.id || req.params.runId);
-    if (!approvalId || approvalId === req.params.runId) return res.status(400).json({ error: '这次审批缺少 approval_id，请重新发起任务。' });
-    const result = await requestHermesBridge({
-      action: 'approval_respond',
-      approval_id: approvalId,
-      choice: req.body?.choice || 'deny',
-      session_id: req.body?.sessionId || req.query.sessionId || '',
-      run_id: req.params.runId,
-    }, { timeoutMs: 10000, retryMs: 1000 });
-    if (result?.resolved === false) return res.status(409).json({ error: '这次审批已失效，请重新发起任务。', ...result });
-    res.json({ ok: true, approvalId, choice: req.body?.choice || 'deny', ...result });
-  } catch (error) {
-    res.status(502).json({ error: formatApprovalError(error.message || '审批响应失败。') });
-  }
-});
-
-function formatApprovalError(message) {
-  const text = String(message || '').trim();
-  if (/approval_id is required|missing approval/i.test(text)) return '这次审批缺少 approval_id，请重新发起任务。';
-  if (/unknown approval|not found|expired|timeout/i.test(text)) return '这次审批已失效，请重新发起任务。';
-  if (/unknown action/i.test(text)) return '本机 Hermes Bridge 不支持当前审批协议，请重启 Bridge 后重试。';
-  return text || '审批响应失败。';
-}
-
-const clarifySkipResponse = '[user skipped this clarification; do not assume an answer and do not ask the same question again in this run. Continue only with a safe reversible default. If the missing answer is required, leave that operation unperformed and explain what remains undecided in the final response.]';
-
-app.post('/api/threads/:id/runs/:runId/clarify', async (req, res) => {
-  try {
-    const clarifyId = String(req.body?.clarifyId || req.body?.clarify_id || '').trim();
-    const action = String(req.body?.action || 'answer').trim().toLowerCase();
-    const answer = String(req.body?.response || '').trim();
-    if (!clarifyId) return res.status(400).json({ error: '这次提问缺少 clarify_id，请重新发起任务。' });
-    if (!['answer', 'skip'].includes(action)) return res.status(400).json({ error: '不支持的提问响应。' });
-    if (action === 'answer' && !answer) return res.status(400).json({ error: '请输入回答。' });
-    const result = await requestHermesBridge({
-      action: 'clarify_respond',
-      clarify_id: clarifyId,
-      response: action === 'skip' ? clarifySkipResponse : answer,
-      session_id: req.body?.sessionId || req.query.sessionId || '',
-      run_id: req.params.runId,
-    }, { timeoutMs: 10000, retryMs: 1000 });
-    if (result?.resolved === false) return res.status(409).json({ error: '这次提问已失效，请重新发起任务。', ...result });
-    await mergeHermesWorkflowEvent(req.params.id, { event: 'clarify.responded', clarifyId, skipped: action === 'skip' });
-    res.json({ ok: true, clarifyId, action, resolved: true });
-  } catch (error) {
-    res.status(502).json({ error: formatClarifyError(error.message || '提问响应失败。') });
-  }
-});
-
-function formatClarifyError(message) {
-  const text = String(message || '').trim();
-  if (/clarify_id is required|missing clarify/i.test(text)) return '这次提问缺少 clarify_id，请重新发起任务。';
-  if (/unknown clarify|not found|expired|timeout/i.test(text)) return '这次提问已失效，请重新发起任务。';
-  if (/unknown action/i.test(text)) return '本机 Hermes Bridge 不支持当前提问协议，请重启 Bridge 后重试。';
-  return text || '提问响应失败。';
-}
-
-app.post('/api/threads/:id/runs/:runId/stop', async (req, res) => {
-  try {
-    const storedRuntimeRun = runtimeStore.getRun(req.params.runId);
-    if (storedRuntimeRun) {
-      const currentState = await readState();
-      const currentThread = currentState.threads.find((item) => item.id === req.params.id);
-      if (['completed', 'failed', 'cancelled'].includes(storedRuntimeRun.status)) {
-        const state = currentState;
-        const thread = currentThread;
-        if (thread?.runStatus === 'running'
-          && (thread.activeRunId === storedRuntimeRun.nativeRunId || thread.activeRunTurnId === storedRuntimeRun.turnId)) {
-          thread.runStatus = storedRuntimeRun.status === 'failed' ? 'failed' : 'idle';
-          clearHermesRunState(thread);
-          thread.updatedAt = now();
-          await writeState(state);
-        }
-        return res.status(202).json({ ok: true, resolved: true, alreadyTerminal: true, stoppedRuns: 0, run: publicThreadRunState(storedRuntimeRun), thread: thread || null });
-      }
-      const interrupted = await runtimeHostController.interrupt(storedRuntimeRun.id);
-      return res.status(202).json({ ok: true, resolved: true, stoppedRuns: 1, turnId: storedRuntimeRun.turnId, run: publicThreadRunState(interrupted) });
-    }
-    const state = await readState();
-    const thread = state.threads.find((item) => item.id === req.params.id);
-    if (!thread) return res.status(404).json({ error: '对话不存在。', resolved: false });
-    const groupRuns = Object.values(thread.activeRunGroup?.activeRuns || {});
-    const requestedRun = groupRuns.find((run) => String(run.runId) === String(req.params.runId));
-    if ((!thread.activeRunId || String(thread.activeRunId) !== String(req.params.runId)) && !requestedRun) {
-      const latestRun = latestThreadRun(thread);
-      if (!latestRun || ['completed', 'failed', 'cancelled'].includes(latestRun.status) || thread.runStatus !== 'running') {
-        if (thread.runStatus === 'running') {
-          thread.runStatus = latestRun?.status === 'failed' ? 'failed' : 'idle';
-          clearHermesRunState(thread);
-          thread.updatedAt = now();
-          await writeState(state);
-        }
-        return res.status(202).json({ ok: true, resolved: true, alreadyTerminal: true, stoppedRuns: 0, run: publicThreadRunState(latestRun), thread });
-      }
-      return res.status(409).json({ error: '这次运行已经结束或无法停止', resolved: false, run: publicThreadRunState(latestRun) });
-    }
-    const runsToStop = req.body?.childOnly
-      ? [requestedRun || { runId: req.params.runId, sessionId: req.body?.sessionId || req.query.sessionId || thread.activeSessionId }]
-      : (groupRuns.length ? groupRuns : [{ runId: req.params.runId, sessionId: req.body?.sessionId || req.query.sessionId || thread.activeSessionId }]);
-    const results = await Promise.allSettled(runsToStop.map((run) => requestHermesBridge({ action: 'interrupt', session_id: String(run.sessionId || ''), run_id: run.runId || undefined, message: '用户请求停止。' }, { timeoutMs: 10000, retryMs: 1000 })));
-    const stopped = results.filter((result) => result.status === 'fulfilled' && result.value?.resolved !== false).length;
-    if (!stopped) return res.status(409).json({ error: '这次运行已经结束或无法停止', resolved: false });
-    captureTelemetry('agent_run_stopped', { duration_bucket: telemetryDurationBucket(thread.activeRunStartedAt) });
-    res.json({ ok: true, resolved: true, stoppedRuns: stopped, turnId: thread.activeRunGroup?.turnId || '' });
-  } catch (error) {
-    const message = String(error?.message || '').trim();
-    const expired = /unknown run|not found|expired|already (?:ended|finished)|not running|no active/i.test(message);
-    if (expired) {
-      const state = await readState();
-      const thread = state.threads.find((item) => item.id === req.params.id);
-      const latestRun = thread ? latestThreadRun(thread) : null;
-      const stillActive = Boolean(latestRun && ['queued', 'starting', 'running', 'waiting_approval', 'interrupting'].includes(latestRun.status));
-      if (thread && !stillActive) {
-        if (thread.runStatus === 'running') {
-          thread.runStatus = latestRun?.status === 'failed' ? 'failed' : 'idle';
-          clearHermesRunState(thread);
-          thread.updatedAt = now();
-          await writeState(state);
-        }
-        return res.status(202).json({ ok: true, resolved: true, alreadyTerminal: true, stoppedRuns: 0, run: publicThreadRunState(latestRun), thread });
-      }
-    }
-    res.status(502).json({ error: message || '停止运行失败，请重试。', resolved: false });
-  }
-});
-
-app.post('/api/council/send', async (req, res) => {
-  const state = await readState();
-  const thread = state.threads.find((item) => item.id === req.body?.threadId) || state.threads[0];
-  if (thread) {
-    const message = String(req.body?.message || '').trim();
-    const taskType = detectTaskType(message);
-    const runSteps = taskStepsForMessage(taskType, message, 'running');
-    thread.runStatus = 'running';
-    thread.workflow = runSteps.map((step) => step.title);
-    thread.workflowState = runSteps;
-    await writeState(state);
-  }
-
-  return runAgentRoomChat(req, res);
-});
+app.use(
+  '/api',
+  createCollaborationAndKanbanRouter({
+    readState,
+    writeState,
+    updateState,
+    captureTelemetry,
+    now,
+  }),
+);
+// wjz修改结束。
 
 function artifactsFromThreadOutputs(taskType, proposals, thread) {
   const base = [

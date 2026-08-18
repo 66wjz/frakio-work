@@ -787,7 +787,46 @@ def _resolve_runtime(model: str, provider: str | None = None) -> dict[str, Any]:
     from hermes_cli.runtime_provider import resolve_runtime_provider
 
     requested = provider or os.environ.get("HERMES_BRIDGE_PROVIDER", "").strip() or None
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config()
+    except Exception:
+        cfg = {}
+
+    providers_map = cfg.get("providers") or {}
+    clean_req = requested.replace("custom:", "") if requested else ""
+
+    if clean_req and clean_req in providers_map:
+        p_cfg = providers_map[clean_req]
+        if isinstance(p_cfg, dict):
+            return {
+                "provider": p_cfg.get("provider") or "openai",
+                "base_url": p_cfg.get("base_url"),
+                "api_key": p_cfg.get("api_key") or os.environ.get(f"{clean_req.upper().replace('-', '_')}_API_KEY", ""),
+                "api_mode": p_cfg.get("api_mode") or "chat_completions",
+                "model": model or p_cfg.get("model") or p_cfg.get("default"),
+            }
+
+    try:
+        res = resolve_runtime_provider(requested=requested, target_model=model or None)
+        if res and res.get("provider"):
+            return res
+    except Exception:
+        pass
+
+    if providers_map:
+        for k, p_cfg in providers_map.items():
+            if isinstance(p_cfg, dict):
+                return {
+                    "provider": p_cfg.get("provider") or "openai",
+                    "base_url": p_cfg.get("base_url"),
+                    "api_key": p_cfg.get("api_key") or os.environ.get(f"{k.upper().replace('-', '_')}_API_KEY", ""),
+                    "api_mode": p_cfg.get("api_mode") or "chat_completions",
+                    "model": model or p_cfg.get("model") or p_cfg.get("default"),
+                }
+
     return resolve_runtime_provider(requested=requested, target_model=model or None)
+
 
 
 def _load_enabled_toolsets() -> list[str] | None:

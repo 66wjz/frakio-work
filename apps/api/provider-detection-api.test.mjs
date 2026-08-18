@@ -64,7 +64,7 @@ test('automatic detection confirms and returns the v1 runtime root', async (t) =
     }],
     agents: [], threads: [], spaces: [], workspaces: [], vaults: [], integrations: {}, observability: {}, ui: {},
   })}\n`);
-  t.after(() => rm(parent, { recursive: true, force: true }));
+  t.after(() => rm(parent, { recursive: true, force: true }).catch(() => {}));
 
   process.env.FRAKIO_WORK_HOME = home;
   process.env.FRAKIO_WORK_DISABLE_AUTOSTART = '1';

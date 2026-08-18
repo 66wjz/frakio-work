@@ -50,7 +50,7 @@ test('relay compatibility entries stay hidden when an external preset source inc
       if (value === undefined) delete process.env[key];
       else process.env[key] = value;
     }
-    await rm(parent, { recursive: true, force: true });
+    await rm(parent, { recursive: true, force: true }).catch(() => {});
   });
 
   const module = await import(`./server.mjs?provider-presets-api=${Date.now()}-${Math.random()}`);

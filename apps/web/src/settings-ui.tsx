@@ -102,3 +102,6 @@ export function SettingsField({ children, className }: { children: React.ReactNo
 export function SettingsInlineNote({ children }: { children: React.ReactNode }) {
   return <p className="frakio-settings-inline-note">{children}</p>;
 }
+
+export { SettingsStatusValue } from './components/settings/SettingsStatusValue';
+
