@@ -3,27 +3,33 @@
 import React, { useEffect, useId, useRef, useState } from 'react';
 import { motion, useReducedMotion } from 'framer-motion';
 import {
-  Check,
-  CheckCircle2,
-  ChevronDown,
-  ChevronLeft,
-  ChevronRight,
-  Code2,
-  File,
-  FileText,
-  Hand,
-  Image,
-  Lightbulb,
-  LoaderCircle,
-  Network,
-  Pencil,
-  Play,
-  Plus,
-  ShieldAlert,
-  ShieldCheck,
-  UsersRound,
-  X,
-} from 'lucide-react';
+  BaseIcon,
+  BaseButton,
+  BaseInput,
+  BaseBadge,
+  BaseCard,
+} from '../base';
+
+const Check = (p: any) => <BaseIcon name="check" {...p} />;
+const CheckCircle2 = (p: any) => <BaseIcon name="check-circle-2" {...p} />;
+const ChevronDown = (p: any) => <BaseIcon name="chevron-down" {...p} />;
+const ChevronLeft = (p: any) => <BaseIcon name="chevron-left" {...p} />;
+const ChevronRight = (p: any) => <BaseIcon name="chevron-right" {...p} />;
+const Code2 = (p: any) => <BaseIcon name="code2" {...p} />;
+const File = (p: any) => <BaseIcon name="file" {...p} />;
+const FileText = (p: any) => <BaseIcon name="file-text" {...p} />;
+const Hand = (p: any) => <BaseIcon name="hand" {...p} />;
+const Image = (p: any) => <BaseIcon name="image" {...p} />;
+const Lightbulb = (p: any) => <BaseIcon name="lightbulb" {...p} />;
+const LoaderCircle = (p: any) => <BaseIcon name="loader-circle" {...p} />;
+const Network = (p: any) => <BaseIcon name="network" {...p} />;
+const Pencil = (p: any) => <BaseIcon name="pencil" {...p} />;
+const Play = (p: any) => <BaseIcon name="play" {...p} />;
+const Plus = (p: any) => <BaseIcon name="plus" {...p} />;
+const ShieldAlert = (p: any) => <BaseIcon name="shield-alert" {...p} />;
+const ShieldCheck = (p: any) => <BaseIcon name="shield-check" {...p} />;
+const UsersRound = (p: any) => <BaseIcon name="users-round" {...p} />;
+const X = (p: any) => <BaseIcon name="x" {...p} />;
 import {
   AppMenu,
   AppMenuContent,

@@ -26,7 +26,7 @@ export const BaseCheckTag: React.FC<BaseCheckTagProps> = ({
       disabled={disabled}
       onClick={() => onChange?.(!checked)}
       className={`
-        inline-flex items-center gap-1.5 px-3 py-1 text-xs font-medium rounded-full
+        inline-flex items-center gap-1.5 px-3 text-xs font-medium h-[var(--control-height-sm,28px)] rounded-[var(--control-radius-full,9999px)]
         border transition-all select-none cursor-pointer focus:outline-none
         ${disabled ? 'opacity-50 cursor-not-allowed' : ''}
         ${checked

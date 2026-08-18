@@ -33,7 +33,7 @@ export const BaseInput = forwardRef<HTMLInputElement | HTMLTextAreaElement, Base
   const hasValue = Boolean(value && String(value).length > 0);
 
   const baseInputStyle = `
-    w-full px-3 py-1.5 text-sm rounded-md bg-[var(--mac-surface,#ffffff)] 
+    w-full px-3 text-sm h-[var(--control-height-md,34px)] rounded-[var(--control-radius-md,8px)] bg-[var(--mac-surface,#ffffff)] 
     border border-[var(--mac-border)] text-[var(--mac-text)]
     placeholder-[var(--mac-text-placeholder,#9ca3af)]
     focus:outline-none focus:border-[var(--mac-accent)] focus:ring-1 focus:ring-[var(--mac-accent)]

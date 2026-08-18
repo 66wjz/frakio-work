@@ -3,14 +3,24 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  LoaderCircle,
-  Pencil,
-  Plus,
-  Trash2,
-  X,
-} from 'lucide-react';
+  BaseIcon,
+  BaseButton,
+  BaseInput,
+  BaseSelect,
+  BaseBadge,
+  BaseCard,
+  BaseAvatar,
+  BaseModal,
+  BaseAlert,
+} from '../base';
 import { AgentAvatar } from '../common/AgentAvatar';
 import { AvatarCropModal } from '../common/AvatarCropModal';
+
+const LoaderCircle = (p: any) => <BaseIcon name="loader-circle" {...p} />;
+const Pencil = (p: any) => <BaseIcon name="pencil" {...p} />;
+const Plus = (p: any) => <BaseIcon name="plus" {...p} />;
+const Trash2 = (p: any) => <BaseIcon name="trash-2" {...p} />;
+const X = (p: any) => <BaseIcon name="x" {...p} />;
 import { ProviderModelPicker } from '../chat/ProviderModelPicker';
 import { HarnessChoiceGrid } from '../layout/HarnessChoiceGrid';
 import { RuntimeLabel } from '../layout/RuntimeLabel';

@@ -2,14 +2,19 @@
 // 文件内容概述：RuntimeSwitcher 团队 Agent 运行时内核切换与会话状态浮层、ThreadActionsMenu 会话标题/跟随模式/项目资料库及上下文检视菜单。
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import {
-  Check,
-  ChevronDown,
-  FolderOpen,
-  LoaderCircle,
-  MoreHorizontal,
-  Plus,
-  UserPlus,
-} from 'lucide-react';
+  BaseIcon,
+  BaseButton,
+  BaseBadge,
+  BaseAvatar,
+} from '../base';
+
+const Check = (p: any) => <BaseIcon name="check" {...p} />;
+const ChevronDown = (p: any) => <BaseIcon name="chevron-down" {...p} />;
+const FolderOpen = (p: any) => <BaseIcon name="folder-open" {...p} />;
+const LoaderCircle = (p: any) => <BaseIcon name="loader-circle" {...p} />;
+const MoreHorizontal = (p: any) => <BaseIcon name="more-horizontal" {...p} />;
+const Plus = (p: any) => <BaseIcon name="plus" {...p} />;
+const UserPlus = (p: any) => <BaseIcon name="user-plus" {...p} />;
 import {
   AppMenu,
   AppMenuContent,

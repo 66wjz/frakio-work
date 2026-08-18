@@ -24,11 +24,11 @@ export const BaseButton: React.FC<BaseButtonProps> = ({
   className = '',
   ...props
 }) => {
-  const baseClasses = 'base-btn inline-flex items-center justify-center font-medium transition-colors focus:outline-none select-none rounded-md';
+  const baseClasses = 'base-btn inline-flex items-center justify-center font-medium transition-colors focus:outline-none select-none';
   const sizeClasses = {
-    sm: 'px-2.5 py-1 text-xs gap-1.5 min-h-[28px]',
-    md: 'px-3.5 py-1.5 text-sm gap-2 min-h-[34px]',
-    lg: 'px-5 py-2.5 text-base gap-2.5 min-h-[42px]',
+    sm: 'px-2.5 text-xs gap-1.5 h-[var(--control-height-sm,28px)] rounded-[var(--control-radius-sm,6px)]',
+    md: 'px-3.5 text-sm gap-2 h-[var(--control-height-md,34px)] rounded-[var(--control-radius-md,8px)]',
+    lg: 'px-5 text-base gap-2.5 h-[var(--control-height-lg,42px)] rounded-[var(--control-radius-lg,12px)]',
   }[size];
 
   const variantClasses = {

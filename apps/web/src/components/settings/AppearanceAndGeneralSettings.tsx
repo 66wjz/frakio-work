@@ -1,18 +1,6 @@
-// wjz新建文件，新建原因：解耦外观与通用设置页面组件（AppearanceSettingsPage, WorkbenchResponseSettings, TelemetrySettingsPanel 等），修改时间：2026-08-17。
-// 文件内容概述：系统主题/外观切换、紧凑模式、左侧置顶项配置、流式响应体验、隐私/遥测统计、桌面版更新状态指示器与归档对话面板。
+// wjz修改开始，修改原因：全面应用 BaseIcon, BaseButton, BaseEmptyState, BaseBadge 等基础组件库并消除散落的 lucide 图标导入，修改时间：2026-08-18。
 import React from 'react';
-import {
-  Archive,
-  ArrowDownToLine,
-  Check,
-  LoaderCircle,
-  Monitor,
-  Moon,
-  MoreHorizontal,
-  RefreshCw,
-  Sun,
-  Trash2,
-} from 'lucide-react';
+import { BaseIcon, BaseButton, BaseEmptyState, BaseBadge } from '../base';
 import {
   SettingsInlineNote,
   SettingsPanel,
@@ -117,15 +105,15 @@ export function AppearanceSettingsPage({
               >
                 {appearance === 'system' ? (
                   <>
-                    <Monitor size={14} />系统
+                    <BaseIcon name="monitor" size={14} />系统
                   </>
                 ) : appearance === 'light' ? (
                   <>
-                    <Sun size={14} />浅色
+                    <BaseIcon name="sun" size={14} />浅色
                   </>
                 ) : (
                   <>
-                    <Moon size={14} />深色
+                    <BaseIcon name="moon" size={14} />深色
                   </>
                 )}
               </button>
@@ -224,12 +212,12 @@ export function TelemetryNotice({
         </p>
       </div>
       <div className="telemetry-notice-actions">
-        <button className="secondary-btn" onClick={onDecline}>
+        <BaseButton variant="secondary" size="sm" onClick={onDecline}>
           不发送
-        </button>
-        <button className="send-btn" onClick={onAllow}>
+        </BaseButton>
+        <BaseButton variant="primary" size="sm" onClick={onAllow}>
           同意
-        </button>
+        </BaseButton>
       </div>
     </aside>
   );
@@ -263,14 +251,14 @@ export function DesktopUpdateBadge({
         : state.phase === 'downloaded'
           ? `Frakio Work ${version} 已下载，点击安装`
           : `Frakio Work ${version} 下载失败，点击重试`;
-  const Icon =
+  const iconName =
     state.phase === 'downloading'
-      ? LoaderCircle
+      ? 'loader-circle'
       : state.phase === 'downloaded'
-        ? Check
+        ? 'check'
         : state.phase === 'error'
-          ? RefreshCw
-          : ArrowDownToLine;
+          ? 'refresh-cw'
+          : 'arrow-down-to-line';
   return (
     <AppPopover open={open} onOpenChange={onOpenChange}>
       <AppPopoverTrigger asChild>
@@ -280,7 +268,7 @@ export function DesktopUpdateBadge({
           aria-label={label}
           title={label}
         >
-          <Icon size={13} aria-hidden="true" />
+          <BaseIcon name={iconName} size={13} spinning={state.phase === 'downloading'} />
         </button>
       </AppPopoverTrigger>
       <AppPopoverContent side="top" align="end" className="desktop-update-popover">
@@ -290,9 +278,9 @@ export function DesktopUpdateBadge({
               <strong>Frakio Work {version} 已准备好</strong>
               <small>打开安装包后，将新版拖入 Applications 替换当前版本。</small>
             </div>
-            <button type="button" className="send-btn" onClick={onInstall}>
+            <BaseButton variant="primary" size="sm" block onClick={onInstall}>
               退出并打开安装包
-            </button>
+            </BaseButton>
           </>
         ) : (
           <>
@@ -308,9 +296,9 @@ export function DesktopUpdateBadge({
             <div className="desktop-update-progress" aria-hidden="true">
               <span style={{ width: `${percent}%` }} />
             </div>
-            <button type="button" className="secondary-btn" onClick={onCancel}>
+            <BaseButton variant="secondary" size="sm" block onClick={onCancel}>
               取消下载
-            </button>
+            </BaseButton>
           </>
         )}
       </AppPopoverContent>
@@ -351,7 +339,9 @@ export function ArchivedThreadsPanel({
           </p>
         </div>
         {threads.length > 0 && (
-          <span className="settings-head-count">{threads.length} 个归档</span>
+          <BaseBadge variant="neutral" size="md">
+            {threads.length} 个归档
+          </BaseBadge>
         )}
       </div>
       <section className="studio-settings-panel archived-threads-panel">
@@ -370,19 +360,21 @@ export function ArchivedThreadsPanel({
                     : formatTime(thread.updatedAt)}
                 </span>
               </div>
-              <button
-                className="secondary-btn compact"
+              <BaseButton
+                variant="secondary"
+                size="sm"
+                icon="rotate-ccw"
                 onClick={() => void restore(thread)}
               >
                 恢复
-              </button>
+              </BaseButton>
               <AppMenu>
                 <AppMenuTrigger asChild>
                   <button
                     className="icon-btn small"
                     aria-label={`更多操作：${thread.title}`}
                   >
-                    <MoreHorizontal size={16} />
+                    <BaseIcon name="more-horizontal" size={16} />
                   </button>
                 </AppMenuTrigger>
                 <AppMenuContent align="end">
@@ -390,7 +382,7 @@ export function ArchivedThreadsPanel({
                     variant="destructive"
                     onSelect={() => void remove(thread)}
                   >
-                    <Trash2 size={15} />
+                    <BaseIcon name="trash-2" size={15} />
                     删除对话
                   </AppMenuItem>
                 </AppMenuContent>
@@ -398,14 +390,14 @@ export function ArchivedThreadsPanel({
             </div>
           ))
         ) : (
-          <div className="settings-empty-state archived-empty-state">
-            <Archive size={24} aria-hidden="true" />
-            <strong>还没有归档对话</strong>
-            <span>归档后的对话会显示在这里，可随时恢复。</span>
-          </div>
+          <BaseEmptyState
+            icon="archive"
+            title="还没有归档对话"
+            description="归档后的对话会显示在这里，可随时恢复。"
+          />
         )}
       </section>
     </>
   );
 }
-// wjz新建文件结束。
+// wjz修改结束。

@@ -3,17 +3,22 @@
 import React, { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion, useReducedMotion } from 'framer-motion';
 import {
-  ArrowUp,
-  ArrowUpRight,
-  Check,
-  CheckCircle2,
-  ChevronRight,
-  LoaderCircle,
-  PauseCircle,
-  Square,
-  TriangleAlert,
-  X,
-} from 'lucide-react';
+  BaseIcon,
+  BaseButton,
+  BaseBadge,
+  BaseAlert,
+} from '../base';
+
+const ArrowUp = (p: any) => <BaseIcon name="arrow-up" {...p} />;
+const ArrowUpRight = (p: any) => <BaseIcon name="arrow-up-right" {...p} />;
+const Check = (p: any) => <BaseIcon name="check" {...p} />;
+const CheckCircle2 = (p: any) => <BaseIcon name="check-circle-2" {...p} />;
+const ChevronRight = (p: any) => <BaseIcon name="chevron-right" {...p} />;
+const LoaderCircle = (p: any) => <BaseIcon name="loader-circle" {...p} />;
+const PauseCircle = (p: any) => <BaseIcon name="pause-circle" {...p} />;
+const Square = (p: any) => <BaseIcon name="square" {...p} />;
+const TriangleAlert = (p: any) => <BaseIcon name="triangle-alert" {...p} />;
+const X = (p: any) => <BaseIcon name="x" {...p} />;
 import type {
   RunActivityGroup,
   RunActivityItem,

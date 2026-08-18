@@ -36,7 +36,7 @@ export const BaseSelect: React.FC<BaseSelectProps> = ({
         )}
         <select
           className={`
-            w-full px-3 py-1.5 pr-8 text-sm rounded-md bg-[var(--mac-surface,#ffffff)]
+            w-full px-3 pr-8 text-sm h-[var(--control-height-md,34px)] rounded-[var(--control-radius-md,8px)] bg-[var(--mac-surface,#ffffff)]
             border border-[var(--mac-border)] text-[var(--mac-text)]
             focus:outline-none focus:border-[var(--mac-accent)] focus:ring-1 focus:ring-[var(--mac-accent)]
             transition-all appearance-none cursor-pointer

@@ -3,18 +3,23 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  Check,
-  Copy,
-  FileText,
-  FolderOpen,
-  GitBranch,
-  Image,
-  LoaderCircle,
-  RefreshCw,
-  ThumbsDown,
-  ThumbsUp,
-  X,
-} from 'lucide-react';
+  BaseIcon,
+  BaseAvatar,
+  BaseBadge,
+  BaseButton,
+} from '../base';
+
+const Check = (p: any) => <BaseIcon name="check" {...p} />;
+const Copy = (p: any) => <BaseIcon name="copy" {...p} />;
+const FileText = (p: any) => <BaseIcon name="file-text" {...p} />;
+const FolderOpen = (p: any) => <BaseIcon name="folder-open" {...p} />;
+const GitBranch = (p: any) => <BaseIcon name="git-branch" {...p} />;
+const Image = (p: any) => <BaseIcon name="image" {...p} />;
+const LoaderCircle = (p: any) => <BaseIcon name="loader-circle" {...p} />;
+const RefreshCw = (p: any) => <BaseIcon name="refresh-cw" {...p} />;
+const ThumbsDown = (p: any) => <BaseIcon name="thumbs-down" {...p} />;
+const ThumbsUp = (p: any) => <BaseIcon name="thumbs-up" {...p} />;
+const X = (p: any) => <BaseIcon name="x" {...p} />;
 import type { Attachment } from '@frakio/contracts';
 import type {
   Agent,

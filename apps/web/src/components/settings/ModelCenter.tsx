@@ -3,18 +3,28 @@
 import React, { useCallback, useEffect, useId, useMemo, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import {
-  Plus,
-  Trash2,
-  X,
-  RefreshCw,
-  LoaderCircle,
-  ChevronDown,
-  CircleHelp,
-  TriangleAlert,
-  ShieldCheck,
-  ExternalLink,
-  CheckCircle2,
-} from 'lucide-react';
+  BaseIcon,
+  BaseButton,
+  BaseInput,
+  BaseSelect,
+  BaseBadge,
+  BaseCard,
+  BaseModal,
+  BaseAlert,
+  BaseEmptyState,
+} from '../base';
+
+const Plus = (p: any) => <BaseIcon name="plus" {...p} />;
+const Trash2 = (p: any) => <BaseIcon name="trash-2" {...p} />;
+const X = (p: any) => <BaseIcon name="x" {...p} />;
+const RefreshCw = (p: any) => <BaseIcon name="refresh-cw" {...p} />;
+const LoaderCircle = (p: any) => <BaseIcon name="loader-circle" {...p} />;
+const ChevronDown = (p: any) => <BaseIcon name="chevron-down" {...p} />;
+const CircleHelp = (p: any) => <BaseIcon name="circle-help" {...p} />;
+const TriangleAlert = (p: any) => <BaseIcon name="triangle-alert" {...p} />;
+const ShieldCheck = (p: any) => <BaseIcon name="shield-check" {...p} />;
+const ExternalLink = (p: any) => <BaseIcon name="external-link" {...p} />;
+const CheckCircle2 = (p: any) => <BaseIcon name="check-circle-2" {...p} />;
 import { SettingsPanel, SettingsRow } from '../../settings-ui';
 import { SettingsStatusValue } from './SettingsStatusValue';
 import { requestJson } from '../../utils/api-client';

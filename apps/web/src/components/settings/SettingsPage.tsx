@@ -2,28 +2,36 @@
 // 文件内容概述：设置中心 12 个领域子页面路由分发（个人资料、工作台、外观、隐私、归档、Agent、记忆中心、资料库、技能、插件、工具能力、Runtime Center、模型、Hermes 集成、MCP、频道、任务、监控、系统状态、版本更新）与设置检索导航栏。
 import React, { useState } from 'react';
 import {
-  Activity,
-  Archive,
-  ArrowLeft,
-  Bot,
-  Boxes,
-  Brain,
-  Cable,
-  Clock3,
-  Cpu,
-  Database,
-  MessageSquare,
-  Network,
-  Palette,
-  PanelRight,
-  RefreshCw,
-  Search,
-  Settings,
-  ShieldCheck,
-  Sparkles,
-  UserCircle,
-  X,
-} from 'lucide-react';
+  BaseIcon,
+  BaseButton,
+  BaseInput,
+  BaseSelect,
+  BaseBadge,
+  BaseCard,
+  BaseEmptyState,
+} from '../base';
+
+const Activity = (p: any) => <BaseIcon name="activity" {...p} />;
+const Archive = (p: any) => <BaseIcon name="archive" {...p} />;
+const ArrowLeft = (p: any) => <BaseIcon name="arrow-left" {...p} />;
+const Bot = (p: any) => <BaseIcon name="bot" {...p} />;
+const Boxes = (p: any) => <BaseIcon name="boxes" {...p} />;
+const Brain = (p: any) => <BaseIcon name="brain" {...p} />;
+const Cable = (p: any) => <BaseIcon name="cable" {...p} />;
+const Clock3 = (p: any) => <BaseIcon name="clock3" {...p} />;
+const Cpu = (p: any) => <BaseIcon name="cpu" {...p} />;
+const Database = (p: any) => <BaseIcon name="database" {...p} />;
+const MessageSquare = (p: any) => <BaseIcon name="message-square" {...p} />;
+const Network = (p: any) => <BaseIcon name="network" {...p} />;
+const Palette = (p: any) => <BaseIcon name="palette" {...p} />;
+const PanelRight = (p: any) => <BaseIcon name="panel-right" {...p} />;
+const RefreshCw = (p: any) => <BaseIcon name="refresh-cw" {...p} />;
+const Search = (p: any) => <BaseIcon name="search" {...p} />;
+const Settings = (p: any) => <BaseIcon name="settings" {...p} />;
+const ShieldCheck = (p: any) => <BaseIcon name="shield-check" {...p} />;
+const Sparkles = (p: any) => <BaseIcon name="sparkles" {...p} />;
+const UserCircle = (p: any) => <BaseIcon name="user-circle" {...p} />;
+const X = (p: any) => <BaseIcon name="x" {...p} />;
 import {
   SettingsField,
   SettingsInlineNote,

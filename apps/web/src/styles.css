@@ -1,4 +1,24 @@
 :root {
+  /* 统一控件尺寸规范 (Control Heights) */
+  --control-height-sm: 28px;
+  --control-height-md: 34px;
+  --control-height-lg: 42px;
+
+  /* 统一圆角规范 (Radius) */
+  --control-radius-sm: 6px;
+  --control-radius-md: 8px;
+  --control-radius-lg: 12px;
+  --control-radius-full: 9999px;
+
+  /* 统一层级规范 (Z-Index Hierarchy) */
+  --z-base: 1;
+  --z-dropdown: 100;
+  --z-sticky: 500;
+  --z-modal: 2000;
+  --z-modal-nested: 2100;
+  --z-tooltip: 3000;
+  --z-toast: 9999;
+
   color: #172033;
   background: transparent;
   font-family: "Space Grotesk", Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;

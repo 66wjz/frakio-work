@@ -2,38 +2,45 @@
 // 文件内容概述：RightRailLauncher 工具导航入口、CollaborationContextPanel 协作进度全景盘、BrowserPanel 内嵌受控浏览器及批注、ProjectFilesPanel 项目文件树、ReviewPanel 只读差异审阅面板、CodexResourcePanel 资源汇总与会话概览导轨。
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
-  Activity,
-  ArrowLeft,
-  BookOpenText,
-  Boxes,
-  Check,
-  CheckCircle2,
-  ChevronRight,
-  Circle,
-  Clock3,
-  Database,
-  ExternalLink,
-  File,
-  FileText,
-  Folder,
-  FolderOpen,
-  GitCompareArrows,
-  Globe2,
-  Library,
-  Link2,
-  LoaderCircle,
-  Minus,
-  Monitor,
-  MoreHorizontal,
-  MousePointer2,
-  PauseCircle,
-  RefreshCw,
-  Scan,
-  Search,
-  Settings,
-  Square,
-  X,
-} from 'lucide-react';
+  BaseIcon,
+  BaseButton,
+  BaseInput,
+  BaseBadge,
+  BaseCard,
+  BaseEmptyState,
+} from '../base';
+
+const Activity = (p: any) => <BaseIcon name="activity" {...p} />;
+const ArrowLeft = (p: any) => <BaseIcon name="arrow-left" {...p} />;
+const BookOpenText = (p: any) => <BaseIcon name="book-open-text" {...p} />;
+const Boxes = (p: any) => <BaseIcon name="boxes" {...p} />;
+const Check = (p: any) => <BaseIcon name="check" {...p} />;
+const CheckCircle2 = (p: any) => <BaseIcon name="check-circle-2" {...p} />;
+const ChevronRight = (p: any) => <BaseIcon name="chevron-right" {...p} />;
+const Circle = (p: any) => <BaseIcon name="circle" {...p} />;
+const Clock3 = (p: any) => <BaseIcon name="clock3" {...p} />;
+const Database = (p: any) => <BaseIcon name="database" {...p} />;
+const ExternalLink = (p: any) => <BaseIcon name="external-link" {...p} />;
+const File = (p: any) => <BaseIcon name="file" {...p} />;
+const FileText = (p: any) => <BaseIcon name="file-text" {...p} />;
+const Folder = (p: any) => <BaseIcon name="folder" {...p} />;
+const FolderOpen = (p: any) => <BaseIcon name="folder-open" {...p} />;
+const GitCompareArrows = (p: any) => <BaseIcon name="git-compare-arrows" {...p} />;
+const Globe2 = (p: any) => <BaseIcon name="globe2" {...p} />;
+const Library = (p: any) => <BaseIcon name="library" {...p} />;
+const Link2 = (p: any) => <BaseIcon name="link2" {...p} />;
+const LoaderCircle = (p: any) => <BaseIcon name="loader-circle" {...p} />;
+const Minus = (p: any) => <BaseIcon name="minus" {...p} />;
+const Monitor = (p: any) => <BaseIcon name="monitor" {...p} />;
+const MoreHorizontal = (p: any) => <BaseIcon name="more-horizontal" {...p} />;
+const MousePointer2 = (p: any) => <BaseIcon name="mouse-pointer-2" {...p} />;
+const PauseCircle = (p: any) => <BaseIcon name="pause-circle" {...p} />;
+const RefreshCw = (p: any) => <BaseIcon name="refresh-cw" {...p} />;
+const Scan = (p: any) => <BaseIcon name="scan" {...p} />;
+const Search = (p: any) => <BaseIcon name="search" {...p} />;
+const Settings = (p: any) => <BaseIcon name="settings" {...p} />;
+const Square = (p: any) => <BaseIcon name="square" {...p} />;
+const X = (p: any) => <BaseIcon name="x" {...p} />;
 import {
   AppMenu,
   AppMenuContent,

@@ -2,16 +2,21 @@
 // 文件内容概述：RailScrollingTitle 悬停平滑滚动标题、ThreadRailContent 会话导航条目、RenameDialog 重命名模态窗、RailContextMenu 侧边栏右键菜单、RailConfirmDialog 删除确认弹窗。
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
-  Archive,
-  Copy,
-  FolderOpen,
-  MoreHorizontal,
-  Pencil,
-  Pin,
-  Settings,
-  Trash2,
-  X,
-} from 'lucide-react';
+  BaseIcon,
+  BaseButton,
+  BaseInput,
+  BaseModal,
+} from '../base';
+
+const Archive = (p: any) => <BaseIcon name="archive" {...p} />;
+const Copy = (p: any) => <BaseIcon name="copy" {...p} />;
+const FolderOpen = (p: any) => <BaseIcon name="folder-open" {...p} />;
+const MoreHorizontal = (p: any) => <BaseIcon name="more-horizontal" {...p} />;
+const Pencil = (p: any) => <BaseIcon name="pencil" {...p} />;
+const Pin = (p: any) => <BaseIcon name="pin" {...p} />;
+const Settings = (p: any) => <BaseIcon name="settings" {...p} />;
+const Trash2 = (p: any) => <BaseIcon name="trash-2" {...p} />;
+const X = (p: any) => <BaseIcon name="x" {...p} />;
 import {
   AppAlertDialog,
   AppAlertDialogAction,

@@ -1,7 +1,13 @@
 // wjz新建文件，新建原因：解耦全局搜索快捷浮层组件（GlobalSearchDialog），修改时间：2026-08-17。
 // 文件内容概述：全局 Cmd/Ctrl+K 对话、Agent 与设置页面快速搜索弹窗。
 import React, { useEffect, useState } from 'react';
-import { Bot, MessageSquare, Search, Settings, X } from 'lucide-react';
+import { BaseIcon, BaseInput } from '../base';
+
+const Bot = (p: any) => <BaseIcon name="bot" {...p} />;
+const MessageSquare = (p: any) => <BaseIcon name="message-square" {...p} />;
+const Search = (p: any) => <BaseIcon name="search" {...p} />;
+const Settings = (p: any) => <BaseIcon name="settings" {...p} />;
+const X = (p: any) => <BaseIcon name="x" {...p} />;
 import type { Agent, ThreadSummary } from '../../types/workbench';
 
 export function GlobalSearchDialog({

@@ -1,7 +1,7 @@
 // wjz新建文件，新建原因：解耦 main.tsx 中的受控 Web 服务登录校验与首次改密门禁（ManagedWebAuthGate），修改时间：2026-08-17。
 // 文件内容概述：ManagedWebAuthGate 登录拦截器与 FirstManagedPasswordChange 首次登录修改密码模态界面。
 import React, { useEffect, useState } from 'react';
-import frakioBrandLogoUrl from '../../assets/frakio-brand-logo.png';
+import { BaseInput, BaseButton, BaseAlert, BaseIcon } from '../base';
 
 export function ManagedWebAuthGate({ children }: { children: React.ReactNode }) {
   const [state, setState] = useState<'loading' | 'ready' | 'login' | 'change-password'>('loading');
@@ -66,35 +66,50 @@ export function ManagedWebAuthGate({ children }: { children: React.ReactNode }) 
   return (
     <main className="managed-web-auth-shell">
       <form className="managed-web-auth-card" onSubmit={submit}>
-        <img src={frakioBrandLogoUrl} alt="" />
-        <div>
-          <h1>Frakio Work</h1>
-          <p>输入这台工作台的管理员密码。</p>
+        <div className="flex items-center gap-3">
+          <BaseIcon name="brand-logo" size={40} />
+          <div>
+            <h1 className="text-xl font-bold">Frakio Work</h1>
+            <p className="text-xs text-[var(--mac-text-muted,#6b7280)]">输入工作台的管理员密码</p>
+          </div>
         </div>
-        <label>
-          <span>管理员密码</span>
-          <input
+
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs font-semibold text-[var(--mac-text)]">管理员密码</label>
+          <BaseInput
             autoFocus
             type="password"
             autoComplete="current-password"
+            prefixIcon="lock"
+            placeholder="请输入密码"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
           />
-        </label>
+        </div>
+
         {defaultPasswordHint && (
-          <small className="managed-web-default-password">
+          <small className="managed-web-default-password text-xs text-[var(--mac-text-muted,#6b7280)]">
             首次登录密码：<strong>{defaultPasswordHint}</strong>。登录后需要立即修改。
           </small>
         )}
+
         {error ? (
-          <p className="managed-web-auth-error" role="alert">
+          <BaseAlert variant="error" closable onClose={() => setError('')}>
             {error}
-          </p>
+          </BaseAlert>
         ) : null}
-        <button type="submit" disabled={!password || submitting}>
+
+        <BaseButton
+          type="submit"
+          variant="primary"
+          block
+          loading={submitting}
+          disabled={!password || submitting}
+          icon="log-in"
+        >
           {submitting ? '正在登录…' : '进入工作台'}
-        </button>
-        <small>仅限可信局域网使用。不要把此 HTTP 地址直接暴露到公网。</small>
+        </BaseButton>
+        <small className="text-[11px] text-[var(--mac-text-muted,#9ca3af)] text-center">仅限可信局域网使用。不要把此 HTTP 地址直接暴露到公网。</small>
       </form>
     </main>
   );
@@ -130,40 +145,58 @@ export function FirstManagedPasswordChange({ onComplete }: { onComplete: () => v
   return (
     <main className="managed-web-auth-shell">
       <form className="managed-web-auth-card" onSubmit={submit}>
-        <img src={frakioBrandLogoUrl} alt="" />
-        <div>
-          <h1>设置管理员密码</h1>
-          <p>首次登录需要设置新的管理员密码。</p>
+        <div className="flex items-center gap-3">
+          <BaseIcon name="brand-logo" size={40} />
+          <div>
+            <h1 className="text-xl font-bold">设置管理员密码</h1>
+            <p className="text-xs text-[var(--mac-text-muted,#6b7280)]">首次登录需要设置新的管理员密码</p>
+          </div>
         </div>
-        <label>
-          <span>新密码</span>
-          <input
+
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs font-semibold text-[var(--mac-text)]">新密码</label>
+          <BaseInput
             autoFocus
             type="password"
             autoComplete="new-password"
+            prefixIcon="lock"
+            placeholder="至少 10 个字符"
             value={password}
             onChange={(event) => setPassword(event.target.value)}
           />
-        </label>
-        <label>
-          <span>确认新密码</span>
-          <input
+        </div>
+
+        <div className="flex flex-col gap-1.5">
+          <label className="text-xs font-semibold text-[var(--mac-text)]">确认新密码</label>
+          <BaseInput
             type="password"
             autoComplete="new-password"
+            prefixIcon="shield-check"
+            placeholder="再次输入新密码"
             value={confirmation}
             onChange={(event) => setConfirmation(event.target.value)}
           />
-        </label>
+        </div>
+
         {error ? (
-          <p className="managed-web-auth-error" role="alert">
+          <BaseAlert variant="error" closable onClose={() => setError('')}>
             {error}
-          </p>
+          </BaseAlert>
         ) : null}
-        <button type="submit" disabled={!password || !confirmation || saving}>
+
+        <BaseButton
+          type="submit"
+          variant="primary"
+          block
+          loading={saving}
+          disabled={!password || !confirmation || saving}
+          icon="check"
+        >
           {saving ? '正在保存…' : '保存并进入工作台'}
-        </button>
+        </BaseButton>
       </form>
     </main>
   );
 }
 // wjz新建文件结束。
+

@@ -3,32 +3,32 @@
 // wjz新建文件结束。
 
 import React, { useCallback, useEffect, useMemo, useState } from 'react';
-import {
-  Activity,
-  ArrowLeft,
-  ArrowUp,
-  BookOpenText,
-  Bot,
-  ChevronRight,
-  Clock3,
-  Database,
-  ExternalLink,
-  FileText,
-  FolderOpen,
-  GitBranch,
-  GitCompareArrows,
-  Globe2,
-  Link2,
-  LoaderCircle,
-  MoreHorizontal,
-  Plus,
-  RefreshCw,
-  Search,
-  ShieldCheck,
-  Sparkles,
-  Trash2,
-  TriangleAlert,
-} from 'lucide-react';
+import { BaseIcon, BaseButton, BaseInput, BaseSelect, BaseBadge, BaseCard, BaseEmptyState, BaseSpinner, BaseAlert } from '../base';
+
+const Activity = (p: any) => <BaseIcon name="activity" {...p} />;
+const ArrowLeft = (p: any) => <BaseIcon name="arrow-left" {...p} />;
+const ArrowUp = (p: any) => <BaseIcon name="arrow-up" {...p} />;
+const BookOpenText = (p: any) => <BaseIcon name="book-open-text" {...p} />;
+const Bot = (p: any) => <BaseIcon name="bot" {...p} />;
+const ChevronRight = (p: any) => <BaseIcon name="chevron-right" {...p} />;
+const Clock3 = (p: any) => <BaseIcon name="clock3" {...p} />;
+const Database = (p: any) => <BaseIcon name="database" {...p} />;
+const ExternalLink = (p: any) => <BaseIcon name="external-link" {...p} />;
+const FileText = (p: any) => <BaseIcon name="file-text" {...p} />;
+const FolderOpen = (p: any) => <BaseIcon name="folder-open" {...p} />;
+const GitBranch = (p: any) => <BaseIcon name="git-branch" {...p} />;
+const GitCompareArrows = (p: any) => <BaseIcon name="git-compare-arrows" {...p} />;
+const Globe2 = (p: any) => <BaseIcon name="globe2" {...p} />;
+const Link2 = (p: any) => <BaseIcon name="link2" {...p} />;
+const LoaderCircle = (p: any) => <BaseIcon name="loader-circle" {...p} />;
+const MoreHorizontal = (p: any) => <BaseIcon name="more-horizontal" {...p} />;
+const Plus = (p: any) => <BaseIcon name="plus" {...p} />;
+const RefreshCw = (p: any) => <BaseIcon name="refresh-cw" {...p} />;
+const Search = (p: any) => <BaseIcon name="search" {...p} />;
+const ShieldCheck = (p: any) => <BaseIcon name="shield-check" {...p} />;
+const Sparkles = (p: any) => <BaseIcon name="sparkles" {...p} />;
+const Trash2 = (p: any) => <BaseIcon name="trash-2" {...p} />;
+const TriangleAlert = (p: any) => <BaseIcon name="triangle-alert" {...p} />;
 import type { Agent, ModelProfile, Vault, VaultDetail } from '../../types/workbench';
 import { requestJson } from '../../utils/api-client';
 import { formatTime } from '../../utils/formatters';
