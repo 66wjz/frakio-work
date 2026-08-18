@@ -155,12 +155,19 @@ npm run dev
 
 本项目已完成高内聚、低耦合的架构治理与组件化改造，并建立了标准化开发流程体系：
 
-### 1. 核心架构与文档矩阵
-- 📘 **[二次开发快速上手指南](docs/二次开发指南.md)**：前后端解耦结构、Router 工厂模式与二开接入范式。
-- 🔄 **[上游同步与二开版本管理指南](docs/上游同步与二开版本管理指南.md)**：Fork + Upstream 双源模型、官方发版 3 步同步法与多内核沙箱隔离剖析。
-- 🎨 **[前端设计规范与 Token 体系手册](docs/前端设计规范与Token体系手册.md)**：统一控件高度（28px/34px/42px）、圆角与全局 Z-Index 防穿透规范。
-- 🧩 **[基础与复合组件库使用手册 (BASE_COMPONENTS_GUIDE)](apps/web/src/components/BASE_COMPONENTS_GUIDE.md)**：15 个 Base 原子组件、6 个 Composite 复合组件与 `BaseIcon` 统一图标中心。
-- 🚀 **[多 Agent 调度编排与飞书通道扩展方案](docs/Frakio_Work扩展改造方案_调度引擎与飞书通道.md)**：多 Agent 任务 DAG 编排与飞书 Bot 群聊接入蓝图。
+### 1. 核心架构与设计文档矩阵
+- 📋 **[需求规格说明书](docs/需求规格.md)**：多 Agent 协同体系、双内核生活/编码定位与用户故事。
+- 👥 **[面向客户的功能清单](docs/面向客户的功能清单.md)**：纯文本端功能定义与核心业务演示验证清单。
+- 🏛️ **[系统架构设计说明书](docs/架构设计.md)**：分层架构图、Express 领域 Router 模式与设计决策。
+- 🔄 **[系统核心流程与时序图](docs/系统核心流程.md)**：Mermaid 会话推流时序图、审批决策链与对外能力清单。
+- 🔌 **[API 契约文档](docs/API契约.md)** / **[后端接口文档](docs/接口文档.md)**：RESTful 契约、SSE 协议与需求对应矩阵。
+- 💾 **[数据库与存储设计](docs/数据库设计.md)**：State JSON 结构与 Hermes Profile SQLite 数据模型。
+- 📘 **[二次开发快速上手指南](docs/二次开发指南.md)**：前后端解耦结构与二开接入范式。
+- 🔄 **[上游同步与二开版本管理指南](docs/上游同步与二开版本管理指南.md)**：Fork + Upstream 双源模型与沙箱隔离剖析。
+- 🎨 **[前端设计规范与 Token 体系手册](docs/前端设计规范与Token体系手册.md)**：统一控件高度（28px/34px/42px）与全局 Z-Index 规范。
+- 🧩 **[基础与复合组件库使用手册](apps/web/src/components/BASE_COMPONENTS_GUIDE.md)**：15 个 Base 原子组件与 6 个 Composite 复合组件。
+- 🧪 **[测试手册](docs/测试手册.md)** / 🚀 **[部署手册](docs/部署手册.md)** / 📊 **[功能完成情况](docs/功能完成情况.md)**：质量保障与部署验收。
+- 🗄️ **[历史归档索引 (archived)](docs/archived/README.md)**：被标准文档吸收取代的历史设计草案。
 
 ### 2. 标准化开发流与门禁 (.devflow)
 - 📋 **[流程状态与门禁看板 (.devflow/STATE.md)](.devflow/STATE.md)**：实时追踪 Stage 0 ~ Stage 6 的流转与门禁锁。

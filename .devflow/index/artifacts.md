@@ -19,8 +19,19 @@
 | **stage-2** | 基础组件库使用指南 | [`apps/web/src/components/BASE_COMPONENTS_GUIDE.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/apps/web/src/components/BASE_COMPONENTS_GUIDE.md) | `approved` | 15 个 Base 原子组件与 6 个 Composite 复合组件手册。 |
 | **stage-2** | 二次开发指南 | [`docs/二次开发指南.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/docs/二次开发指南.md) | `approved` | 领域 Router 解耦与前后端二开扩展实战手册。 |
 | **stage-2** | 上游同步与二开管理指南 | [`docs/上游同步与二开版本管理指南.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/docs/上游同步与二开版本管理指南.md) | `approved` | Fork + Upstream 双源模型与沙箱隔离原理。 |
+| **stage-3** | 后端接口文档 | [`docs/接口文档.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/docs/接口文档.md) | `approved` | 后端 Express 领域 Router 详细接口参数与说明。 |
 | **stage-5** | 联调与集成记录 | [`.devflow/integration-log.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/.devflow/integration-log.md) | `approved` | 500 修复与 Kimi 真机对话调通测试记录。 |
 | **stage-6** | 功能完成情况矩阵 | [`docs/功能完成情况.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/docs/功能完成情况.md) | `approved` | 基线功能完成度与验证方式对照表。 |
 | **stage-6** | 测试手册 | [`docs/测试手册.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/docs/测试手册.md) | `approved` | 自动化测试门禁与端到端真机冒烟用例。 |
 | **stage-6** | 部署手册 | [`docs/部署手册.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/docs/部署手册.md) | `approved` | 源码启动、Docker 容器化与数据隔离说明。 |
+
+---
+
+## 2. 规划、归档与设计稿索引
+
+| 类别 | 目录路径 | 索引文件 | 说明 |
+| :--- | :--- | :--- | :--- |
+| **设计稿与原型** | `docs/designs/` | [`docs/designs/README.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/docs/designs/README.md) | 存放 UI 交互设计草案与原型索引。 |
+| **历史归档** | `docs/archived/` | [`docs/archived/README.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/docs/archived/README.md) | 存放已被标准文档吸收取代的历史草案。 |
+| **B 线设计变更** | `docs/_changes/` | [`docs/_changes/README.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/docs/_changes/README.md) | 承接体验走查与维护迭代下的设计变更临时台账。 |
 <!-- wjz新建文件结束。 -->
