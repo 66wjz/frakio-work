@@ -1,0 +1,73 @@
+# wjz新建文件，新建原因：定义 Stage 0 ~ Stage 6 门禁规范配置，修改时间：2026-08-18。
+stages:
+  - id: stage-0
+    name: 基线锁定与环境准备
+    status: passed
+    criteria:
+      - check: 全量语法与类型检查无阻塞错误
+        result: passed
+      - check: 流程状态看板与变更日志就绪
+        result: passed
+
+  - id: stage-1
+    name: 前端巨石拆解
+    status: passed
+    criteria:
+      - check: main.tsx 拆解至领域目录
+        result: passed
+      - check: tsc -b 全量类型检查 0 error
+        result: passed
+
+  - id: stage-2
+    name: 后端入口解耦
+    status: passed
+    criteria:
+      - check: server.mjs 拆解为 8 大 Express Router 工厂
+        result: passed
+      - check: 单元测试 100% 全绿
+        result: passed
+
+  - id: stage-3
+    name: 基础组件与统一图标封装
+    status: passed
+    criteria:
+      - check: 封装 15 个 Base 原子组件与 6 个 Composite 复合组件
+        result: passed
+      - check: 封装 BaseIcon 统一收拢 Lucide 矢量与 Runtime SVG 图标
+        result: passed
+      - check: 编写 BASE_COMPONENTS_GUIDE.md
+        result: passed
+
+  - id: stage-4
+    name: 二次开发与架构手册
+    status: passed
+    criteria:
+      - check: docs/二次开发指南.md 完备
+        result: passed
+      - check: docs/上游同步与二开版本管理指南.md 完备
+        result: passed
+
+  - id: stage-5
+    name: 真机模型联调与版本管理
+    status: passed
+    criteria:
+      - check: 修复 500 报错与 Python Bridge 自定义 Provider 解析
+        result: passed
+      - check: Kimi 模型端到端对话成功返回 202 与实时回复
+        result: passed
+      - check: 建立 Fork + Upstream Git 仓库并同步推送 GitHub
+        result: passed
+
+  - id: stage-6
+    name: Token注入与页面全面替换
+    status: passed
+    criteria:
+      - check: 注入 --control-height-* 与 --z-* 设计 Token
+        result: passed
+      - check: 全面替换各业务页面散落组件与图标为 Base* / BaseIcon
+        result: passed
+      - check: 编写 docs/前端设计规范与Token体系手册.md
+        result: passed
+      - check: 全量 tsc -b 0 error 通过
+        result: passed
+# wjz新建文件结束。

@@ -151,6 +151,26 @@ npm run dev
 
 可按项目开发、自媒体运营、日常对话或独立站运营等场景划分工作区。每个工作区都能设置名称、图标和颜色主题；颜色支持单色或最多三色渐变，并可调整亮度和噪声。
 
+## 二次开发与工程架构体系
+
+本项目已完成高内聚、低耦合的架构治理与组件化改造，并建立了标准化开发流程体系：
+
+### 1. 核心架构与文档矩阵
+- 📘 **[二次开发快速上手指南](docs/二次开发指南.md)**：前后端解耦结构、Router 工厂模式与二开接入范式。
+- 🔄 **[上游同步与二开版本管理指南](docs/上游同步与二开版本管理指南.md)**：Fork + Upstream 双源模型、官方发版 3 步同步法与多内核沙箱隔离剖析。
+- 🎨 **[前端设计规范与 Token 体系手册](docs/前端设计规范与Token体系手册.md)**：统一控件高度（28px/34px/42px）、圆角与全局 Z-Index 防穿透规范。
+- 🧩 **[基础与复合组件库使用手册 (BASE_COMPONENTS_GUIDE)](apps/web/src/components/BASE_COMPONENTS_GUIDE.md)**：15 个 Base 原子组件、6 个 Composite 复合组件与 `BaseIcon` 统一图标中心。
+- 🚀 **[多 Agent 调度编排与飞书通道扩展方案](docs/Frakio_Work扩展改造方案_调度引擎与飞书通道.md)**：多 Agent 任务 DAG 编排与飞书 Bot 群聊接入蓝图。
+
+### 2. 标准化开发流与门禁 (.devflow)
+- 📋 **[流程状态与门禁看板 (.devflow/STATE.md)](.devflow/STATE.md)**：实时追踪 Stage 0 ~ Stage 6 的流转与门禁锁。
+- 🗂️ **[产出物索引清单 (.devflow/index/artifacts.md)](.devflow/index/artifacts.md)**：登记全阶段技术规范与源码产出。
+- 💡 **[核心经验与避坑指南 (.devflow/experience/README.md)](.devflow/experience/README.md)**：多内核隔离、路由拦截避坑与 Python Bridge 扩展实战。
+- 📝 **[阶段复盘总结报告 (.devflow/retrospective/stage-0-to-6.md)](.devflow/retrospective/stage-0-to-6.md)**：解耦重构与规范化演进全过程复盘。
+
+---
+
 ## 结尾
 
 以上是 Frakio Work 当前的主要功能和优化方向。遇到问题可添加作者微信 `MadsGao`，一起讨论后续改进。
+
