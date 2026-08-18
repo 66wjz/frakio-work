@@ -11,4 +11,5 @@
 | 归档文档 | 原始创建时间 | 归档时间 | 归档原因 | 被何文档取代/吸收 |
 | :--- | :--- | :--- | :--- | :--- |
 | **`Frakio_Work扩展改造方案_调度引擎与飞书通道.md`** | 2026-08-17 | 2026-08-18 | 早期探索性改造方案草案，其核心内容已全量结构化重构并沉淀入正式标准文档体系。 | • [`docs/需求规格.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/docs/需求规格.md)<br>• [`docs/架构设计.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/docs/架构设计.md)<br>• [`docs/系统核心流程.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/docs/系统核心流程.md) |
+| **`STATE.md`** | 2026-08-17 | 2026-08-18 | 引入 fullstack-dev-flow 前的旧临时状态看板，已被标准规范接管。 | • [`.devflow/STATE.md`](file:///e:/80-project_dev/16_frakio-work(waiting%20github%20update)/.devflow/STATE.md) |
 <!-- wjz新建文件结束。 -->
